@@ -1,3 +1,10 @@
+// Debt ledger (RUST.md "Existing code"): every workspace lint this crate still violates.
+#![expect(
+    clippy::print_stderr,
+    clippy::print_stdout,
+    missing_docs,
+    reason = "pre-standard code; cleanup tracked"
+)]
 use nv_bionic_native::{
     abi,
     rm::{Client, Error},

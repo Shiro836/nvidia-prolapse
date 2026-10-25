@@ -2,6 +2,20 @@
 //! backend and compare against a software NV12 reference.
 //! usage: nv-nvdec-probe <fixture-dir> <out-dir> [max-frames] [reference.nv12]
 //!        nv-nvdec-probe vp9 <in.ivf> <reference.nv12|-> [descriptor-dump]
+// Debt ledger (RUST.md "Existing code"): every workspace lint this crate still violates.
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::format_push_string,
+    clippy::naive_bytecount,
+    clippy::print_stderr,
+    clippy::print_stdout,
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    reason = "pre-standard code; cleanup tracked"
+)]
 use nv_bionic_native::{
     nvdec::{self, HevcFrame, HevcStream},
     rm::{Client, Error},

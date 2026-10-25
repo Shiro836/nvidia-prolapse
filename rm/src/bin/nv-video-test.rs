@@ -9,6 +9,32 @@
 //! p010le: 16-bit little-endian samples, 10 MSBs).
 //! NV_VIDEO_DUMP=<out.nv12>: also write every output picture (display order,
 //! display window, tightly packed NV12, concatenated) to that file.
+// Debt ledger (RUST.md "Existing code"): every workspace lint this crate still violates.
+#![expect(
+    clippy::as_conversions,
+    clippy::borrow_as_ptr,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::doc_markdown,
+    clippy::items_after_statements,
+    clippy::many_single_char_names,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::print_stderr,
+    clippy::print_stdout,
+    clippy::redundant_closure_for_method_calls,
+    clippy::similar_names,
+    clippy::too_many_lines,
+    clippy::undocumented_unsafe_blocks,
+    clippy::unwrap_used,
+    reason = "pre-standard code; cleanup tracked"
+)]
+#![cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "pre-standard code; cleanup tracked"
+    )
+)]
 use nv_bionic_native::video::ffi::NvVideoHdrMetadata;
 use nv_bionic_native::video::{
     CODEC_AV1, CODEC_VP9, FORMAT_NV12, FORMAT_P010, FORMAT_YUV420P, NvVideoDeviceInfo, TestDmaBuf,

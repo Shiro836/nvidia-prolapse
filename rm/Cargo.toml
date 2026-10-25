@@ -44,3 +44,6 @@ default = ["prototype-vulkan"]
 prototype-vulkan = []
 # vast.ai hardware-invariant probe only; never enabled for the NVK bridge.
 diagnostics = []
+
+[lints]
+workspace = true
