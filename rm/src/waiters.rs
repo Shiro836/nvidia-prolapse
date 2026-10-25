@@ -28,8 +28,8 @@ use crate::{
 use std::{
     os::fd::{AsRawFd, RawFd},
     sync::{
-        atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering},
         Condvar, Mutex,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence},
     },
     time::{Duration, Instant},
 };
@@ -223,8 +223,8 @@ mod tests {
     use super::*;
     use crate::rm::Error;
     use std::sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Barrier,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     };
 
     /// CPU-only "slot" and a host-side signaller using the Dekker notify.
@@ -414,9 +414,11 @@ mod tests {
     fn deadline_and_loss_end_every_waiter() {
         let fixture = Fixture::new();
         let start = Instant::now();
-        assert!(!fixture
-            .wait(5, Some(start + Duration::from_millis(30)))
-            .unwrap());
+        assert!(
+            !fixture
+                .wait(5, Some(start + Duration::from_millis(30)))
+                .unwrap()
+        );
         assert!(start.elapsed() >= Duration::from_millis(30));
         let threads: Vec<_> = (0..3)
             .map(|_| {

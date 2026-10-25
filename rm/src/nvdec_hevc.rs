@@ -262,7 +262,7 @@ fn parse_sps(r: &mut BitReader) -> Result<Sps> {
     r.u(4)?; // sps_video_parameter_set_id
     let sps_max_sub_layers_minus1 = r.u(3)?;
     r.u(1)?; // sps_temporal_id_nesting_flag
-             // 7.3.3 profile_tier_level(1, 0)
+    // 7.3.3 profile_tier_level(1, 0)
     if sps_max_sub_layers_minus1 != 0 {
         return contract(format!(
             "sps_max_sub_layers_minus1 = {sps_max_sub_layers_minus1}: sub-layers are not supported"
@@ -595,7 +595,7 @@ const fn bf(shift: u32, width: u32) -> BitField {
 
 /// Bitfields of `nvdec_hevc_pic_s` (nvdec_drv.h), by storage unit.
 pub mod fields {
-    use super::{bf, BitField};
+    use super::{BitField, bf};
     // `general_bits` (u8 at byte 64)
     pub const TILEFORMAT: BitField = bf(0, 2);
     pub const GOB_HEIGHT: BitField = bf(2, 3);

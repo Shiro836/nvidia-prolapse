@@ -35,7 +35,14 @@ impl std::fmt::Display for Error {
             Self::Io(operation, error) => write!(f, "{operation}: {error}"),
             Self::Rm { operation, status } => write!(f, "{operation}: RM status 0x{status:08x}"),
             Self::Contract(message) | Self::DeviceLost(message) => f.write_str(message),
-            Self::BarPressure { used, requested, limit } => write!(f, "BAR mapping budget exhausted: {used}+{requested} exceeds measured aperture {limit}; reduce live CPU maps or enable a larger BAR"),
+            Self::BarPressure {
+                used,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "BAR mapping budget exhausted: {used}+{requested} exceeds measured aperture {limit}; reduce live CPU maps or enable a larger BAR"
+            ),
         }
     }
 }
@@ -1132,7 +1139,9 @@ impl CpuMappingLease {
 impl Drop for CpuMappingLease {
     fn drop(&mut self) {
         if let Err(error) = self.try_unmap() {
-            diag!("NVIDIA CPU mapping cleanup failed; quarantining allocation and BAR reservation until process exit: {error}");
+            diag!(
+                "NVIDIA CPU mapping cleanup failed; quarantining allocation and BAR reservation until process exit: {error}"
+            );
             // Keep the client, device, allocation and budget alive. A destructor
             // cannot report failure or safely free/reuse these live resources.
             if let Some(resources) = self.resources.take() {
@@ -1375,7 +1384,7 @@ pub(crate) fn select_accessible_card(
                     "NVIDIA GPU {}: open /dev/nvidia{}: {e}",
                     bdf_string(card_bdf(card)),
                     card.minor
-                )))
+                )));
             }
         }
     }
@@ -1532,16 +1541,18 @@ mod budget_tests {
                 rm: true,
             };
             let mut calls = Vec::new();
-            assert!(state
-                .cleanup(|step| {
-                    calls.push(step);
-                    if step == failure {
-                        Err(Error::Contract("injected cleanup failure".into()))
-                    } else {
-                        Ok(())
-                    }
-                })
-                .is_err());
+            assert!(
+                state
+                    .cleanup(|step| {
+                        calls.push(step);
+                        if step == failure {
+                            Err(Error::Contract("injected cleanup failure".into()))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .is_err()
+            );
             assert!(
                 state.rm,
                 "RM lease remains live until its successful release"
@@ -1641,15 +1652,17 @@ mod budget_tests {
                 vma: true,
                 rm: true,
             };
-            assert!(state
-                .cleanup_owned(&mut resources, |step, _| {
-                    if step == failure {
-                        Err(Error::Contract("injected".into()))
-                    } else {
-                        Ok(())
-                    }
-                })
-                .is_err());
+            assert!(
+                state
+                    .cleanup_owned(&mut resources, |step, _| {
+                        if step == failure {
+                            Err(Error::Contract("injected".into()))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .is_err()
+            );
             assert!(resources.is_some());
             assert_eq!(drops.get(), 0);
             assert_eq!(budget.used.get(), 4096);
@@ -1884,7 +1897,9 @@ mod budget_tests {
         drop(client);
         assert_eq!(fds(), initial_fds);
         assert_eq!(vmas(), initial_vmas);
-        eprintln!("local2MiB BAR budget:8 real maps across4 VRAM allocations, active lease protected, idle data/reuse and FD/VMA cleanup verified; no global-pressure claim");
+        eprintln!(
+            "local2MiB BAR budget:8 real maps across4 VRAM allocations, active lease protected, idle data/reuse and FD/VMA cleanup verified; no global-pressure claim"
+        );
     }
     #[test]
     fn runtime_version_keeps_exact_two_or_three_components() {

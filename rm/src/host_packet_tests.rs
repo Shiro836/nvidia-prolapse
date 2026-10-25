@@ -134,7 +134,11 @@ fn public_header_semaphore_goldens() {
             let mut words = vec![0xfeedface];
             host_semaphore(&mut words, class, wide, address, value, acquire, timestamp).unwrap();
             assert_eq!(words[0], 0xfeedface);
-            assert_eq!(&words[1..],expected,"class={class:x} wide={wide} address={address:x} value={value:x} acquire={acquire} timestamp={timestamp}");
+            assert_eq!(
+                &words[1..],
+                expected,
+                "class={class:x} wide={wide} address={address:x} value={value:x} acquire={acquire} timestamp={timestamp}"
+            );
         }
     }
 }

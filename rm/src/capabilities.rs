@@ -68,7 +68,9 @@ pub(crate) fn copy_engine_parameters(
             compat.constant(&format!("NV2080_ENGINE_TYPE_COPY{i}")) == Some(engine as u64)
         });
         if is_copy && supports_class(engine)? && selected.replace(engine).is_some() {
-            return Err(Error::Contract(format!("multiple graphics copy partners advertise class {class:#x}; select a documented runqueue")));
+            return Err(Error::Contract(format!(
+                "multiple graphics copy partners advertise class {class:#x}; select a documented runqueue"
+            )));
         }
     }
     let engine_type = selected.ok_or_else(|| {
@@ -117,8 +119,11 @@ pub fn select(classes: &[u32], rm_sm: u32) -> Result<Capabilities> {
         0x807 => (87, 0xc797, 0xc7c0),
         0x809 => (89, 0xc997, 0xc9c0),
         0xa04 | 0xc00 => (120, 0xce97, 0xcec0),
-        _ => return Err(Error::Contract(format!(
-            "RM SM ISA {rm_sm:#x} has no enabled pinned Mesa frontend contract; add a sourced compiler/engine mapping before enabling this GPU"))),
+        _ => {
+            return Err(Error::Contract(format!(
+                "RM SM ISA {rm_sm:#x} has no enabled pinned Mesa frontend contract; add a sourced compiler/engine mapping before enabling this GPU"
+            )));
+        }
     };
     let eng3d = advertised(classes, &[eng3d], "3D for queried SM")?;
     let compute = advertised(classes, &[compute], "compute for queried SM")?;

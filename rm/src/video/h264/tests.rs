@@ -43,9 +43,8 @@ pub(crate) fn load_frames(text: &str) -> (Vec<Vec<u8>>, Vec<StockFrame>) {
 }
 
 pub(crate) fn evidence(name: &str) -> Vec<u8> {
-    let dir = std::env::var("NVDEC_STOCK_EVIDENCE").expect(
-        "set NVDEC_STOCK_EVIDENCE=<stock captures dir> for the stock comparison",
-    );
+    let dir = std::env::var("NVDEC_STOCK_EVIDENCE")
+        .expect("set NVDEC_STOCK_EVIDENCE=<stock captures dir> for the stock comparison");
     std::fs::read(format!("{dir}/{name}")).unwrap_or_else(|e| panic!("{dir}/{name}: {e}"))
 }
 

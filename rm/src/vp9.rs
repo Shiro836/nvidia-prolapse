@@ -478,11 +478,7 @@ impl Vp9State {
         // 2 are 4:2:0 for every colour space but RGB (which is 4:4:4, profiles 1/3 only).
         let color = |r: &mut BitReader| -> Result<(u32, bool, u32)> {
             let bit_depth = if profile >= 2 {
-                if r.bit()? != 0 {
-                    12
-                } else {
-                    10
-                }
+                if r.bit()? != 0 { 12 } else { 10 }
             } else {
                 8
             };

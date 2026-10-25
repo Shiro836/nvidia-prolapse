@@ -41,8 +41,8 @@ use std::{
     collections::BTreeMap,
     os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd},
     sync::{
-        atomic::{AtomicI32, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
+        atomic::{AtomicI32, AtomicU64, Ordering},
     },
 };
 
@@ -642,7 +642,7 @@ impl SyncObj {
             Payload::Foreign(_) => {
                 return Err(Error::Contract(
                     "sync_file payload cannot be exported as opaque payload".into(),
-                ))
+                ));
             }
             Payload::Native(slot) => *slot,
         };
@@ -784,7 +784,7 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slots::{tests::HostPages, TimelineView};
+    use crate::slots::{TimelineView, tests::HostPages};
     use std::os::fd::AsFd;
 
     fn fresh(pool: &Arc<SlotPool>) -> Slot {
@@ -1051,9 +1051,10 @@ mod tests {
         assert_eq!(pool.refs(local), 0, "source done at its last pending value");
         assert!(!shared.has_local_work());
         // Invalid import is transactional.
-        assert!(sync
-            .import_opaque(SyncMemory::new_cpu().unwrap().export().unwrap().as_fd())
-            .is_err());
+        assert!(
+            sync.import_opaque(SyncMemory::new_cpu().unwrap().export().unwrap().as_fd())
+                .is_err()
+        );
         assert_eq!(sync.value().unwrap().0, 7);
     }
     #[test]

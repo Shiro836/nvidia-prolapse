@@ -98,8 +98,14 @@ fn dump_jobs() {
                 std::fs::write(format!("{out}/{name}_{n:03}.bits"), &job.bitstream).unwrap();
                 summary += &format!(
                     "{n} slot={} cdf_r={} cdf_w={} default={:?} refs={:?} colmv={:?} seg={:?} grain={}\n",
-                    job.slot, job.cdf_read, job.cdf_write, job.cdf_default_qctx, job.ref_slots, job.colmv_reads,
-                    job.seg_read, job.apply_grain
+                    job.slot,
+                    job.cdf_read,
+                    job.cdf_write,
+                    job.cdf_default_qctx,
+                    job.ref_slots,
+                    job.colmv_reads,
+                    job.seg_read,
+                    job.apply_grain
                 );
                 n += 1;
             }
@@ -150,7 +156,7 @@ struct SessionRun {
 /// film-grain state.
 fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
     use crate::video::{
-        session::unit_admitted, Allocator, BuildContext, CodecDecoder, Job, SurfaceRef, VResult,
+        Allocator, BuildContext, CodecDecoder, Job, SurfaceRef, VResult, session::unit_admitted,
     };
     struct Mock(u64);
     impl Allocator for Mock {
@@ -378,7 +384,10 @@ fn superres_geometry_and_motion_field_gate() {
         ..rec
     };
     let (mf2, _) = mf::select(&seq, &cur2, &[Some(rec2); 7], &[None; 7]);
-    assert!(mf2.mf_type[0] != 0, "a same-size reference must be a candidate");
+    assert!(
+        mf2.mf_type[0] != 0,
+        "a same-size reference must be a candidate"
+    );
 }
 
 /// Large-scale tile (OBU_TILE_LIST, type 8) is still refused loudly: NVDEC

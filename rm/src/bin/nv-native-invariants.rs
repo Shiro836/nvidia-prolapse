@@ -98,7 +98,12 @@ fn caps() -> (bool, String) {
         }
     };
     if cards.is_empty() {
-        return (false, format!("{{{head},\"verdict\":\"fail\",\"stage\":\"cards\",\"error\":\"RM enumerated no NVIDIA GPU\"}}"));
+        return (
+            false,
+            format!(
+                "{{{head},\"verdict\":\"fail\",\"stage\":\"cards\",\"error\":\"RM enumerated no NVIDIA GPU\"}}"
+            ),
+        );
     }
     let mut ok = true;
     let mut out = Vec::new();

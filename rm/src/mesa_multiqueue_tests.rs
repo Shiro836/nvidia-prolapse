@@ -18,8 +18,18 @@ const TARGET: Duration = Duration::from_millis(120);
 
 fn open() -> Box<Bridge> {
     let client = Client::open().unwrap();
-    let card = client.cards().unwrap().into_iter().next().expect("NVIDIA RM GPU");
-    let pci = [card.pci.domain, card.pci.bus as u32, card.pci.slot as u32, card.pci.function as u32];
+    let card = client
+        .cards()
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("NVIDIA RM GPU");
+    let pci = [
+        card.pci.domain,
+        card.pci.bus as u32,
+        card.pci.slot as u32,
+        card.pci.function as u32,
+    ];
     Box::new(Bridge::new(pci).unwrap().0)
 }
 fn context(b: &mut Bridge, engines: u32, share: Option<u64>) -> u64 {
@@ -84,11 +94,29 @@ impl Work {
         constants[8..12].copy_from_slice(&((INVOCATIONS * 4) as u32).to_le_bytes());
         constants[1024..1028].copy_from_slice(&iters.to_le_bytes());
         constants[1028..1032].copy_from_slice(&seed.to_le_bytes());
-        let job = ComputeJob::compiled(device, space, done_va.address(), program, &constants, [GROUPS, 1, 1]).unwrap();
+        let job = ComputeJob::compiled(
+            device,
+            space,
+            done_va.address(),
+            program,
+            &constants,
+            [GROUPS, 1, 1],
+        )
+        .unwrap();
         let mut words = Vec::new();
         crate::gpu::method(&mut words, 1, 0, &[compute]); // SET_OBJECT
-        crate::gpu::method(&mut words, 1, 0x7b0, &crate::gpu::hi_lo(crate::compute::LOCAL_WINDOW));
-        crate::gpu::method(&mut words, 1, 0x2a0, &crate::gpu::hi_lo(crate::compute::SHARED_WINDOW));
+        crate::gpu::method(
+            &mut words,
+            1,
+            0x7b0,
+            &crate::gpu::hi_lo(crate::compute::LOCAL_WINDOW),
+        );
+        crate::gpu::method(
+            &mut words,
+            1,
+            0x2a0,
+            &crate::gpu::hi_lo(crate::compute::SHARED_WINDOW),
+        );
         crate::gpu::method(&mut words, 1, 0x2b4, &[(job.address >> 8) as u32]); // SEND_PCAS_A
         crate::gpu::method(&mut words, 1, 0x2c0, &[9]); // SEND_SIGNALING_PCAS2_B: invalidate + schedule
         let push_mem = device.allocate_aligned(4096, 4096, false, true).unwrap();
@@ -141,13 +169,26 @@ fn run(b: &mut Bridge, set: &mut [(u64, &mut Work)]) -> Duration {
     for (ctx, w) in set.iter() {
         let mut token = 0;
         let status = unsafe {
-            nv_rm_submit_batch(b, *ctx, &w.push, 1, std::ptr::null(), 0, std::ptr::null(), 0, &mut token)
+            nv_rm_submit_batch(
+                b,
+                *ctx,
+                &w.push,
+                1,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                &mut token,
+            )
         };
         assert_eq!(status, 0);
         tokens.push((*ctx, token));
     }
     for (ctx, token) in tokens {
-        assert!(b.wait_token(ctx, token, 10_000_000_000).unwrap(), "context {ctx} did not complete in 10 s");
+        assert!(
+            b.wait_token(ctx, token, 10_000_000_000).unwrap(),
+            "context {ctx} did not complete in 10 s"
+        );
     }
     let elapsed = start.elapsed();
     for (_, w) in set.iter() {
@@ -196,7 +237,10 @@ fn shared_tsg_contexts_run_concurrently() {
     // Non-compute engines on a shared context are refused with a reason,
     // and the refusal leaves the device usable.
     let mut refused = 0;
-    assert_ne!(unsafe { nv_rm_context_create_shared(b, 4 | 16, owner, &mut refused) }, 0);
+    assert_ne!(
+        unsafe { nv_rm_context_create_shared(b, 4 | 16, owner, &mut refused) },
+        0
+    );
     assert!(!b.core.is_lost());
 
     // Calibrate the iteration count for TARGET on the owner context alone.
@@ -204,8 +248,12 @@ fn shared_tsg_contexts_run_concurrently() {
     let mut probe = Work::new(b, &program, probe_iters, 0x1234);
     run(b, &mut [(owner, &mut probe)]);
     let t = run(b, &mut [(owner, &mut probe)]);
-    let iters = ((f64::from(probe_iters) * TARGET.as_secs_f64() / t.as_secs_f64()) as u32).clamp(1 << 16, 1 << 28);
-    println!("calibration: {probe_iters} iterations {:.2} ms -> {iters} iterations", ms(t));
+    let iters = ((f64::from(probe_iters) * TARGET.as_secs_f64() / t.as_secs_f64()) as u32)
+        .clamp(1 << 16, 1 << 28);
+    println!(
+        "calibration: {probe_iters} iterations {:.2} ms -> {iters} iterations",
+        ms(t)
+    );
     drop(probe);
 
     let mut wa = Work::new(b, &program, iters, 0x1000_0000);
@@ -228,10 +276,22 @@ fn shared_tsg_contexts_run_concurrently() {
     let separate_factor = (ta + tc).as_secs_f64() / tac.as_secs_f64();
     println!(
         "alone: A {:.2} ms, B (shared TSG) {:.2} ms, C (own TSG) {:.2} ms; A+B one TSG {:.2} ms (overlap {:.2}x); A+C two TSGs {:.2} ms (overlap {:.2}x)",
-        ms(ta), ms(tb), ms(tc), ms(tab), shared_factor, ms(tac), separate_factor
+        ms(ta),
+        ms(tb),
+        ms(tc),
+        ms(tab),
+        shared_factor,
+        ms(tac),
+        separate_factor
     );
-    assert!(shared_factor > 1.6, "one TSG did not run the two contexts concurrently");
-    assert!(separate_factor < 1.25, "two TSGs overlapped: the control does not time-slice");
+    assert!(
+        shared_factor > 1.6,
+        "one TSG did not run the two contexts concurrently"
+    );
+    assert!(
+        separate_factor < 1.25,
+        "two TSGs overlapped: the control does not time-slice"
+    );
 
     // The owner goes first; its TSG, VEID 0 share and ZCULL buffer stay alive
     // for the shared context, which keeps working; VEID 0 is not handed out

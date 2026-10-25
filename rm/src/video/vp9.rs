@@ -21,13 +21,13 @@
 //! 3 and 5). Engine work is ordered by submission, so the CPU never touches
 //! the maps after creation.
 use super::{
-    BuildContext, CodecDecoder, DecodeJob, Job, NvdecGen, PictureInfo, VResult, VideoError,
-    CODEC_VP9,
+    BuildContext, CODEC_VP9, CodecDecoder, DecodeJob, Job, NvdecGen, PictureInfo, VResult,
+    VideoError,
 };
 use crate::{
     gpu::method,
     nvdec_drv::{Pod, Vp9Dims, Vp9EntropyCounts, Vp9PicS},
-    vp9::{split_superframe, tile_sizes, FrameHeader, Vp9State, KEY_FRAME},
+    vp9::{FrameHeader, KEY_FRAME, Vp9State, split_superframe, tile_sizes},
 };
 use std::collections::VecDeque;
 
@@ -621,7 +621,7 @@ mod tests {
             Err(VideoError::Unsupported(_))
         ));
         assert_eq!(d.surfaces_needed(&[0x88]).unwrap(), 0); // show_existing
-                                                            // Profile 2 (10-bit) only in a 10-bit session; profile 1 (4:4:4) never.
+        // Profile 2 (10-bit) only in a 10-bit session; profile 1 (4:4:4) never.
         let d10 = Vp9Decoder::new(0xcfb0, 640, 480, 10);
         assert_eq!(d10.surfaces_needed(&[0x92, 0, 0]).unwrap(), 1);
         assert_eq!(d10.surfaces_needed(&[0x98]).unwrap(), 0); // show_existing

@@ -45,16 +45,22 @@ impl<M> Slot<M> {
         // Drop unlinks before dropping Mapping, which can release the final
         // Device/registry owner. Weak neighbors never extend buffer lifetime.
         if let Some(registry) = self.registry.upgrade() {
-            match links.previous.upgrade() { Some(previous) => {
-                previous.links.borrow_mut().next = links.next.clone();
-            } _ => {
-                registry.ends.borrow_mut().head = links.next.clone();
-            }}
-            match links.next.upgrade() { Some(next) => {
-                next.links.borrow_mut().previous = links.previous;
-            } _ => {
-                registry.ends.borrow_mut().tail = links.previous;
-            }}
+            match links.previous.upgrade() {
+                Some(previous) => {
+                    previous.links.borrow_mut().next = links.next.clone();
+                }
+                _ => {
+                    registry.ends.borrow_mut().head = links.next.clone();
+                }
+            }
+            match links.next.upgrade() {
+                Some(next) => {
+                    next.links.borrow_mut().previous = links.previous;
+                }
+                _ => {
+                    registry.ends.borrow_mut().tail = links.previous;
+                }
+            }
         }
     }
     fn enqueue_idle(&self) {
@@ -63,11 +69,14 @@ impl<M> Slot<M> {
             return;
         };
         let tail = registry.ends.borrow().tail.clone();
-        match tail.upgrade() { Some(previous) => {
-            previous.links.borrow_mut().next = self.identity.clone();
-        } _ => {
-            registry.ends.borrow_mut().head = self.identity.clone();
-        }}
+        match tail.upgrade() {
+            Some(previous) => {
+                previous.links.borrow_mut().next = self.identity.clone();
+            }
+            _ => {
+                registry.ends.borrow_mut().head = self.identity.clone();
+            }
+        }
         *self.links.borrow_mut() = Links {
             previous: tail,
             next: Weak::new(),
@@ -328,18 +337,20 @@ mod tests {
     fn failed_map_and_reference_overflow_do_not_publish_a_logical_map() {
         let registry = Rc::new(Registry::<Fake>::default());
         let slot = registry.slot();
-        assert!(slot
-            .acquire(
+        assert!(
+            slot.acquire(
                 || Err(Error::Contract("injected map failure".into())),
                 |_| ()
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(slot.refs(), 0);
         assert!(slot.entry.borrow().mapping.is_none());
         slot.entry.borrow_mut().refs = u32::MAX;
-        assert!(slot
-            .acquire(|| panic!("overflow must reject before allocation"), |_| ())
-            .is_err());
+        assert!(
+            slot.acquire(|| panic!("overflow must reject before allocation"), |_| ())
+                .is_err()
+        );
         assert_eq!(slot.refs(), u32::MAX);
     }
     #[test]

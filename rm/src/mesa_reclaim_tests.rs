@@ -11,7 +11,7 @@ use super::*;
 use std::{
     fs::{File, OpenOptions},
     os::fd::{AsRawFd, FromRawFd},
-    sync::{atomic::AtomicU32, mpsc, Barrier},
+    sync::{Barrier, atomic::AtomicU32, mpsc},
     thread,
     time::Duration,
 };
@@ -1120,7 +1120,9 @@ fn sync_fd_export_never_returns_an_unsignalable_fence() {
     drop(bridge);
     drop(drm);
     assert_eq!(fd_count(), before);
-    println!("PASS: export without submitted signal rejected; signalled -> -1; submitted -> signalling fence");
+    println!(
+        "PASS: export without submitted signal rejected; signalled -> -1; submitted -> signalling fence"
+    );
 }
 
 /// Every accepted batch must execute without a later doorbell. Each worker

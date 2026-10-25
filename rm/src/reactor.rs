@@ -228,9 +228,11 @@ mod tests {
         let capacity = readiness.fds.capacity();
         // RC remains readable, but removing its watch must remove its old
         // revents too. Reusing scratch is not retaining a descriptor owner.
-        assert!(!readiness
-            .dispatch(&[job.as_raw_fd()], devices, false)
-            .unwrap());
+        assert!(
+            !readiness
+                .dispatch(&[job.as_raw_fd()], devices, false)
+                .unwrap()
+        );
         assert!(!readiness.dispatch(&[], devices, false).unwrap());
         rc.drain().unwrap();
         host.notify().unwrap();

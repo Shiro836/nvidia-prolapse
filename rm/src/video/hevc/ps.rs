@@ -1,7 +1,7 @@
 //! HEVC parameter sets (H.265 7.3.2.2 SPS, 7.3.2.3 PPS, 7.3.4 scaling_list_data, 7.3.7
 //! st_ref_pic_set) with the derived values the descriptor needs.
 use crate::video::bits::BitReader;
-use crate::video::{bitstream, unsupported, VResult};
+use crate::video::{VResult, bitstream, unsupported};
 
 /// Short-term RPS after 7.4.8 derivation: deltas relative to the current POC.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

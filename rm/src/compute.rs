@@ -71,7 +71,9 @@ impl ComputeJob {
         }
         let sm = device.sm_version()?;
         if sm != 0xa04 {
-            return Err(Error::Contract(format!("native shader backend requires RM SM version 0xa04, got {sm:#x}; compile and validate the matching shader/QMD first")));
+            return Err(Error::Contract(format!(
+                "native shader backend requires RM SM version 0xa04, got {sm:#x}; compile and validate the matching shader/QMD first"
+            )));
         }
         let code = device.allocate_vram(program.code.len().next_multiple_of(4096) + 4096)?; // Extra mapped page for instruction prefetch.
         let descriptor = device.allocate_vram(4096)?;

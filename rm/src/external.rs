@@ -273,7 +273,7 @@ pub(crate) fn import(
             other => {
                 return Err(Error::Contract(format!(
                     "unsupported external DRM GEM type {other}"
-                )))
+                )));
             }
         }
     } else {
@@ -428,7 +428,11 @@ mod tests {
             assert_eq!(target_map.read_u32(0).unwrap(), 0xfeedcafe);
             target_map.write_u32(0, 0x10203040).unwrap();
             assert_eq!(target_map.read_u32(0).unwrap(), 0x10203040);
-            eprintln!("SYS opaque FD PASS: driver {version}, device {:04x}, bytes {size}, source_dies_before_import={source_dies_first}, target GPU VA {:#x}", card.pci.device, target_gpu_map.address());
+            eprintln!(
+                "SYS opaque FD PASS: driver {version}, device {:04x}, bytes {size}, source_dies_before_import={source_dies_first}, target GPU VA {:#x}",
+                card.pci.device,
+                target_gpu_map.address()
+            );
             drop((
                 target_gpu_map,
                 target_va,

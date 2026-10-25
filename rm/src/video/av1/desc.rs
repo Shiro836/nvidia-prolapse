@@ -5,7 +5,7 @@
 //! (bit offset, width). Values follow the AV1 spec semantics; where the value convention is NVDEC-specific
 //! (constants, packing, enum remaps) it was matched against stock descriptors captured on an RTX 5090.
 
-use super::header::{get_relative_dist, FrameHeader, SequenceHeader, TileRange, GM_IDENTITY};
+use super::header::{FrameHeader, GM_IDENTITY, SequenceHeader, TileRange, get_relative_dist};
 
 pub const PIC_S_SIZE: usize = 572;
 pub const DESC_TILE_INFO: usize = 0x300;

@@ -309,7 +309,7 @@ impl Compat {
                 return Err(self.unsupported(
                     &format!("control {command:#x}"),
                     "not in implemented command table",
-                ))
+                ));
             }
         };
         self.require_constant(constant, command as u64)?;
@@ -354,13 +354,13 @@ impl Compat {
             | 0xcec0
                 if size == 0 =>
             {
-                return Ok(None)
+                return Ok(None);
             }
             _ => {
                 return Err(self.unsupported(
                     &format!("class {class:#x}"),
                     "nonempty allocation payload not implemented",
-                ))
+                ));
             }
         };
         self.layout(name)?;
@@ -1020,9 +1020,10 @@ mod tests {
             ] {
                 alloc!(class, abi::CopyEngine::default());
                 // The layout must never permit a parameterless CE allocation.
-                assert!(c
-                    .pack(c.allocation_layout(class, 0).unwrap().unwrap(), &())
-                    .is_err());
+                assert!(
+                    c.pack(c.allocation_layout(class, 0).unwrap().unwrap(), &())
+                        .is_err()
+                );
             }
             c.pack("NVOS34_PARAMETERS", &abi::UnmapMemory::default())
                 .unwrap();
@@ -1115,21 +1116,27 @@ mod tests {
         assert!(Compat::for_version("580.94.13").is_ok());
         assert!(Compat::for_version("580.94.14").is_err());
         assert!(Compat::for_version("615.999").is_err());
-        assert!(Compat::for_version("470.256.02")
-            .unwrap()
-            .require_client_abi()
-            .is_err());
-        assert!(Compat::for_version("615.71.09")
-            .unwrap()
-            .require_client_abi()
-            .is_ok());
+        assert!(
+            Compat::for_version("470.256.02")
+                .unwrap()
+                .require_client_abi()
+                .is_err()
+        );
+        assert!(
+            Compat::for_version("615.71.09")
+                .unwrap()
+                .require_client_abi()
+                .is_ok()
+        );
         // Published OGKM releases probed like every other tag; each must
         // resolve to its measured profile, not to a neighbour's.
         for version in ["580.196.07", "595.44.16", "595.112.07", "615.71.10"] {
-            assert!(Compat::for_version(version)
-                .unwrap()
-                .require_client_abi()
-                .is_ok());
+            assert!(
+                Compat::for_version(version)
+                    .unwrap()
+                    .require_client_abi()
+                    .is_ok()
+            );
         }
     }
     #[test]
@@ -1192,15 +1199,16 @@ mod tests {
             assert_eq!(out.engine, p.engine);
         }
         let c = Compat::for_version("580.178.04").unwrap();
-        assert!(c
-            .pack(
+        assert!(
+            c.pack(
                 "NV_CHANNELGPFIFO_ALLOCATION_PARAMETERS",
                 &abi::Channel {
                     handle_vaspace: 1,
                     ..Default::default()
                 }
             )
-            .is_err());
+            .is_err()
+        );
     }
     #[test]
     fn schedule_and_kind_and_map_status_follow_exact_schemas() {
@@ -1214,33 +1222,36 @@ mod tests {
                 .len(),
             2
         );
-        assert!(old
-            .pack("NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS", &[1u8, 0, 1])
-            .is_err());
-        assert!(old
-            .pack(
+        assert!(
+            old.pack("NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS", &[1u8, 0, 1])
+                .is_err()
+        );
+        assert!(
+            old.pack(
                 "NVOS46_PARAMETERS",
                 &abi::MapDma {
                     kind: 6,
                     ..Default::default()
                 }
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(
             old.pack("NVOS47_PARAMETERS", &abi::UnmapDma::default())
                 .unwrap()
                 .len(),
             40
         );
-        assert!(old
-            .pack(
+        assert!(
+            old.pack(
                 "NVOS47_PARAMETERS",
                 &abi::UnmapDma {
                     size: 4096,
                     ..Default::default()
                 }
             )
-            .is_err());
+            .is_err()
+        );
         let mut p = abi::MapDma::default();
         let mut w = old.pack("NVOS46_PARAMETERS", &p).unwrap();
         w.bytes[40..48].copy_from_slice(&0x12345678000u64.to_ne_bytes());
@@ -1301,15 +1312,16 @@ mod tests {
                 .len(),
             120
         );
-        assert!(old
-            .pack(
+        assert!(
+            old.pack(
                 "NV_MEMORY_ALLOCATION_PARAMS",
                 &abi::MemoryAlloc {
                     numa_node: 2,
                     ..Default::default()
                 }
             )
-            .is_err());
+            .is_err()
+        );
     }
     #[test]
     fn array_backed_controls_decode_public_named_fields() {

@@ -26,7 +26,7 @@ use crate::{
     gpu::{AddressSpace, GpuMapping, Push, Queue, QueueShared, SemaphoreOp, SubmitStatus},
     reclaim::Reclaim,
     rm::{Client, Device, Error, Mapping, Memory, Result},
-    slots::{Slot, SlotPool, TimelineView, PAGE_BYTES},
+    slots::{PAGE_BYTES, Slot, SlotPool, TimelineView},
     syncobj::{Foreign, Shared, SignalPlan, SyncObj, WaitPlan},
     waiters::Waiters,
     watcher::Watcher,
@@ -37,8 +37,8 @@ use std::{
     os::fd::{AsRawFd, BorrowedFd, IntoRawFd, OwnedFd, RawFd},
     rc::Rc,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -347,9 +347,8 @@ impl Bridge {
             epoch: Instant::now(),
             devices: (events.as_raw_fd(), events.error_fd()),
         });
-        let capture = crate::capture::config().map(|c| {
-            crate::capture::Capture::new(c, (pci[1] << 8 | pci[2]) as usize)
-        });
+        let capture = crate::capture::config()
+            .map(|c| crate::capture::Capture::new(c, (pci[1] << 8 | pci[2]) as usize));
         let bridge = Self {
             core,
             capture: std::sync::atomic::AtomicBool::new(capture.is_some()),
@@ -900,7 +899,11 @@ impl Bridge {
                         inner,
                         context,
                         pushes,
-                        [waits.len() as u32, foreign.len() as u32, signals.len() as u32],
+                        [
+                            waits.len() as u32,
+                            foreign.len() as u32,
+                            signals.len() as u32,
+                        ],
                         token,
                     );
                 }
@@ -1196,7 +1199,9 @@ impl Bridge {
                         // captured slot, so any later signal lands elsewhere
                         // and the exported fence would never signal. Fail
                         // loudly instead of handing out a dead fence.
-                        diag!("nvk Rust RM: SYNC_FD export of an unsignaled binary payload with no submitted signal");
+                        diag!(
+                            "nvk Rust RM: SYNC_FD export of an unsignaled binary payload with no submitted signal"
+                        );
                         return Err(Error::Contract(
                             "SYNC_FD export without a submitted signal operation".into(),
                         ));
@@ -1254,7 +1259,7 @@ impl Bridge {
                         return Err(Error::Io(
                             "external fence export capacity exhausted",
                             std::io::Error::from_raw_os_error(12),
-                        ))
+                        ));
                     }
                     Err(error) => return Err(error),
                 };
@@ -1436,7 +1441,9 @@ fn capture_submit(inner: &mut Inner, context: u64, pushes: &[Push], counts: [u32
     let device = &inner.device;
     let active = cap.active(|| {
         let mut time = 0u64;
-        let _ = device.client.control(device.subdevice, 0x20800403, &mut time);
+        let _ = device
+            .client
+            .control(device.subdevice, 0x20800403, &mut time);
         time
     });
     let mut times = Vec::new();
@@ -1820,11 +1827,7 @@ fn status_of(result: Result<SubmitStatus>, out: *mut u64) -> i32 {
         };
         unsafe { output(out, token) }
     })());
-    if code == 0 {
-        status
-    } else {
-        code
-    }
+    if code == 0 { status } else { code }
 }
 
 #[unsafe(no_mangle)]
@@ -2327,11 +2330,7 @@ pub unsafe extern "C" fn nv_rm_wait(p: *mut Bridge, id: u64, token: u64, timeout
             b.reclaim_try();
             Ok(())
         })());
-        if result == 0 {
-            status
-        } else {
-            result
-        }
+        if result == 0 { status } else { result }
     })
 }
 #[unsafe(no_mangle)]
@@ -2366,18 +2365,20 @@ pub unsafe extern "C" fn nv_rm_exec(
     pushes: *const Push,
     count: u32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || loop {
-        let mut token = 0;
-        let result = unsafe { nv_rm_submit(p, id, pushes, count, &mut token) };
-        if result != 0 && result != 1 {
-            return result;
-        }
-        let wait = unsafe { nv_rm_wait(p, id, token, u64::MAX) };
-        if wait != 0 {
-            return wait;
-        }
-        if result == 0 {
-            return 0;
+    ffi(p as *const Bridge, move || {
+        loop {
+            let mut token = 0;
+            let result = unsafe { nv_rm_submit(p, id, pushes, count, &mut token) };
+            if result != 0 && result != 1 {
+                return result;
+            }
+            let wait = unsafe { nv_rm_wait(p, id, token, u64::MAX) };
+            if wait != 0 {
+                return wait;
+            }
+            if result == 0 {
+                return 0;
+            }
         }
     })
 }

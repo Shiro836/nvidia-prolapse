@@ -1,7 +1,7 @@
 //! H.264 slice header (7.3.3) up to and including dec_ref_pic_marking(). The engine parses the
 //! slice header again itself (NEW_H264 takes the Annex-B slices verbatim); we need it for POC,
 //! frame_num, reference marking and the picture-level flags.
-use super::super::{bits::BitReader, bitstream, unsupported, VResult};
+use super::super::{VResult, bits::BitReader, bitstream, unsupported};
 use super::ps::{Pps, Sps};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

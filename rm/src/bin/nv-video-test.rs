@@ -11,8 +11,8 @@
 //! display window, tightly packed NV12, concatenated) to that file.
 use nv_bionic_native::video::ffi::NvVideoHdrMetadata;
 use nv_bionic_native::video::{
-    ffi::*, NvVideoDeviceInfo, TestDmaBuf, VideoDevice, CODEC_AV1, CODEC_VP9, FORMAT_NV12,
-    FORMAT_P010, FORMAT_YUV420P,
+    CODEC_AV1, CODEC_VP9, FORMAT_NV12, FORMAT_P010, FORMAT_YUV420P, NvVideoDeviceInfo, TestDmaBuf,
+    VideoDevice, ffi::*,
 };
 use std::time::{Duration, Instant};
 

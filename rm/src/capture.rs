@@ -213,7 +213,10 @@ pub(crate) fn config() -> Option<Config> {
 enum State {
     /// Last check of the go file (None: check at the next submit).
     Armed(Option<Instant>),
-    Active { since: Instant, frames: u32 },
+    Active {
+        since: Instant,
+        frames: u32,
+    },
     Done,
 }
 
@@ -316,7 +319,10 @@ impl Capture {
                         true
                     }
                     Err(e) => {
-                        crate::diag::diag!("nvk Rust RM capture: cannot create {}: {e}", path.display());
+                        crate::diag::diag!(
+                            "nvk Rust RM capture: cannot create {}: {e}",
+                            path.display()
+                        );
                         self.state = State::Done;
                         false
                     }
@@ -424,7 +430,11 @@ impl Capture {
         }
         // Re-arm: the next capture starts when `go` is created again.
         let _ = std::fs::remove_file(self.config.dir.join("go"));
-        self.state = if reason == 2 { State::Done } else { State::Armed(None) };
+        self.state = if reason == 2 {
+            State::Done
+        } else {
+            State::Armed(None)
+        };
         crate::diag::diag!("nvk Rust RM capture finished (reason {reason})");
     }
     pub(crate) fn is_active(&self) -> bool {

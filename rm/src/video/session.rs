@@ -13,17 +13,17 @@
 //!   copy engine understands through SET_SRC_BLOCK_SIZE.GOB_KIND (measured
 //!   2026-10-14, see video/README.md).
 use super::{
-    channel::{wait_sync_file, NvdecChannel},
+    Allocator, BuildContext, CodecDecoder, DecodeJob, FORMAT_NV12, FORMAT_P010, FORMAT_YUV420P,
+    Job, NvdecGen, PictureInfo, SurfaceLayout, SurfaceRef, VResult, VideoDevice, VideoError,
+    channel::{NvdecChannel, wait_sync_file},
     hdr::HdrStaticMetadata,
-    open_render_node, open_rm, Allocator, BuildContext, CodecDecoder, DecodeJob, Job, NvdecGen,
-    PictureInfo, SurfaceLayout, SurfaceRef, VResult, VideoDevice, VideoError, FORMAT_NV12,
-    FORMAT_P010, FORMAT_YUV420P,
+    open_render_node, open_rm,
 };
 use crate::{
     events::RmEvents,
-    gpu::{method, AddressSpace, GpuMapping, Push, Queue, SemaphoreOp, SubmitStatus},
+    gpu::{AddressSpace, GpuMapping, Push, Queue, SemaphoreOp, SubmitStatus, method},
     rm::{Device, Mapping, Memory},
-    slots::{SlotPool, TimelineView, PAGE_BYTES},
+    slots::{PAGE_BYTES, SlotPool, TimelineView},
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -772,24 +772,27 @@ impl Session {
         // The engine writes 10-bit pictures in 16-bit containers with the sample in the 10 MSBs
         // (P010 bit layout, measured: the copy of the engine surface is bit-exact against FFmpeg's
         // p010le), so P010 is a plain copy like NV12; no depth conversion in either direction.
-        let bps =
-            match (t.format, info.bit_depth) {
-                (FORMAT_NV12 | FORMAT_YUV420P, 8) => 1u32,
-                (FORMAT_P010, 10) => 2u32,
-                (FORMAT_YUV420P, d) => {
-                    return Err(VideoError::Unsupported(format!(
-                        "planar YUV 4:2:0 target for a {d}-bit picture (8-bit only)"
-                    )))
-                }
-                (FORMAT_NV12 | FORMAT_P010, d) => {
-                    return Err(VideoError::Unsupported(format!(
+        let bps = match (t.format, info.bit_depth) {
+            (FORMAT_NV12 | FORMAT_YUV420P, 8) => 1u32,
+            (FORMAT_P010, 10) => 2u32,
+            (FORMAT_YUV420P, d) => {
+                return Err(VideoError::Unsupported(format!(
+                    "planar YUV 4:2:0 target for a {d}-bit picture (8-bit only)"
+                )));
+            }
+            (FORMAT_NV12 | FORMAT_P010, d) => {
+                return Err(VideoError::Unsupported(format!(
                     "{} target for a {d}-bit picture (NV12 carries 8-bit, P010 10-bit pictures; \
                      the copy engine does not convert depth)",
-                    if t.format == FORMAT_NV12 { "NV12" } else { "P010" }
-                )))
-                }
-                (f, _) => return Err(VideoError::Invalid(format!("unknown target format {f}"))),
-            };
+                    if t.format == FORMAT_NV12 {
+                        "NV12"
+                    } else {
+                        "P010"
+                    }
+                )));
+            }
+            (f, _) => return Err(VideoError::Invalid(format!("unknown target format {f}"))),
+        };
         if bps != self.layout.bytes_per_sample {
             return Err(VideoError::Invalid(format!(
                 "{}-bit picture on {}-byte engine surfaces",
@@ -1117,7 +1120,7 @@ impl TargetLayout {
                 return Err(VideoError::Unsupported(format!(
                     "modifier {:#x}: GOB generation {g} not writable by copy class {copy_class:#x}",
                     t.modifier
-                )))
+                )));
             }
         };
         Ok(Self {
@@ -1127,11 +1130,7 @@ impl TargetLayout {
         })
     }
     fn planes(&self) -> usize {
-        if self.planar {
-            3
-        } else {
-            2
-        }
+        if self.planar { 3 } else { 2 }
     }
     fn plane_bytes(&self, p: usize, rows: u32, width: u32, bps: u32) -> u64 {
         let line = if p == 0 {
@@ -1170,10 +1169,12 @@ mod tests {
         let bl = |c: u64, s: u64, g: u64, k: u64, h: u64| {
             0x03 << 56 | 0x10 | h | k << 12 | g << 20 | s << 22 | c << 23
         };
-        assert!(TargetLayout::parse(&target(0), 0xcab5, 1)
-            .unwrap()
-            .block
-            .is_none());
+        assert!(
+            TargetLayout::parse(&target(0), 0xcab5, 1)
+                .unwrap()
+                .block
+                .is_none()
+        );
         let t = TargetLayout::parse(&target(bl(0, 1, 3, 0xfe, 4)), 0xcab5, 1).unwrap();
         assert_eq!(t.block, Some((4, [1, 2])));
         // P010 (2-byte samples) block-linear: verified end to end nowhere, refused with the
@@ -1247,7 +1248,7 @@ mod tests {
     /// stream cases, see `skipped_rasl_units_produce_no_picture`).
     #[test]
     fn parameter_set_unit_produces_no_picture() {
-        use super::super::{bits, pretend, CODEC_HEVC};
+        use super::super::{CODEC_HEVC, bits, pretend};
         let stream: &[u8] = include_bytes!("testdata/hevc_160x144.hevc");
         let aus = bits::access_units(stream, true);
         let mut ps = Vec::new();
@@ -1275,7 +1276,7 @@ mod tests {
     #[test]
     #[ignore = "needs NVDEC_STOCK_EVIDENCE (streams/x265-opengop.hevc)"]
     fn skipped_rasl_units_produce_no_picture() {
-        use super::super::{bits, pretend, CODEC_HEVC};
+        use super::super::{CODEC_HEVC, bits, pretend};
         let dir = std::env::var("NVDEC_STOCK_EVIDENCE")
             .expect("NVDEC_STOCK_EVIDENCE=<stock captures dir>");
         let stream = std::fs::read(format!("{dir}/streams/x265-opengop.hevc")).unwrap();

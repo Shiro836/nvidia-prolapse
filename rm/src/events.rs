@@ -142,7 +142,7 @@ fn rc_index(compat: Compat, class: u32) -> Result<u32> {
         _ => {
             return Err(Error::Contract(format!(
                 "no public RC event contract for channel class {class:#x}"
-            )))
+            )));
         }
     };
     compat.require_constant(constant, 0)?;
@@ -387,16 +387,18 @@ mod tests {
                 error_os_event: true,
             };
             let mut seen = Vec::new();
-            assert!(state
-                .cleanup(|step| {
-                    seen.push(step);
-                    if seen.len() == failure + 1 {
-                        Err(Error::Contract("injected teardown fault".into()))
-                    } else {
-                        Ok(())
-                    }
-                })
-                .is_err());
+            assert!(
+                state
+                    .cleanup(|step| {
+                        seen.push(step);
+                        if seen.len() == failure + 1 {
+                            Err(Error::Contract("injected teardown fault".into()))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .is_err()
+            );
             assert_eq!(seen.len(), failure + 1);
             let mut retry = Vec::new();
             state

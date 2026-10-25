@@ -5,8 +5,8 @@
 //! and against stock traces captured on other generations (`dump_pretend`, compare script
 //! `tools/video/compare_pretend.py`).
 use super::{
-    bits, session::DESCRIPTOR_BYTES, Allocator, BuildContext, CodecDecoder, Job, SurfaceRef,
-    VResult, VideoError, CODEC_AV1, CODEC_H264, CODEC_HEVC, CODEC_VP9,
+    Allocator, BuildContext, CODEC_AV1, CODEC_H264, CODEC_HEVC, CODEC_VP9, CodecDecoder, Job,
+    SurfaceRef, VResult, VideoError, bits, session::DESCRIPTOR_BYTES,
 };
 
 /// One built picture.
@@ -380,7 +380,7 @@ fn relocation_form() {
 /// verification opt-in off.
 #[test]
 fn caps_per_generation() {
-    use super::{class_gap, NvdecEngineCaps};
+    use super::{NvdecEngineCaps, class_gap};
     let caps = |codec, class| super::caps(codec, class, &NvdecEngineCaps::ALL);
     let ok = |codec, class| caps(codec, class).max_width != 0 && class_gap(codec, class).is_none();
     // AV1 needs GA10x+: not Turing, GA100, Hopper.

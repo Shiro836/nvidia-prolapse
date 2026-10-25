@@ -1,8 +1,8 @@
 use super::desc::{FilterOffsets, SessionInputs};
-use super::ps::{diag_scan, st_ref_pic_set, StRps, Tiles};
+use super::ps::{StRps, Tiles, diag_scan, st_ref_pic_set};
 use super::*;
-use crate::video::bits::split_annexb;
 use crate::video::bits::BitReader;
+use crate::video::bits::split_annexb;
 
 /// Splits an Annex-B elementary stream into access units (7.4.2.4.4: an AU starts at an AUD,
 /// VPS/SPS/PPS, prefix SEI or the first slice segment of a picture that follows a VCL NAL).
@@ -111,8 +111,8 @@ fn compare_with_stock(name: &str, by_index: bool) -> Vec<String> {
 }
 
 fn compare_with_stock_stream(name: &str, stream_name: &str, by_index: bool) -> Vec<String> {
-    let dir = std::env::var("NVDEC_STOCK_EVIDENCE")
-        .expect("NVDEC_STOCK_EVIDENCE=<stock captures dir>");
+    let dir =
+        std::env::var("NVDEC_STOCK_EVIDENCE").expect("NVDEC_STOCK_EVIDENCE=<stock captures dir>");
     let stream = std::fs::read(format!("{dir}/streams/{stream_name}.hevc")).unwrap();
     let frames = std::fs::read_to_string(format!("{dir}/{name}.frames")).unwrap();
     let hex = |s: &str| -> Vec<u8> {
@@ -427,8 +427,8 @@ fn nal_type(au: &[u8]) -> Vec<u8> {
 #[test]
 #[ignore = "needs NVDEC_STOCK_EVIDENCE (streams/x265-*.hevc)"]
 fn libx265_open_gop_random_access_and_pyramid() {
-    let dir = std::env::var("NVDEC_STOCK_EVIDENCE")
-        .expect("NVDEC_STOCK_EVIDENCE=<stock captures dir>");
+    let dir =
+        std::env::var("NVDEC_STOCK_EVIDENCE").expect("NVDEC_STOCK_EVIDENCE=<stock captures dir>");
     let si = SessionInputs {
         framestride: [0; 2],
         filter: FilterOffsets::default(),
@@ -502,9 +502,10 @@ fn libx265_open_gop_random_access_and_pyramid() {
     let mut p: Vec<i32> = jobs.iter().map(|j| j.poc).collect();
     p.sort();
     assert_eq!(p, (0..40).collect::<Vec<_>>());
-    assert!(jobs
-        .iter()
-        .all(|j| j.bitstream.windows(3).filter(|w| *w == [0, 0, 1]).count() >= 3));
+    assert!(
+        jobs.iter()
+            .all(|j| j.bitstream.windows(3).filter(|w| *w == [0, 0, 1]).count() >= 3)
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -600,8 +601,14 @@ fn two_dimensional_tile_grids_are_raster_ordered() {
     .unwrap();
     let entry = |i: usize| {
         (
-            u16::from_le_bytes([d[desc::TILE_SIZES_OFFSET + 4 * i], d[desc::TILE_SIZES_OFFSET + 4 * i + 1]]),
-            u16::from_le_bytes([d[desc::TILE_SIZES_OFFSET + 4 * i + 2], d[desc::TILE_SIZES_OFFSET + 4 * i + 3]]),
+            u16::from_le_bytes([
+                d[desc::TILE_SIZES_OFFSET + 4 * i],
+                d[desc::TILE_SIZES_OFFSET + 4 * i + 1],
+            ]),
+            u16::from_le_bytes([
+                d[desc::TILE_SIZES_OFFSET + 4 * i + 2],
+                d[desc::TILE_SIZES_OFFSET + 4 * i + 3],
+            ]),
         )
     };
     assert_eq!(
@@ -628,8 +635,14 @@ fn two_dimensional_tile_grids_are_raster_ordered() {
     .unwrap();
     let entry = |i: usize| {
         (
-            u16::from_le_bytes([d[desc::TILE_SIZES_OFFSET + 4 * i], d[desc::TILE_SIZES_OFFSET + 4 * i + 1]]),
-            u16::from_le_bytes([d[desc::TILE_SIZES_OFFSET + 4 * i + 2], d[desc::TILE_SIZES_OFFSET + 4 * i + 3]]),
+            u16::from_le_bytes([
+                d[desc::TILE_SIZES_OFFSET + 4 * i],
+                d[desc::TILE_SIZES_OFFSET + 4 * i + 1],
+            ]),
+            u16::from_le_bytes([
+                d[desc::TILE_SIZES_OFFSET + 4 * i + 2],
+                d[desc::TILE_SIZES_OFFSET + 4 * i + 3],
+            ]),
         )
     };
     assert_eq!(
@@ -708,7 +721,10 @@ fn range_extension_profiles_are_refused() {
     nal.extend_from_slice(&w.bytes());
     match ps::parse_sps(&nal) {
         Err(VideoError::Unsupported(m)) => {
-            assert!(m.contains("profile_idc 4"), "reason {m:?} does not name the profile")
+            assert!(
+                m.contains("profile_idc 4"),
+                "reason {m:?} does not name the profile"
+            )
         }
         Err(e) => panic!("expected Unsupported(profile_idc 4), got {e:?}"),
         Ok(_) => panic!("range-extension profile accepted"),

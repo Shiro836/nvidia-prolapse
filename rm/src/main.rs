@@ -91,7 +91,9 @@ fn run() -> Result<(), Error> {
     drop(memory);
     drop(device);
     drop(client);
-    println!("PASS: requested native RM checks; no NVIDIA userspace blobs/shim loaded. Full Vulkan rendering remains unimplemented.");
+    println!(
+        "PASS: requested native RM checks; no NVIDIA userspace blobs/shim loaded. Full Vulkan rendering remains unimplemented."
+    );
     Ok(())
 }
 fn main() {

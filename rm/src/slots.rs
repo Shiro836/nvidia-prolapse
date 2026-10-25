@@ -21,8 +21,8 @@
 //! Allocation zeroes all 16 bytes before the slot is handed out.
 use crate::rm::{Error, Result};
 use std::sync::{
-    atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering},
     Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence},
 };
 
 pub(crate) const SLOT_BYTES: usize = 16;

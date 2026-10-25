@@ -7,11 +7,11 @@
 //! stock would have filled with defaults is aliased to the constant buffer (the engine never writes a
 //! read buffer, so saving that index as a context stays valid).
 
-use super::{desc, Av1Codec, Av1Out, PictureJob, CDF_BUFFERS, CDF_BUFFER_SIZE, DPB_SLOTS};
+use super::{Av1Codec, Av1Out, CDF_BUFFER_SIZE, CDF_BUFFERS, DPB_SLOTS, PictureJob, desc};
 use crate::gpu::method;
 use crate::video::{
-    Allocator, BuildContext, CodecDecoder, DecodeJob, Job, PictureInfo, VResult, VideoError,
-    CODEC_AV1,
+    Allocator, BuildContext, CODEC_AV1, CodecDecoder, DecodeJob, Job, PictureInfo, VResult,
+    VideoError,
 };
 
 const APPLICATION_ID_AV1: u32 = 0x12;
@@ -245,18 +245,18 @@ impl CodecDecoder for Av1Decoder {
                     Some(Surf::Grain { display: None }) => {
                         return Err(VideoError::Bitstream(
                             "AV1: show_existing_frame of a frame that is not showable".into(),
-                        ))
+                        ));
                     }
                     Some(_) => {
                         return Err(VideoError::Invalid(
                             "AV1: film-grain state of the shown slot differs from its decode"
                                 .into(),
-                        ))
+                        ));
                     }
                     None => {
                         return Err(VideoError::Bitstream(
                             "AV1: show_existing of an undecoded slot".into(),
-                        ))
+                        ));
                     }
                 };
                 let r = self.c.slot_record(slot);

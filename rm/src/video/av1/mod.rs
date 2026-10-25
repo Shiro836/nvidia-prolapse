@@ -13,7 +13,7 @@ pub mod obu;
 #[cfg(test)]
 mod tests;
 
-use header::{FrameHeader, ParserState, SequenceHeader, TileRange, KEY_FRAME, PRIMARY_REF_NONE};
+use header::{FrameHeader, KEY_FRAME, PRIMARY_REF_NONE, ParserState, SequenceHeader, TileRange};
 use obu::{Av1Error, Result};
 
 pub const DPB_SLOTS: usize = 9;
@@ -241,7 +241,7 @@ impl Av1Codec {
                     self.cur = Some((h, bs, tiles));
                 }
                 obu::OBU_TILE_LIST => {
-                    return Err(Av1Error::Unsupported("large scale tile (OBU_TILE_LIST)"))
+                    return Err(Av1Error::Unsupported("large scale tile (OBU_TILE_LIST)"));
                 }
                 _ => {}
             }

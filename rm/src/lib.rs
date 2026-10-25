@@ -9,9 +9,9 @@ compile_error!(
 pub mod abi;
 pub mod backend;
 pub mod capabilities;
+mod capture;
 pub mod compat;
 pub mod compiler;
-mod capture;
 mod compute;
 mod cpu_map_cache;
 pub(crate) mod diag;

@@ -2,7 +2,7 @@
 //! This module never recognizes a fixture or substitutes a precompiled shader.
 use crate::rm::{Error, Result};
 use std::{
-    ffi::{c_char, c_int, c_void, CStr, CString},
+    ffi::{CStr, CString, c_char, c_int, c_void},
     sync::{Mutex, OnceLock},
 };
 

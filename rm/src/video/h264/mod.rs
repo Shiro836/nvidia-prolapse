@@ -30,7 +30,7 @@ pub mod slice;
 #[cfg(test)]
 mod tests;
 
-use super::{bits, bitstream, unsupported, VResult};
+use super::{VResult, bits, bitstream, unsupported};
 use desc::{DescInput, DescRef, EngineParams};
 use ps::{Pps, Sps};
 use slice::{Mmco, SliceHeader, SliceType};
@@ -733,7 +733,7 @@ impl Decoder {
                         {
                             Some(i) => self.dpb[i] = None,
                             None => {
-                                return bitstream(format!("MMCO2 on missing LongTermPicNum {n}"))
+                                return bitstream(format!("MMCO2 on missing LongTermPicNum {n}"));
                             }
                         },
                         Mmco::ShortToLong(d, idx) => {

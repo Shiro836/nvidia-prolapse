@@ -5,8 +5,8 @@
 //! 10-bit streams; this file implements the values
 //! independently. Buffer offsets inside our own filter buffer and surface geometry are inputs
 //! ([`SessionInputs`]), never stock's numbers.
-use super::ps::{diag_scan, Pps, ScalingList, Sps};
-use crate::video::{bitstream, unsupported, VResult};
+use super::ps::{Pps, ScalingList, Sps, diag_scan};
+use crate::video::{VResult, bitstream, unsupported};
 
 /// Size of the descriptor area (struct + tail, zero padded).
 pub const DESC_SIZE: usize = 0x200;

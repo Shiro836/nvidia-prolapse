@@ -3,7 +3,7 @@
 //! engine consumes (CUVID `WeightScale4x4/8x8` are raster: FFmpeg h264_ps.c stores
 //! `factors[zigzag[i]]`; the stock NEW_H264 builder at ELF 0x3c460 copies them verbatim to
 //! setup+0x200).
-use super::super::{bits::BitReader, bitstream, unsupported, VResult};
+use super::super::{VResult, bits::BitReader, bitstream, unsupported};
 
 /// 4x4 zig-zag (frame) scan: coded index → raster index (Table 8-13).
 pub const ZIGZAG_4X4: [u8; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];

@@ -8,11 +8,11 @@
 //! - one colocated-MV buffer (slot i at i × per-slot size), a filter buffer with INTRA_TOP at
 //!   `width·16 + 256` and the 0x4dc buffer at `align(width·4, 256)` after it (measured at widths
 //!   176, 352, 1920), legacy MBHIST/HISTORY instead of filter/intra/0x4dc.
-use super::{desc, legacy, Begun, Decoder, MAX_SLOTS};
+use super::{Begun, Decoder, MAX_SLOTS, desc, legacy};
 use crate::gpu::method;
 use crate::video::{
-    bits, Allocator, BuildContext, CodecDecoder, DecodeJob, Job, NvdecGen,
-    PictureInfo as SessionInfo, SurfaceLayout, VResult, VideoError, CODEC_H264,
+    Allocator, BuildContext, CODEC_H264, CodecDecoder, DecodeJob, Job, NvdecGen,
+    PictureInfo as SessionInfo, SurfaceLayout, VResult, VideoError, bits,
 };
 use std::collections::VecDeque;
 

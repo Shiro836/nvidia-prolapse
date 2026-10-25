@@ -21,7 +21,7 @@ use self::desc::{PicState, SessionInputs, StockOpaque};
 use self::ps::{Pps, Sps};
 use self::slice::parse_slice_header;
 use crate::video::bits::{split_annexb, unescape};
-use crate::video::{bitstream, unsupported, VResult, VideoError};
+use crate::video::{VResult, VideoError, bitstream, unsupported};
 
 /// NVDEC `SET_APPLICATION_ID` for HEVC (clc9b0.h).
 pub const APP_ID_HEVC: u32 = 7;
@@ -203,7 +203,7 @@ impl Decoder {
                     slices.push(SliceNal { nal, hdr });
                 }
                 10..=15 | 22 | 23 => {
-                    return unsupported(format!("HEVC reserved VCL NAL unit type {t}"))
+                    return unsupported(format!("HEVC reserved VCL NAL unit type {t}"));
                 }
                 _ => {} // VPS, AUD, EOB, filler, SEI, reserved/unspecified non-VCL
             }
@@ -283,7 +283,7 @@ impl Decoder {
                             return bs_err(format!(
                                 "reference picture POC {} missing from the DPB",
                                 poc + dp
-                            ))
+                            ));
                         }
                         None => {} // "no reference picture" in a Foll list is allowed
                     }

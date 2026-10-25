@@ -11,24 +11,26 @@ pub unsafe extern "system" fn vkCreateCommandPool(
     p: *const vk::CommandPoolCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::CommandPool,
-) -> vk::Result { unsafe {
-    *o = vk::CommandPool::null();
-    let p = &*p;
-    let allowed =
-        vk::CommandPoolCreateFlags::TRANSIENT | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER;
-    if !a.is_null()
-        || !p.p_next.is_null()
-        || p.queue_family_index != 0
-        || !(p.flags & !allowed).is_empty()
-    {
-        return BAD;
+) -> vk::Result {
+    unsafe {
+        *o = vk::CommandPool::null();
+        let p = &*p;
+        let allowed = vk::CommandPoolCreateFlags::TRANSIENT
+            | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER;
+        if !a.is_null()
+            || !p.p_next.is_null()
+            || p.queue_family_index != 0
+            || !(p.flags & !allowed).is_empty()
+        {
+            return BAD;
+        }
+        let mut s = state();
+        let id = s.id();
+        s.pools.insert(id, Pool { device: h.as_raw() });
+        *o = vk::CommandPool::from_raw(id);
+        vk::Result::SUCCESS
     }
-    let mut s = state();
-    let id = s.id();
-    s.pools.insert(id, Pool { device: h.as_raw() });
-    *o = vk::CommandPool::from_raw(id);
-    vk::Result::SUCCESS
-}}
+}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
@@ -37,18 +39,20 @@ pub unsafe extern "system" fn vkDestroyCommandPool(
     _h: vk::Device,
     p: vk::CommandPool,
     _a: *const vk::AllocationCallbacks,
-) { unsafe {
-    let mut s = state();
-    s.commands.retain(|h, c| {
-        if c.pool == p.as_raw() {
-            drop_dispatch(*h);
-            false
-        } else {
-            true
-        }
-    });
-    s.pools.remove(&p.as_raw());
-}}
+) {
+    unsafe {
+        let mut s = state();
+        s.commands.retain(|h, c| {
+            if c.pool == p.as_raw() {
+                drop_dispatch(*h);
+                false
+            } else {
+                true
+            }
+        });
+        s.pools.remove(&p.as_raw());
+    }
+}
 fn reset(c: &mut Commands) {
     c.recording = false;
     c.executable = false;
@@ -84,37 +88,39 @@ pub unsafe extern "system" fn vkAllocateCommandBuffers(
     h: vk::Device,
     p: *const vk::CommandBufferAllocateInfo,
     o: *mut vk::CommandBuffer,
-) -> vk::Result { unsafe {
-    let p = &*p;
-    let mut s = state();
-    if !p.p_next.is_null()
-        || p.level != vk::CommandBufferLevel::PRIMARY
-        || s.pools
-            .get(&p.command_pool.as_raw())
-            .is_none_or(|v| v.device != h.as_raw())
-    {
-        return BAD;
+) -> vk::Result {
+    unsafe {
+        let p = &*p;
+        let mut s = state();
+        if !p.p_next.is_null()
+            || p.level != vk::CommandBufferLevel::PRIMARY
+            || s.pools
+                .get(&p.command_pool.as_raw())
+                .is_none_or(|v| v.device != h.as_raw())
+        {
+            return BAD;
+        }
+        for j in 0..p.command_buffer_count as usize {
+            let id = dispatch();
+            s.commands.insert(
+                id,
+                Commands {
+                    device: h.as_raw(),
+                    pool: p.command_pool.as_raw(),
+                    recording: false,
+                    executable: false,
+                    error: false,
+                    pipeline: None,
+                    set: None,
+                    push: vec![0; 128],
+                    commands: Vec::new(),
+                },
+            );
+            *o.add(j) = vk::CommandBuffer::from_raw(id)
+        }
+        vk::Result::SUCCESS
     }
-    for j in 0..p.command_buffer_count as usize {
-        let id = dispatch();
-        s.commands.insert(
-            id,
-            Commands {
-                device: h.as_raw(),
-                pool: p.command_pool.as_raw(),
-                recording: false,
-                executable: false,
-                error: false,
-                pipeline: None,
-                set: None,
-                push: vec![0; 128],
-                commands: Vec::new(),
-            },
-        );
-        *o.add(j) = vk::CommandBuffer::from_raw(id)
-    }
-    vk::Result::SUCCESS
-}}
+}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
@@ -124,14 +130,16 @@ pub unsafe extern "system" fn vkFreeCommandBuffers(
     _pool: vk::CommandPool,
     n: u32,
     p: *const vk::CommandBuffer,
-) { unsafe {
-    let mut s = state();
-    for c in slice(p, n) {
-        if s.commands.remove(&c.as_raw()).is_some() {
-            drop_dispatch(c.as_raw())
+) {
+    unsafe {
+        let mut s = state();
+        for c in slice(p, n) {
+            if s.commands.remove(&c.as_raw()).is_some() {
+                drop_dispatch(c.as_raw())
+            }
         }
     }
-}}
+}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
@@ -139,26 +147,28 @@ pub unsafe extern "system" fn vkFreeCommandBuffers(
 pub unsafe extern "system" fn vkBeginCommandBuffer(
     h: vk::CommandBuffer,
     p: *const vk::CommandBufferBeginInfo,
-) -> vk::Result { unsafe {
-    let p = &*p;
-    let mut s = state();
-    let Some(c) = s.commands.get_mut(&h.as_raw()) else {
-        return BAD;
-    };
-    if c.recording
-        || !p.p_next.is_null()
-        || !p.p_inheritance_info.is_null()
-        || !(p.flags
-            & !(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT
-                | vk::CommandBufferUsageFlags::SIMULTANEOUS_USE))
-            .is_empty()
-    {
-        return BAD;
+) -> vk::Result {
+    unsafe {
+        let p = &*p;
+        let mut s = state();
+        let Some(c) = s.commands.get_mut(&h.as_raw()) else {
+            return BAD;
+        };
+        if c.recording
+            || !p.p_next.is_null()
+            || !p.p_inheritance_info.is_null()
+            || !(p.flags
+                & !(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT
+                    | vk::CommandBufferUsageFlags::SIMULTANEOUS_USE))
+                .is_empty()
+        {
+            return BAD;
+        }
+        reset(c);
+        c.recording = true;
+        vk::Result::SUCCESS
     }
-    reset(c);
-    c.recording = true;
-    vk::Result::SUCCESS
-}}
+}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
@@ -173,11 +183,7 @@ pub unsafe extern "system" fn vkEndCommandBuffer(h: vk::CommandBuffer) -> vk::Re
     }
     c.recording = false;
     c.executable = !c.error;
-    if c.error {
-        BAD
-    } else {
-        vk::Result::SUCCESS
-    }
+    if c.error { BAD } else { vk::Result::SUCCESS }
 }
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
@@ -196,11 +202,7 @@ pub unsafe extern "system" fn vkResetCommandBuffer(
 }
 fn record(h: vk::CommandBuffer, f: impl FnOnce(&mut Commands)) {
     if let Some(c) = state().commands.get_mut(&h.as_raw()) {
-        if !c.recording {
-            c.error = true
-        } else {
-            f(c)
-        }
+        if !c.recording { c.error = true } else { f(c) }
     }
 }
 /// # Safety
@@ -233,15 +235,17 @@ pub unsafe extern "system" fn vkCmdBindDescriptorSets(
     p: *const vk::DescriptorSet,
     dn: u32,
     _dp: *const u32,
-) { unsafe {
-    record(h, |c| {
-        if b != vk::PipelineBindPoint::COMPUTE || first != 0 || n != 1 || dn != 0 {
-            c.error = true
-        } else {
-            c.set = Some((*p).as_raw())
-        }
-    })
-}}
+) {
+    unsafe {
+        record(h, |c| {
+            if b != vk::PipelineBindPoint::COMPUTE || first != 0 || n != 1 || dn != 0 {
+                c.error = true
+            } else {
+                c.set = Some((*p).as_raw())
+            }
+        })
+    }
+}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
@@ -253,24 +257,26 @@ pub unsafe extern "system" fn vkCmdPushConstants(
     offset: u32,
     size: u32,
     p: *const c_void,
-) { unsafe {
-    let max = state()
-        .pipeline_layouts
-        .get(&l.as_raw())
-        .map_or(0, |l| l.push);
-    record(h, |c| {
-        if stages != vk::ShaderStageFlags::COMPUTE
-            || offset.checked_add(size).is_none_or(|n| n > max)
-            || !offset.is_multiple_of(4)
-            || !size.is_multiple_of(4)
-        {
-            c.error = true
-        } else {
-            c.push[offset as usize..(offset + size) as usize]
-                .copy_from_slice(std::slice::from_raw_parts(p as *const u8, size as usize))
-        }
-    })
-}}
+) {
+    unsafe {
+        let max = state()
+            .pipeline_layouts
+            .get(&l.as_raw())
+            .map_or(0, |l| l.push);
+        record(h, |c| {
+            if stages != vk::ShaderStageFlags::COMPUTE
+                || offset.checked_add(size).is_none_or(|n| n > max)
+                || !offset.is_multiple_of(4)
+                || !size.is_multiple_of(4)
+            {
+                c.error = true
+            } else {
+                c.push[offset as usize..(offset + size) as usize]
+                    .copy_from_slice(std::slice::from_raw_parts(p as *const u8, size as usize))
+            }
+        })
+    }
+}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
@@ -303,15 +309,17 @@ pub unsafe extern "system" fn vkCmdCopyBuffer(
     dst: vk::Buffer,
     n: u32,
     p: *const vk::BufferCopy,
-) { unsafe {
-    record(h, |c| {
-        c.commands.push(Command::Copy(
-            src.as_raw(),
-            dst.as_raw(),
-            slice(p, n).to_vec(),
-        ))
-    })
-}}
+) {
+    unsafe {
+        record(h, |c| {
+            c.commands.push(Command::Copy(
+                src.as_raw(),
+                dst.as_raw(),
+                slice(p, n).to_vec(),
+            ))
+        })
+    }
+}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
@@ -338,19 +346,21 @@ pub unsafe extern "system" fn vkCmdUpdateBuffer(
     offset: u64,
     size: u64,
     p: *const c_void,
-) { unsafe {
-    record(h, |c| {
-        if size > 65536 || !size.is_multiple_of(4) || !offset.is_multiple_of(4) {
-            c.error = true
-        } else {
-            c.commands.push(Command::Update(
-                b.as_raw(),
-                offset,
-                std::slice::from_raw_parts(p as *const u8, size as usize).to_vec(),
-            ))
-        }
-    })
-}}
+) {
+    unsafe {
+        record(h, |c| {
+            if size > 65536 || !size.is_multiple_of(4) || !offset.is_multiple_of(4) {
+                c.error = true
+            } else {
+                c.commands.push(Command::Update(
+                    b.as_raw(),
+                    offset,
+                    std::slice::from_raw_parts(p as *const u8, size as usize).to_vec(),
+                ))
+            }
+        })
+    }
+}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
@@ -366,23 +376,25 @@ pub unsafe extern "system" fn vkCmdPipelineBarrier(
     bp: *const vk::BufferMemoryBarrier,
     in_: u32,
     _ip: *const vk::ImageMemoryBarrier,
-) { unsafe {
-    record(h, |c| {
-        if in_ != 0
-            || !(flags & !vk::DependencyFlags::BY_REGION).is_empty()
-            || slice(mp, mn).iter().any(|v| !v.p_next.is_null())
-            || slice(bp, bn).iter().any(|v| {
-                !v.p_next.is_null()
-                    || !matches!(
-                        (v.src_queue_family_index, v.dst_queue_family_index),
-                        (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED) | (0, 0)
-                    )
-            })
-        {
-            c.error = true
-        }
-    })
-}}
+) {
+    unsafe {
+        record(h, |c| {
+            if in_ != 0
+                || !(flags & !vk::DependencyFlags::BY_REGION).is_empty()
+                || slice(mp, mn).iter().any(|v| !v.p_next.is_null())
+                || slice(bp, bn).iter().any(|v| {
+                    !v.p_next.is_null()
+                        || !matches!(
+                            (v.src_queue_family_index, v.dst_queue_family_index),
+                            (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED) | (0, 0)
+                        )
+                })
+            {
+                c.error = true
+            }
+        })
+    }
+}
 fn execute(s: &State, dev: u64, b: &Backend, cmd: &Command) -> Result<(), vk::Result> {
     match cmd {
         Command::Copy(src, dst, regions) => {
@@ -467,61 +479,63 @@ pub unsafe extern "system" fn vkQueueSubmit(
     n: u32,
     p: *const vk::SubmitInfo,
     f: vk::Fence,
-) -> vk::Result { unsafe {
-    let mut s = state();
-    let Some(&d) = s.queues.get(&q.as_raw()) else {
-        return BAD;
-    };
-    let Some(b) = backend(&s, d) else { return BAD };
-    if f != vk::Fence::null()
-        && !s
-            .fences
-            .get(&f.as_raw())
-            .is_some_and(|&(dev, signal)| dev == d && !signal)
-    {
-        return BAD;
-    }
-    for sub in slice(p, n) {
-        if !sub.p_next.is_null() {
+) -> vk::Result {
+    unsafe {
+        let mut s = state();
+        let Some(&d) = s.queues.get(&q.as_raw()) else {
+            return BAD;
+        };
+        let Some(b) = backend(&s, d) else { return BAD };
+        if f != vk::Fence::null()
+            && !s
+                .fences
+                .get(&f.as_raw())
+                .is_some_and(|&(dev, signal)| dev == d && !signal)
+        {
             return BAD;
         }
-        for sem in slice(sub.p_wait_semaphores, sub.wait_semaphore_count) {
-            let Some((dev, signaled)) = s.semaphores.get_mut(&sem.as_raw()) else {
-                return BAD;
-            };
-            if *dev != d || !*signaled {
-                eprintln!(
-                    "native Vulkan: synchronous queue cannot wait on an unsignaled semaphore"
-                );
+        for sub in slice(p, n) {
+            if !sub.p_next.is_null() {
                 return BAD;
             }
-            *signaled = false;
-        }
-        for h in slice(sub.p_command_buffers, sub.command_buffer_count) {
-            let Some(c) = s.commands.get(&h.as_raw()) else {
-                return BAD;
-            };
-            if c.device != d || !c.executable || c.recording || c.error {
-                return BAD;
+            for sem in slice(sub.p_wait_semaphores, sub.wait_semaphore_count) {
+                let Some((dev, signaled)) = s.semaphores.get_mut(&sem.as_raw()) else {
+                    return BAD;
+                };
+                if *dev != d || !*signaled {
+                    eprintln!(
+                        "native Vulkan: synchronous queue cannot wait on an unsignaled semaphore"
+                    );
+                    return BAD;
+                }
+                *signaled = false;
             }
-            for command in &c.commands {
-                if let Err(e) = execute(&s, d, &b, command) {
-                    return e;
+            for h in slice(sub.p_command_buffers, sub.command_buffer_count) {
+                let Some(c) = s.commands.get(&h.as_raw()) else {
+                    return BAD;
+                };
+                if c.device != d || !c.executable || c.recording || c.error {
+                    return BAD;
+                }
+                for command in &c.commands {
+                    if let Err(e) = execute(&s, d, &b, command) {
+                        return e;
+                    }
                 }
             }
-        }
-        for sem in slice(sub.p_signal_semaphores, sub.signal_semaphore_count) {
-            let Some((dev, signaled)) = s.semaphores.get_mut(&sem.as_raw()) else {
-                return BAD;
-            };
-            if *dev != d || *signaled {
-                return BAD;
+            for sem in slice(sub.p_signal_semaphores, sub.signal_semaphore_count) {
+                let Some((dev, signaled)) = s.semaphores.get_mut(&sem.as_raw()) else {
+                    return BAD;
+                };
+                if *dev != d || *signaled {
+                    return BAD;
+                }
+                *signaled = true;
             }
-            *signaled = true;
         }
+        if f != vk::Fence::null() {
+            s.fences.get_mut(&f.as_raw()).unwrap().1 = true
+        }
+        vk::Result::SUCCESS
     }
-    if f != vk::Fence::null() {
-        s.fences.get_mut(&f.as_raw()).unwrap().1 = true
-    }
-    vk::Result::SUCCESS
-}}
+}

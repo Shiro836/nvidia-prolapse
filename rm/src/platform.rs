@@ -13,7 +13,9 @@ use std::{
 };
 
 #[cfg(not(any(target_os = "android", all(target_os = "linux", target_env = "gnu"))))]
-compile_error!("RM libc ABI is implemented only for Android bionic and Linux glibc; this libc needs independent ioctl/off64_t proof");
+compile_error!(
+    "RM libc ABI is implemented only for Android bionic and Linux glibc; this libc needs independent ioctl/off64_t proof"
+);
 #[cfg(not(target_endian = "little"))]
 compile_error!(
     "RM wire encoding is little-endian; big-endian targets need explicit wire conversion"
@@ -27,7 +29,9 @@ compile_error!(
 )))]
 compile_error!("RM device-memory barriers are not implemented for this CPU architecture");
 #[cfg(all(target_arch = "arm", not(target_os = "android")))]
-compile_error!("32-bit ARM GNU targets need explicit ARMv7+ barrier and ABI validation; use the audited armv7-linux-androideabi target");
+compile_error!(
+    "32-bit ARM GNU targets need explicit ARMv7+ barrier and ABI validation; use the audited armv7-linux-androideabi target"
+);
 #[cfg(not(target_has_atomic = "64"))]
 compile_error!("RM semaphore bookkeeping requires CPU AtomicU64 support on cached system memory");
 
@@ -138,8 +142,12 @@ pub(crate) unsafe fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
 pub(crate) fn validate_page_size(bytes: usize) -> io::Result<usize> {
     match bytes {
         4096 | 16384 | 65536 => Ok(bytes),
-        _ => Err(io::Error::new(io::ErrorKind::Unsupported,
-            format!("unsupported CPU page size {bytes}; RM CPU mappings implement 4096, 16384 and 65536-byte pages"))),
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "unsupported CPU page size {bytes}; RM CPU mappings implement 4096, 16384 and 65536-byte pages"
+            ),
+        )),
     }
 }
 

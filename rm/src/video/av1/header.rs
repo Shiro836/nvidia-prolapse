@@ -77,11 +77,7 @@ pub struct OperatingPoint {
 
 impl SequenceHeader {
     pub fn num_planes(&self) -> usize {
-        if self.mono_chrome {
-            1
-        } else {
-            3
-        }
+        if self.mono_chrome { 1 } else { 3 }
     }
 
     pub fn parse(data: &[u8]) -> Result<Self> {
@@ -192,11 +188,7 @@ impl SequenceHeader {
         // color_config()
         let high_bitdepth = r.flag()?;
         s.bit_depth = if s.seq_profile == 2 && high_bitdepth {
-            if r.flag()? {
-                12
-            } else {
-                10
-            }
+            if r.flag()? { 12 } else { 10 }
         } else if high_bitdepth {
             10
         } else {
@@ -751,7 +743,8 @@ impl ParserState {
             if short {
                 let last_frame_idx = r.f(3)? as u8;
                 let gold_frame_idx = r.f(3)? as u8;
-                h.ref_frame_idx = self.set_frame_refs(last_frame_idx, gold_frame_idx, h.order_hint)?;
+                h.ref_frame_idx =
+                    self.set_frame_refs(last_frame_idx, gold_frame_idx, h.order_hint)?;
             }
             for i in 0..REFS_PER_FRAME {
                 if !short {

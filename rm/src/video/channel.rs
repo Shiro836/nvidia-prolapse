@@ -10,7 +10,7 @@
 use super::{VResult, VideoError};
 use crate::{
     fences::NativeFenceSurface,
-    gpu::{method, AddressSpace, Object},
+    gpu::{AddressSpace, Object, method},
     rm::{Device, Mapping, Memory},
 };
 use std::{os::fd::AsRawFd, rc::Rc, time::Duration};

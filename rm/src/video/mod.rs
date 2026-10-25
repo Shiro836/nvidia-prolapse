@@ -376,11 +376,7 @@ pub fn plane_kind_bits(bytes_per_sample: u32) -> u32 {
 
 /// Bytes per sample container of the engine output for a luma bit depth.
 pub fn bytes_per_sample(bit_depth: u32) -> u32 {
-    if bit_depth > 8 {
-        2
-    } else {
-        1
-    }
+    if bit_depth > 8 { 2 } else { 1 }
 }
 
 impl BuildContext<'_> {

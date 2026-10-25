@@ -14,7 +14,7 @@
 //! with several AV1 frames therefore reports the unit's metadata for each of them; a
 //! stream that changes the metadata inside one temporal unit is not represented (the C2
 //! HAL attaches metadata per output buffer, and a unit maps to one time step).
-use super::{bitstream, VResult, VideoError, CODEC_AV1, CODEC_H264, CODEC_HEVC};
+use super::{CODEC_AV1, CODEC_H264, CODEC_HEVC, VResult, VideoError, bitstream};
 
 /// `mastering_display_colour_volume()`: chromaticities in units of 0.00002, luminance in
 /// units of 0.0001 cd/m² (ST 2086, as coded in the SEI / AV1 metadata).

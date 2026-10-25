@@ -13,8 +13,8 @@ use std::{
     os::fd::OwnedFd,
     rc::Rc,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -1589,7 +1589,11 @@ impl Queue {
         // 580.178.04 skips the context-share allocation below Volta,
         // libnvidia-eglcore.so.580.178.04 E 0xa76fab, and still places the
         // compute queue's channel in the graphics queue's TSG, E 0xa7b167).
-        let subcontext = if modern { Subcontext::take(tsg)? } else { Subcontext::legacy(tsg) };
+        let subcontext = if modern {
+            Subcontext::take(tsg)?
+        } else {
+            Subcontext::legacy(tsg)
+        };
         let veid = subcontext.veid;
         let group = Rc::clone(&subcontext.tsg.object);
         let context = if modern {
@@ -1599,7 +1603,11 @@ impl Queue {
             // E 0x9e01c0..0x9e01fa: flags = (veid != 0) * 2).
             let mut parameters = abi::ContextShare {
                 vaspace: space.vaspace.handle,
-                flags: if veid == 0 { CTXSHARE_SYNC } else { CTXSHARE_SPECIFIED },
+                flags: if veid == 0 {
+                    CTXSHARE_SYNC
+                } else {
+                    CTXSHARE_SPECIFIED
+                },
                 subcontext: veid,
             };
             Some(Object::new(
@@ -1629,7 +1637,11 @@ impl Queue {
             // SCG thread one, as stock 615 sets for every such channel
             // (E 0x9e1c70 `orl $0x10000010`; alloc_channel.h
             // NVOS04_FLAGS_GROUP_CHANNEL_RUNQUEUE 4:4, _THREAD 29:28).
-            flags: if veid == 0 { 0 } else { CHANNEL_RUNQUEUE_ONE | CHANNEL_THREAD_ONE },
+            flags: if veid == 0 {
+                0
+            } else {
+                CHANNEL_RUNQUEUE_ONE | CHANNEL_THREAD_ONE
+            },
             ..Default::default()
         };
         if modern {
@@ -1767,7 +1779,12 @@ impl Queue {
     /// GPU VA range of the TSG's ZCULL buffer, if bound.
     #[cfg(test)]
     pub(crate) fn zcull_range(&self) -> Option<(u64, u64)> {
-        self.subcontext.tsg.zcull.borrow().as_ref().map(|m| (m.address(), m.length()))
+        self.subcontext
+            .tsg
+            .zcull
+            .borrow()
+            .as_ref()
+            .map(|m| (m.address(), m.length()))
     }
     pub(crate) fn channel_class(&self) -> u32 {
         self.channel_class
@@ -1782,7 +1799,12 @@ impl Queue {
             ));
         }
         let bytes = crate::capture::TS_ENTRIES * 32;
-        let mem = self.subcontext.tsg.object.device.allocate_aligned(bytes, 4096, false, true)?;
+        let mem = self
+            .subcontext
+            .tsg
+            .object
+            .device
+            .allocate_aligned(bytes, 4096, false, true)?;
         let mut cpu = mem.map()?;
         for i in 0..bytes / 4 {
             cpu.write_u32(i * 4, 0)?;
@@ -2031,7 +2053,13 @@ impl Queue {
                 &mut scratch.prefix,
                 0,
                 0x5c,
-                &[address as u32, (address >> 32) as u32, t.next, 0, 1 | (1 << 25)],
+                &[
+                    address as u32,
+                    (address >> 32) as u32,
+                    t.next,
+                    0,
+                    1 | (1 << 25),
+                ],
             );
             host_semaphore(
                 &mut scratch.signals,
@@ -2629,16 +2657,18 @@ mod compression_tests {
         )
         .unwrap();
         assert_eq!(small.flags & (0xf << 8), 1 << 8);
-        assert!(mapping_plan_paged(
-            compat,
-            4096,
-            1 << 16,
-            1 << 24,
-            Some(1 << 34),
-            Some(8),
-            true,
-            KIND_GENERIC
-        )
-        .is_err());
+        assert!(
+            mapping_plan_paged(
+                compat,
+                4096,
+                1 << 16,
+                1 << 24,
+                Some(1 << 34),
+                Some(8),
+                true,
+                KIND_GENERIC
+            )
+            .is_err()
+        );
     }
 }

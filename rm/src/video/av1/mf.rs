@@ -3,9 +3,9 @@
 //! it is an overlay of GOLDEN, then BWDREF, ALTREF2, ALTREF when after the current frame (stack budget), then
 //! LAST2. Matches stock's selection on all captured inter frames.
 
-use super::desc::MotionField;
-use super::header::{get_relative_dist, FrameHeader, SequenceHeader};
 use super::PicRecord;
+use super::desc::MotionField;
+use super::header::{FrameHeader, SequenceHeader, get_relative_dist};
 
 const LAST: usize = 0;
 const LAST2: usize = 1;

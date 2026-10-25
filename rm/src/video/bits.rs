@@ -1,6 +1,6 @@
 //! Annex-B NAL splitting, emulation-prevention removal and an RBSP bit reader (H.264 7.2/7.4.1,
 //! H.265 7.2/7.4.2, Exp-Golomb 9.1 / 9.2).
-use super::{bitstream, VResult};
+use super::{VResult, bitstream};
 
 /// One NAL unit inside an Annex-B buffer: `start` is the offset of its start code
 /// (`00 00 01` or `00 00 00 01`), `nal` the escaped NAL bytes (header included, trailing

@@ -31,7 +31,7 @@
 //!   ffmpeg -i fixture/stream.hevc -frames:v N -pix_fmt nv12 -f rawvideo ref.nv12
 //!   nv-nvdec-probe fixture/ out/ N ref.nv12
 use crate::{
-    gpu::{hi_lo, method, AddressSpace, Object},
+    gpu::{AddressSpace, Object, hi_lo, method},
     rm::{Device, Error, Result},
 };
 use std::{rc::Rc, time::Duration, time::Instant};
@@ -368,8 +368,8 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
         let d = ((desc.address() + desc_off as u64) >> 8) as u32;
         let f = (filter.address() >> 8) as u32;
         method(&mut words, 4, 0x200, &[7]); // SET_APPLICATION_ID HEVC
-                                            // SET_CONTROL_PARAMS: codec HEVC, gptimer, err_conceal, mbtimer,
-                                            // event_trace_logging, testrun_env PROD_RUN.
+        // SET_CONTROL_PARAMS: codec HEVC, gptimer, err_conceal, mbtimer,
+        // event_trace_logging, testrun_env PROD_RUN.
         method(
             &mut words,
             4,
@@ -540,7 +540,7 @@ pub fn vp9_pic(
 /// symbol counts drive backward adaptation for the next frame.
 pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
     use crate::nvdec_drv::{Pod, Vp9EntropyCounts};
-    use crate::vp9::{split_superframe, tile_sizes, Vp9State};
+    use crate::vp9::{Vp9State, split_superframe, tile_sizes};
     let mut ch = VideoChannel::new(device)?;
     let decoder_class = ch.decoder_class;
     let max_packet = packets.iter().map(|p| p.len()).max().unwrap_or(0);
@@ -622,9 +622,20 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             if std::env::var_os("NVDEC_VP9_DEBUG").is_some() {
                 eprintln!(
                     "vp9 frame {}: type {} show {} intra_only {} err_res {} parallel {} refresh_ctx {} ctx {} reset {} tx_mode {} q {} hdr {}+{} refresh {:#x}",
-                    report.decoded, h.frame_type, h.show_frame, h.intra_only, h.error_resilient,
-                    h.frame_parallel, h.refresh_frame_context, h.frame_context_idx, h.reset_frame_context,
-                    h.tx_mode, h.base_q_idx, h.uncompressed_size, h.header_size, h.refresh_frame_flags
+                    report.decoded,
+                    h.frame_type,
+                    h.show_frame,
+                    h.intra_only,
+                    h.error_resilient,
+                    h.frame_parallel,
+                    h.refresh_frame_context,
+                    h.frame_context_idx,
+                    h.reset_frame_context,
+                    h.tx_mode,
+                    h.base_q_idx,
+                    h.uncompressed_size,
+                    h.header_size,
+                    h.refresh_frame_flags
                 );
             }
             let pic = vp9_pic(&h, &st, frame.len());

@@ -10,12 +10,12 @@
 //! tinygrad ops_nv.py): filter sub-buffers of 608 / 4864 / 152 / 2000 bytes per luma row,
 //! INTRA_TOP after them, the Blackwell 0x4dc buffer 64 KiB further; colocated MVs
 //! `h64² + w64·h64/16`. All sized from the session maximum.
-use super::desc::{FilterOffsets, SessionInputs, SETUP_SIZE};
 use super::Decoder;
+use super::desc::{FilterOffsets, SETUP_SIZE, SessionInputs};
 use crate::gpu::method;
 use crate::video::{
-    bits, Allocator, BuildContext, CodecDecoder, DecodeJob, Job, NvdecGen, PictureInfo,
-    SurfaceLayout, VResult, VideoError, CODEC_HEVC,
+    Allocator, BuildContext, CODEC_HEVC, CodecDecoder, DecodeJob, Job, NvdecGen, PictureInfo,
+    SurfaceLayout, VResult, VideoError, bits,
 };
 use std::collections::{HashMap, VecDeque};
 

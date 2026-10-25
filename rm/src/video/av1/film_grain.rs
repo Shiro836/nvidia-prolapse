@@ -11,11 +11,7 @@ use gaussian::GAUSSIAN_SEQUENCE;
 pub const FILM_GRAIN_MEMORY_SIZE: usize = 3 * 256 + 2 * (4096 + 2 * 1024);
 
 fn round2(x: i32, n: u32) -> i32 {
-    if n == 0 {
-        x
-    } else {
-        (x + (1 << (n - 1))) >> n
-    }
+    if n == 0 { x } else { (x + (1 << (n - 1))) >> n }
 }
 
 struct Rng(u16);

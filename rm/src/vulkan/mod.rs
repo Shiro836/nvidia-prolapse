@@ -11,7 +11,7 @@ use crate::{
 use ash::vk::{self, Handle};
 use std::{
     collections::HashMap,
-    ffi::{c_char, c_void, CStr},
+    ffi::{CStr, c_char, c_void},
     ptr,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -24,11 +24,13 @@ struct Dispatch {
 fn dispatch() -> u64 {
     Box::into_raw(Box::new(Dispatch { loader: 0x01CDC0DE })) as u64
 }
-unsafe fn drop_dispatch(h: u64) { unsafe {
-    if h != 0 {
-        drop(Box::from_raw(h as *mut Dispatch));
+unsafe fn drop_dispatch(h: u64) {
+    unsafe {
+        if h != 0 {
+            drop(Box::from_raw(h as *mut Dispatch));
+        }
     }
-}}
+}
 struct Instance {
     backend: Arc<Backend>,
     physical: u64,
@@ -135,42 +137,48 @@ fn failure(label: &str, e: impl std::fmt::Display) -> vk::Result {
     eprintln!("native Vulkan {label}: {e}");
     vk::Result::ERROR_DEVICE_LOST
 }
-unsafe fn slice<'a, T>(p: *const T, n: u32) -> &'a [T] { unsafe {
-    if n == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(p, n as usize)
-    }
-}}
-unsafe fn enumerate<T: Copy>(count: *mut u32, out: *mut T, values: &[T]) -> vk::Result { unsafe {
-    if count.is_null() {
-        return vk::Result::ERROR_INITIALIZATION_FAILED;
-    }
-    if out.is_null() {
-        *count = values.len() as u32;
-        return vk::Result::SUCCESS;
-    }
-    let n = (*count as usize).min(values.len());
-    ptr::copy_nonoverlapping(values.as_ptr(), out, n);
-    *count = n as u32;
-    if n < values.len() {
-        vk::Result::INCOMPLETE
-    } else {
-        vk::Result::SUCCESS
-    }
-}}
-unsafe fn loader_chain(mut p: *const c_void, allowed: i32) -> bool { unsafe {
-    let mut count = 0;
-    while !p.is_null() {
-        let h = &*(p as *const vk::BaseInStructure);
-        if h.s_type.as_raw() != allowed || count >= 16 {
-            return false;
+unsafe fn slice<'a, T>(p: *const T, n: u32) -> &'a [T] {
+    unsafe {
+        if n == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(p, n as usize)
         }
-        p = h.p_next.cast();
-        count += 1;
     }
-    true
-}}
+}
+unsafe fn enumerate<T: Copy>(count: *mut u32, out: *mut T, values: &[T]) -> vk::Result {
+    unsafe {
+        if count.is_null() {
+            return vk::Result::ERROR_INITIALIZATION_FAILED;
+        }
+        if out.is_null() {
+            *count = values.len() as u32;
+            return vk::Result::SUCCESS;
+        }
+        let n = (*count as usize).min(values.len());
+        ptr::copy_nonoverlapping(values.as_ptr(), out, n);
+        *count = n as u32;
+        if n < values.len() {
+            vk::Result::INCOMPLETE
+        } else {
+            vk::Result::SUCCESS
+        }
+    }
+}
+unsafe fn loader_chain(mut p: *const c_void, allowed: i32) -> bool {
+    unsafe {
+        let mut count = 0;
+        while !p.is_null() {
+            let h = &*(p as *const vk::BaseInStructure);
+            if h.s_type.as_raw() != allowed || count >= 16 {
+                return false;
+            }
+            p = h.p_next.cast();
+            count += 1;
+        }
+        true
+    }
+}
 fn backend(s: &State, device: u64) -> Option<Arc<Backend>> {
     s.devices.get(&device).map(|d| d.backend.clone())
 }
@@ -298,11 +306,13 @@ mod tests {
                 vkGetDeviceProcAddr(vk::Device::from_raw(1), c"vkCreateDevice".as_ptr()).is_none()
             );
             assert!(vkGetDeviceProcAddr(vk::Device::from_raw(1), c"vkCmdDraw".as_ptr()).is_none());
-            assert!(vk_icdGetPhysicalDeviceProcAddr(
-                vk::Instance::from_raw(1),
-                c"vkCmdDispatch".as_ptr()
-            )
-            .is_none());
+            assert!(
+                vk_icdGetPhysicalDeviceProcAddr(
+                    vk::Instance::from_raw(1),
+                    c"vkCmdDispatch".as_ptr()
+                )
+                .is_none()
+            );
         }
     }
 

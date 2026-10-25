@@ -1,9 +1,9 @@
 //! HEVC slice segment header (H.265 7.3.6.1), parsed up to the end of the reference picture set
 //! syntax: everything after it (list modification, weights, QP, deblocking, entry points) is
 //! parsed by the engine itself (`sw_hdr_skip_length` tells it what the driver consumed).
-use super::ps::{st_ref_pic_set, Pps, Sps, StRps};
+use super::ps::{Pps, Sps, StRps, st_ref_pic_set};
 use crate::video::bits::BitReader;
-use crate::video::{bitstream, unsupported, VResult};
+use crate::video::{VResult, bitstream, unsupported};
 
 pub const SLICE_B: u32 = 0;
 pub const SLICE_P: u32 = 1;
