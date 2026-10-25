@@ -45,7 +45,7 @@ mod waiters;
 mod watcher;
 
 /// Version of the narrow diagnostic C ABI below, not a Vulkan ICD version.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nv_native_backend_abi_version() -> u32 {
     1
 }
@@ -54,7 +54,7 @@ pub extern "C" fn nv_native_backend_abi_version() -> u32 {
 /// 2 = source-built sm_120 compute shader. Returns verified word count, or -1
 /// with a named error on stderr. Objects are destroyed before returning.
 /// This narrow ABI retains the actual backend in the Android shared library.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nv_native_backend_check(mode: u32) -> i32 {
     fn check(mode: u32) -> rm::Result<usize> {
         if mode > 2 {

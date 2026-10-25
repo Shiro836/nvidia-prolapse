@@ -384,7 +384,7 @@ pub fn bytes_per_sample(bit_depth: u32) -> u32 {
 }
 
 impl BuildContext<'_> {
-    pub fn gen(&self) -> NvdecGen {
+    pub fn r#gen(&self) -> NvdecGen {
         NvdecGen::of(self.decoder_class)
     }
     /// One buffer-address method in this channel's relocation encoding.

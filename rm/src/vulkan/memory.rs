@@ -4,13 +4,13 @@ use super::*;
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkAllocateMemory(
     h: vk::Device,
     p: *const vk::MemoryAllocateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::DeviceMemory,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::DeviceMemory::null();
     let p = &*p;
     if !a.is_null() || !p.p_next.is_null() || p.memory_type_index != 0 || p.allocation_size == 0 {
@@ -38,11 +38,11 @@ pub unsafe extern "system" fn vkAllocateMemory(
         }
         Err(e) => failure("allocate memory", e),
     }
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkFreeMemory(
     h: vk::Device,
     m: vk::DeviceMemory,
@@ -60,7 +60,7 @@ pub unsafe extern "system" fn vkFreeMemory(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkMapMemory(
     h: vk::Device,
     m: vk::DeviceMemory,
@@ -68,7 +68,7 @@ pub unsafe extern "system" fn vkMapMemory(
     size: u64,
     flags: vk::MemoryMapFlags,
     o: *mut *mut c_void,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = ptr::null_mut();
     let mut s = state();
     let Some(m) = s.memories.get_mut(&m.as_raw()) else {
@@ -90,17 +90,17 @@ pub unsafe extern "system" fn vkMapMemory(
     m.mapped = true;
     *o = (m.cpu + offset as usize) as *mut c_void;
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkUnmapMemory(_h: vk::Device, m: vk::DeviceMemory) {
     if let Some(m) = state().memories.get_mut(&m.as_raw()) {
         m.mapped = false;
     }
 }
-unsafe fn mapped_ranges(h: vk::Device, n: u32, p: *const vk::MappedMemoryRange) -> vk::Result {
+unsafe fn mapped_ranges(h: vk::Device, n: u32, p: *const vk::MappedMemoryRange) -> vk::Result { unsafe {
     let s = state();
     for r in slice(p, n) {
         let Some(m) = s.memories.get(&r.memory.as_raw()) else {
@@ -121,50 +121,50 @@ unsafe fn mapped_ranges(h: vk::Device, n: u32, p: *const vk::MappedMemoryRange) 
     }
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkFlushMappedMemoryRanges(
     h: vk::Device,
     n: u32,
     p: *const vk::MappedMemoryRange,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     mapped_ranges(h, n, p)
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkInvalidateMappedMemoryRanges(
     h: vk::Device,
     n: u32,
     p: *const vk::MappedMemoryRange,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     mapped_ranges(h, n, p)
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetDeviceMemoryCommitment(
     _h: vk::Device,
     m: vk::DeviceMemory,
     p: *mut u64,
-) {
+) { unsafe {
     *p = state().memories.get(&m.as_raw()).map_or(0, |m| m.size)
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateBuffer(
     h: vk::Device,
     p: *const vk::BufferCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::Buffer,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::Buffer::null();
     let p = &*p;
     let allowed = vk::BufferUsageFlags::STORAGE_BUFFER
@@ -195,11 +195,11 @@ pub unsafe extern "system" fn vkCreateBuffer(
     );
     *o = vk::Buffer::from_raw(id);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyBuffer(
     _h: vk::Device,
     b: vk::Buffer,
@@ -210,12 +210,12 @@ pub unsafe extern "system" fn vkDestroyBuffer(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetBufferMemoryRequirements(
     _h: vk::Device,
     b: vk::Buffer,
     p: *mut vk::MemoryRequirements,
-) {
+) { unsafe {
     *p = vk::MemoryRequirements::default();
     if let Some(b) = state().buffers.get(&b.as_raw()) {
         *p = vk::MemoryRequirements {
@@ -224,11 +224,11 @@ pub unsafe extern "system" fn vkGetBufferMemoryRequirements(
             memory_type_bits: 1,
         };
     }
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkBindBufferMemory(
     h: vk::Device,
     b: vk::Buffer,

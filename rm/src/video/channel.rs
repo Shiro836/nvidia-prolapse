@@ -254,7 +254,7 @@ struct PollFd {
     events: i16,
     revents: i16,
 }
-extern "C" {
+unsafe extern "C" {
     fn poll(fds: *mut PollFd, n: std::ffi::c_ulong, timeout: i32) -> i32;
 }
 

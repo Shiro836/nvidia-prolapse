@@ -1,8 +1,10 @@
 [package]
 name = "nv-bionic-native"
 version = "0.1.0"
-edition = "2021"
-publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 description = "Native NVIDIA RM backend, built directly against Android bionic"
 
 [lib]

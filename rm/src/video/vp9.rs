@@ -76,7 +76,7 @@ pub struct Vp9Decoder {
     /// Session bit depth (8 = profile 0, 10 = profile 2); surfaces are sized for it.
     bit_depth: u32,
     /// Per-generation gates of the session's NVDEC class.
-    gen: NvdecGen,
+    r#gen: NvdecGen,
 }
 
 impl Vp9Decoder {
@@ -98,7 +98,7 @@ impl Vp9Decoder {
             max: (max_width, max_height),
             frame_len: 0,
             bit_depth,
-            gen: NvdecGen::of(decoder_class),
+            r#gen: NvdecGen::of(decoder_class),
         }
     }
 
@@ -166,7 +166,7 @@ impl Vp9Decoder {
         // Stock writes the format code (and +0xeb, +0x108 below) only on blackwell_b classes
         // (gens.rs DECODE_GATES 0x3f977; Ada vp9p2 trace: +0x43 = 0).
         p.v1_bits = self.bit_depth << 1;
-        if self.gen.blackwell_b() {
+        if self.r#gen.blackwell_b() {
             p.reserved1[2] = super::surface_format_code(self.bit_depth) as u8;
         }
         if !key {
@@ -239,7 +239,7 @@ impl Vp9Decoder {
         p.mb_mode_lf_delta = self.st.mode_deltas;
         // Stock +0xeb: plane GOB kinds `luma | chroma << 2` (stock `plane_bits_90`): 9 for 8-bit,
         // 2 for 10-bit (vp9p0 / vp9p2 traces), see `super::plane_kind_bits`; blackwell_b only.
-        if self.gen.blackwell_b() {
+        if self.r#gen.blackwell_b() {
             p.reserved5 = super::plane_kind_bits(ctx.layout.bytes_per_sample) as i8;
         }
         Ok(p)
@@ -419,7 +419,7 @@ impl CodecDecoder for Vp9Decoder {
             .clone();
         let pic = self.pic(&h, ctx, self.frame_len)?;
         d[..256].copy_from_slice(pic.as_bytes());
-        if self.gen.blackwell_b() {
+        if self.r#gen.blackwell_b() {
             d[0x108..0x10c].copy_from_slice(&stock_ext_108(h.width).to_le_bytes());
         }
         for (k, (tw, th)) in tile_sizes(&h).iter().enumerate() {
@@ -469,7 +469,7 @@ impl CodecDecoder for Vp9Decoder {
         r(&mut w, 0x5d4, mva(1 - self.mv_flip));
         // Stock vp9_layout_13a8d0 / decode_picture_141d50: the 0x5dc region sits at 0x10000 and 0x4c8
         // (filter + 0) exists on GA10x+ only, else 0x5dc is at offset 0; 0x4dc on blackwell_b only.
-        let g = self.gen;
+        let g = self.r#gen;
         r(
             &mut w,
             0x5dc,
@@ -519,7 +519,7 @@ impl CodecDecoder for Vp9Decoder {
             filter: self.filter,
             // The maps keep their contents across a flush.
             seg_extent: self.seg_extent,
-            ..Self::new(self.gen.class, max.0, max.1, self.bit_depth)
+            ..Self::new(self.r#gen.class, max.0, max.1, self.bit_depth)
         };
     }
 }

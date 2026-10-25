@@ -32,7 +32,7 @@ struct PollFd {
     e: i16,
     r: i16,
 }
-extern "C" {
+unsafe extern "C" {
     fn poll(f: *mut PollFd, n: std::ffi::c_ulong, t: i32) -> i32;
     fn close(fd: i32) -> i32;
 }

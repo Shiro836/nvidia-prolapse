@@ -1532,7 +1532,7 @@ ssm 2112 96
             };
         }
         let bits = |unit: usize, f: BitField| (unit * 8 + f.shift as usize, f.width as usize);
-        let (enc, gen) = (offset_of!(P, encryption_bits), offset_of!(P, general_bits));
+        let (enc, r#gen) = (offset_of!(P, encryption_bits), offset_of!(P, general_bits));
         let (s0, s1) = (offset_of!(P, sps_bits0), offset_of!(P, sps_bits1));
         let (p0, p1) = (offset_of!(P, pps_bits0), offset_of!(P, pps_bits1));
         let (dx, v1b, v3b) = (
@@ -1558,11 +1558,11 @@ ssm 2112 96
             ),
             ("reserved0", bits(enc, RESERVED0)),
             ("gptimer_timeout_value", whole!(gptimer_timeout_value)),
-            ("tileformat", bits(gen, TILEFORMAT)),
-            ("gob_height", bits(gen, GOB_HEIGHT)),
+            ("tileformat", bits(r#gen, TILEFORMAT)),
+            ("gob_height", bits(r#gen, GOB_HEIGHT)),
             (
                 "reserverd_surface_format",
-                bits(gen, RESERVERD_SURFACE_FORMAT),
+                bits(r#gen, RESERVERD_SURFACE_FORMAT),
             ),
             ("sw_start_code_e", whole!(sw_start_code_e)),
             ("disp_output_mode", whole!(disp_output_mode)),

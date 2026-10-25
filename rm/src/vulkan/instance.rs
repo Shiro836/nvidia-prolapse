@@ -4,41 +4,41 @@ use super::*;
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
-pub unsafe extern "system" fn vkEnumerateInstanceVersion(p: *mut u32) -> vk::Result {
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn vkEnumerateInstanceVersion(p: *mut u32) -> vk::Result { unsafe {
     *p = vk::API_VERSION_1_0;
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkEnumerateInstanceExtensionProperties(
     _layer: *const c_char,
     count: *mut u32,
     out: *mut vk::ExtensionProperties,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     enumerate(count, out, &[])
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkEnumerateInstanceLayerProperties(
     count: *mut u32,
     out: *mut vk::LayerProperties,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     enumerate(count, out, &[])
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateInstance(
     info: *const vk::InstanceCreateInfo,
     alloc: *const vk::AllocationCallbacks,
     out: *mut vk::Instance,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *out = vk::Instance::null();
     let i = &*info;
     if i.enabled_extension_count != 0 {
@@ -78,45 +78,45 @@ pub unsafe extern "system" fn vkCreateInstance(
     s.physical.insert(p, h);
     *out = vk::Instance::from_raw(h);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyInstance(
     h: vk::Instance,
     _a: *const vk::AllocationCallbacks,
-) {
+) { unsafe {
     let mut s = state();
     if let Some(i) = s.instances.remove(&h.as_raw()) {
         s.physical.remove(&i.physical);
         drop_dispatch(i.physical);
         drop_dispatch(h.as_raw());
     }
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkEnumeratePhysicalDevices(
     h: vk::Instance,
     n: *mut u32,
     p: *mut vk::PhysicalDevice,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let s = state();
     let Some(i) = s.instances.get(&h.as_raw()) else {
         return BAD;
     };
     enumerate(n, p, &[vk::PhysicalDevice::from_raw(i.physical)])
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetPhysicalDeviceProperties(
     h: vk::PhysicalDevice,
     p: *mut vk::PhysicalDeviceProperties,
-) {
+) { unsafe {
     let s = state();
     *p = vk::PhysicalDeviceProperties::default();
     let Some(i) = s.physical.get(&h.as_raw()).and_then(|i| s.instances.get(i)) else {
@@ -150,25 +150,25 @@ pub unsafe extern "system" fn vkGetPhysicalDeviceProperties(
     l.min_storage_buffer_offset_alignment = 16;
     l.non_coherent_atom_size = 64;
     l.buffer_image_granularity = 4096;
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetPhysicalDeviceFeatures(
     _h: vk::PhysicalDevice,
     p: *mut vk::PhysicalDeviceFeatures,
-) {
+) { unsafe {
     *p = vk::PhysicalDeviceFeatures::default()
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetPhysicalDeviceMemoryProperties(
     h: vk::PhysicalDevice,
     p: *mut vk::PhysicalDeviceMemoryProperties,
-) {
+) { unsafe {
     *p = vk::PhysicalDeviceMemoryProperties::default();
     let s = state();
     let Some(i) = s.physical.get(&h.as_raw()).and_then(|i| s.instances.get(i)) else {
@@ -186,16 +186,16 @@ pub unsafe extern "system" fn vkGetPhysicalDeviceMemoryProperties(
             | vk::MemoryPropertyFlags::HOST_COHERENT,
         heap_index: 0,
     };
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetPhysicalDeviceQueueFamilyProperties(
     _h: vk::PhysicalDevice,
     n: *mut u32,
     p: *mut vk::QueueFamilyProperties,
-) {
+) { unsafe {
     let q = vk::QueueFamilyProperties {
         queue_flags: vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
         queue_count: 1,
@@ -207,22 +207,22 @@ pub unsafe extern "system" fn vkGetPhysicalDeviceQueueFamilyProperties(
         },
     };
     let _ = enumerate(n, p, &[q]);
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetPhysicalDeviceFormatProperties(
     _h: vk::PhysicalDevice,
     _f: vk::Format,
     p: *mut vk::FormatProperties,
-) {
+) { unsafe {
     *p = vk::FormatProperties::default()
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetPhysicalDeviceImageFormatProperties(
     _h: vk::PhysicalDevice,
     _f: vk::Format,
@@ -237,7 +237,7 @@ pub unsafe extern "system" fn vkGetPhysicalDeviceImageFormatProperties(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetPhysicalDeviceSparseImageFormatProperties(
     _h: vk::PhysicalDevice,
     _f: vk::Format,
@@ -247,42 +247,42 @@ pub unsafe extern "system" fn vkGetPhysicalDeviceSparseImageFormatProperties(
     _tiling: vk::ImageTiling,
     n: *mut u32,
     _p: *mut vk::SparseImageFormatProperties,
-) {
+) { unsafe {
     *n = 0
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkEnumerateDeviceExtensionProperties(
     _h: vk::PhysicalDevice,
     _layer: *const c_char,
     n: *mut u32,
     p: *mut vk::ExtensionProperties,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     enumerate(n, p, &[])
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkEnumerateDeviceLayerProperties(
     _h: vk::PhysicalDevice,
     n: *mut u32,
     p: *mut vk::LayerProperties,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     enumerate(n, p, &[])
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateDevice(
     h: vk::PhysicalDevice,
     p: *const vk::DeviceCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::Device,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::Device::null();
     let p = &*p;
     if p.enabled_extension_count != 0 {
@@ -330,35 +330,35 @@ pub unsafe extern "system" fn vkCreateDevice(
     s.queues.insert(q, h);
     *o = vk::Device::from_raw(h);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
-pub unsafe extern "system" fn vkDestroyDevice(h: vk::Device, _a: *const vk::AllocationCallbacks) {
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn vkDestroyDevice(h: vk::Device, _a: *const vk::AllocationCallbacks) { unsafe {
     let mut s = state();
     if let Some(d) = s.devices.remove(&h.as_raw()) {
         s.queues.remove(&d.queue);
         drop_dispatch(d.queue);
         drop_dispatch(h.as_raw());
     }
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
-pub unsafe extern "system" fn vkGetDeviceQueue(h: vk::Device, f: u32, i: u32, o: *mut vk::Queue) {
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn vkGetDeviceQueue(h: vk::Device, f: u32, i: u32, o: *mut vk::Queue) { unsafe {
     *o = vk::Queue::null();
     if f == 0 && i == 0 {
         if let Some(d) = state().devices.get(&h.as_raw()) {
             *o = vk::Queue::from_raw(d.queue)
         }
     }
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDeviceWaitIdle(h: vk::Device) -> vk::Result {
     let s = state();
     let Some(b) = backend(&s, h.as_raw()) else {
@@ -372,11 +372,11 @@ pub unsafe extern "system" fn vkDeviceWaitIdle(h: vk::Device) -> vk::Result {
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
-pub unsafe extern "system" fn vkQueueWaitIdle(h: vk::Queue) -> vk::Result {
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn vkQueueWaitIdle(h: vk::Queue) -> vk::Result { unsafe {
     let d = state().queues.get(&h.as_raw()).copied();
     match d {
         Some(d) => vkDeviceWaitIdle(vk::Device::from_raw(d)),
         None => BAD,
     }
-}
+}}

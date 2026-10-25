@@ -1827,7 +1827,7 @@ fn status_of(result: Result<SubmitStatus>, out: *mut u64) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_open(
     domain: u32,
     bus: u32,
@@ -1850,7 +1850,7 @@ pub unsafe extern "C" fn nv_rm_open(
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_close(p: *mut Bridge) {
     if !p.is_null() {
         // Teardown panics must not unwind into C either; the bridge memory is
@@ -1863,7 +1863,7 @@ pub unsafe extern "C" fn nv_rm_close(p: *mut Bridge) {
 }
 /// nv_rm.h NV_RM_PLACEMENT_VRAM_COMPRESSIBLE.
 const PLACEMENT_VRAM_COMPRESSIBLE: u32 = 2;
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_alloc(
     p: *mut Bridge,
     size: u64,
@@ -1935,7 +1935,7 @@ fn next_id(s: &mut Inner) -> Result<u64> {
 }
 /// Logical maps are independent from the lazy retained allocation mapping.
 /// Idle mappings remain reclaimable; allocation free performs real teardown.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_map(p: *mut Bridge, memory: u64, out: *mut usize) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -1962,7 +1962,7 @@ pub unsafe extern "C" fn nv_rm_map(p: *mut Bridge, memory: u64, out: *mut usize)
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_unmap(p: *mut Bridge, memory: u64) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -1984,7 +1984,7 @@ pub unsafe extern "C" fn nv_rm_unmap(p: *mut Bridge, memory: u64) -> i32 {
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: u64) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -2016,7 +2016,7 @@ pub unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: u64) -> i32 {
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_bind(
     p: *mut Bridge,
     memory: u64,
@@ -2060,7 +2060,7 @@ pub unsafe extern "C" fn nv_rm_bind(
                 let stale: Vec<u64> = cap
                     .binds
                     .range(..address + size)
-                    .filter(|(&start, &(len, _, _))| start + len > address)
+                    .filter(|&(&start, &(len, _, _))| start + len > address)
                     .map(|(&start, _)| start)
                     .collect();
                 for start in stale {
@@ -2075,7 +2075,7 @@ pub unsafe extern "C" fn nv_rm_bind(
 /// Immediate RM unmap, no GPU wait. Only for application-ordered Vulkan
 /// binds: Vulkan forbids rebinding/unbinding memory that pending work uses
 /// (see nv_rm.h). Driver teardown of a VA uses nv_rm_va_free instead.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: u64) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -2106,7 +2106,7 @@ pub unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: u64) -> i32 {
 /// the RM unmaps run and `release(data, address, size)` hands the range back
 /// to the caller's heap only once every queue's work submitted before this
 /// call has retired (immediately when nothing is outstanding). See nv_rm.h.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_va_free(
     p: *mut Bridge,
     mappings: *const u64,
@@ -2172,7 +2172,7 @@ pub unsafe extern "C" fn nv_rm_va_free(
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_create(p: *mut Bridge, engines: u32, out: *mut u64) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -2190,7 +2190,7 @@ pub unsafe extern "C" fn nv_rm_context_create(p: *mut Bridge, engines: u32, out:
 /// Create a context whose channel joins `share`'s TSG on the lowest free
 /// subcontext (VEID); work on the two contexts can run on the GR engine at
 /// the same time. Compute engine only; needs Volta+ subcontexts.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_create_shared(
     p: *mut Bridge,
     engines: u32,
@@ -2210,7 +2210,7 @@ pub unsafe extern "C" fn nv_rm_context_create_shared(
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -2245,7 +2245,7 @@ pub unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -> i32 {
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_submit_waits(
     p: *mut Bridge,
     id: u64,
@@ -2284,7 +2284,7 @@ pub unsafe extern "C" fn nv_rm_submit_waits(
         status_of(result, out)
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_submit(
     p: *mut Bridge,
     id: u64,
@@ -2296,7 +2296,7 @@ pub unsafe extern "C" fn nv_rm_submit(
         nv_rm_submit_waits(p, id, pushes, count, -1, std::ptr::null(), 0, out)
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_poll(
     p: *mut Bridge,
     id: u64,
@@ -2315,7 +2315,7 @@ pub unsafe extern "C" fn nv_rm_poll(
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_wait(p: *mut Bridge, id: u64, token: u64, timeout_ns: u64) -> i32 {
     ffi(p as *const Bridge, move || {
         let mut status = 0;
@@ -2334,7 +2334,7 @@ pub unsafe extern "C" fn nv_rm_wait(p: *mut Bridge, id: u64, token: u64, timeout
         }
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_fence(
     p: *mut Bridge,
     id: u64,
@@ -2359,7 +2359,7 @@ pub unsafe extern "C" fn nv_rm_context_fence(
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_exec(
     p: *mut Bridge,
     id: u64,
@@ -2384,7 +2384,7 @@ pub unsafe extern "C" fn nv_rm_exec(
 /// Mesa's device-status hook (after Vulkan waits): loss flag plus the
 /// throttled authoritative channel scan; foreign/shared producer errors were
 /// already published as loss by their observer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_check_status(p: *mut Bridge) -> i32 {
     ffi(p as *const Bridge, move || {
         let result = report((|| {
@@ -2404,13 +2404,13 @@ pub unsafe extern "C" fn nv_rm_check_status(p: *mut Bridge) -> i32 {
 /// run under a Mesa queue mutex: atomics, condvar notify and eventfd writes
 /// only — never Inner, RM ioctls or GPU waits. Submission stop and shared
 /// failure publication follow on the next locked call / watcher / close.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_mark_lost(p: *const Bridge) {
     if let Some(bridge) = unsafe { p.as_ref() } {
         bridge.core.mark_lost();
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_is_lost(p: *const Bridge) -> i32 {
     ffi(p, move || {
         if p.is_null() {
@@ -2419,7 +2419,7 @@ pub unsafe extern "C" fn nv_rm_is_lost(p: *const Bridge) -> i32 {
         i32::from(unsafe { &*p }.core.is_lost())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_timestamp(p: *mut Bridge, out: *mut u64) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -2434,7 +2434,7 @@ pub unsafe extern "C" fn nv_rm_timestamp(p: *mut Bridge, out: *mut u64) -> i32 {
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_export(
     p: *mut Bridge,
     memory: u64,
@@ -2461,7 +2461,7 @@ pub unsafe extern "C" fn nv_rm_export(
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_import(
     p: *mut Bridge,
     drm_fd: i32,
@@ -2502,7 +2502,7 @@ pub unsafe extern "C" fn nv_rm_import(
 }
 
 // ---- synchronization ABI (all caller-side) ------------------------------
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_create(
     p: *mut Bridge,
     flags: u32,
@@ -2529,7 +2529,7 @@ pub unsafe extern "C" fn nv_rm_sync_create(
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_destroy(_p: *mut Bridge, id: u64) -> i32 {
     ffi(_p as *const Bridge, move || {
         report((|| {
@@ -2544,7 +2544,7 @@ pub unsafe extern "C" fn nv_rm_sync_destroy(_p: *mut Bridge, id: u64) -> i32 {
 }
 /// Kept for ABI stability: destruction is now immediate on the caller (there
 /// is no worker queue to defer to); Mesa's void finish callback still uses it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_destroy_deferred(p: *mut Bridge, id: u64) -> i32 {
     ffi(p as *const Bridge, move || {
         if p.is_null() {
@@ -2556,7 +2556,7 @@ pub unsafe extern "C" fn nv_rm_sync_destroy_deferred(p: *mut Bridge, id: u64) ->
 fn needs_slot(error: &Error) -> bool {
     matches!(error, Error::Contract(m) if m.ends_with("needs a replacement slot"))
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: u64) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -2584,7 +2584,7 @@ pub unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: u64) -> i32 {
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_move(
     p: *mut Bridge,
     dst: u64,
@@ -2616,7 +2616,7 @@ pub unsafe extern "C" fn nv_rm_sync_move(
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_signal(p: *mut Bridge, id: u64, value: u64) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -2646,7 +2646,7 @@ pub unsafe extern "C" fn nv_rm_sync_signal(p: *mut Bridge, id: u64, value: u64) 
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_get_value(p: *mut Bridge, id: u64, out: *mut u64) -> i32 {
     ffi(p as *const Bridge, move || {
         report((|| {
@@ -2661,7 +2661,7 @@ pub unsafe extern "C" fn nv_rm_sync_get_value(p: *mut Bridge, id: u64, out: *mut
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_status_many(
     p: *mut Bridge,
     points: *const SyncPoint,
@@ -2685,7 +2685,7 @@ pub unsafe extern "C" fn nv_rm_sync_status_many(
 }
 /// Returns 0 on completion, 2 on caller timeout, negative on failure. Waits
 /// on the calling thread (leader/follower on the device HOST descriptor).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_wait_many(
     p: *mut Bridge,
     points: *const SyncPoint,
@@ -2711,7 +2711,7 @@ pub unsafe extern "C" fn nv_rm_sync_wait_many(
         }
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_import_fd(
     p: *mut Bridge,
     id: u64,
@@ -2735,7 +2735,7 @@ pub unsafe extern "C" fn nv_rm_sync_import_fd(
         })())
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_export_fd(
     p: *mut Bridge,
     id: u64,
@@ -2776,7 +2776,7 @@ pub unsafe extern "C" fn nv_rm_sync_export_fd(
 /// slot; `src` reports the signal as pending. `*reserved` = 0 when `src`
 /// cannot be reserved (not an unsignaled native binary without a pending
 /// signal), in which case nothing changed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_reserve(
     p: *mut Bridge,
     dst: u64,
@@ -2805,7 +2805,7 @@ pub unsafe extern "C" fn nv_rm_sync_reserve(
     })
 }
 /// Submit commands, dependencies and final signal payloads in one transaction.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_submit_batch(
     p: *mut Bridge,
     id: u64,
@@ -2830,7 +2830,7 @@ pub unsafe extern "C" fn nv_rm_submit_batch(
         status_of(result, out)
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_submit_sync(
     p: *mut Bridge,
     id: u64,
@@ -2854,7 +2854,7 @@ pub unsafe extern "C" fn nv_rm_submit_sync(
         )
     })
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_signal(
     p: *mut Bridge,
     id: u64,

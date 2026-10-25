@@ -4,13 +4,13 @@ use super::*;
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateShaderModule(
     _h: vk::Device,
     p: *const vk::ShaderModuleCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::ShaderModule,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::ShaderModule::null();
     let p = &*p;
     if !a.is_null()
@@ -31,11 +31,11 @@ pub unsafe extern "system" fn vkCreateShaderModule(
     s.shaders.insert(id, words.to_vec());
     *o = vk::ShaderModule::from_raw(id);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyShaderModule(
     _h: vk::Device,
     m: vk::ShaderModule,
@@ -46,13 +46,13 @@ pub unsafe extern "system" fn vkDestroyShaderModule(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateDescriptorSetLayout(
     _h: vk::Device,
     p: *const vk::DescriptorSetLayoutCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::DescriptorSetLayout,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::DescriptorSetLayout::null();
     let p = &*p;
     if !a.is_null() || !p.p_next.is_null() || !p.flags.is_empty() {
@@ -75,11 +75,11 @@ pub unsafe extern "system" fn vkCreateDescriptorSetLayout(
     s.layouts.insert(id, Layout { bindings });
     *o = vk::DescriptorSetLayout::from_raw(id);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyDescriptorSetLayout(
     _h: vk::Device,
     l: vk::DescriptorSetLayout,
@@ -90,13 +90,13 @@ pub unsafe extern "system" fn vkDestroyDescriptorSetLayout(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreatePipelineLayout(
     _h: vk::Device,
     p: *const vk::PipelineLayoutCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::PipelineLayout,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::PipelineLayout::null();
     let p = &*p;
     if !a.is_null() || !p.p_next.is_null() || !p.flags.is_empty() || p.set_layout_count > 1 {
@@ -127,11 +127,11 @@ pub unsafe extern "system" fn vkCreatePipelineLayout(
     s.pipeline_layouts.insert(id, PipelineLayout { set, push });
     *o = vk::PipelineLayout::from_raw(id);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyPipelineLayout(
     _h: vk::Device,
     l: vk::PipelineLayout,
@@ -142,7 +142,7 @@ pub unsafe extern "system" fn vkDestroyPipelineLayout(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateComputePipelines(
     h: vk::Device,
     _cache: vk::PipelineCache,
@@ -150,7 +150,7 @@ pub unsafe extern "system" fn vkCreateComputePipelines(
     p: *const vk::ComputePipelineCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::Pipeline,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let mut s = state();
     for j in 0..n as usize {
         *o.add(j) = vk::Pipeline::null()
@@ -193,11 +193,11 @@ pub unsafe extern "system" fn vkCreateComputePipelines(
         *o.add(j) = vk::Pipeline::from_raw(id)
     }
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyPipeline(
     _h: vk::Device,
     p: vk::Pipeline,
@@ -208,13 +208,13 @@ pub unsafe extern "system" fn vkDestroyPipeline(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreatePipelineCache(
     h: vk::Device,
     p: *const vk::PipelineCacheCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::PipelineCache,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::PipelineCache::null();
     let p = &*p;
     if !a.is_null() || !p.p_next.is_null() || !p.flags.is_empty() || p.initial_data_size != 0 {
@@ -225,11 +225,11 @@ pub unsafe extern "system" fn vkCreatePipelineCache(
     s.caches.insert(id, h.as_raw());
     *o = vk::PipelineCache::from_raw(id);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyPipelineCache(
     _h: vk::Device,
     c: vk::PipelineCache,
@@ -240,13 +240,13 @@ pub unsafe extern "system" fn vkDestroyPipelineCache(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetPipelineCacheData(
     h: vk::Device,
     c: vk::PipelineCache,
     n: *mut usize,
     p: *mut c_void,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let s = state();
     if s.caches.get(&c.as_raw()) != Some(&h.as_raw()) {
         return BAD;
@@ -275,11 +275,11 @@ pub unsafe extern "system" fn vkGetPipelineCacheData(
     } else {
         vk::Result::SUCCESS
     }
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkMergePipelineCaches(
     _h: vk::Device,
     _dst: vk::PipelineCache,
@@ -291,13 +291,13 @@ pub unsafe extern "system" fn vkMergePipelineCaches(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateDescriptorPool(
     h: vk::Device,
     p: *const vk::DescriptorPoolCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::DescriptorPool,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::DescriptorPool::null();
     let p = &*p;
     if !a.is_null()
@@ -315,11 +315,11 @@ pub unsafe extern "system" fn vkCreateDescriptorPool(
     s.descriptor_pools.insert(id, (h.as_raw(), p.max_sets));
     *o = vk::DescriptorPool::from_raw(id);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyDescriptorPool(
     _h: vk::Device,
     p: vk::DescriptorPool,
@@ -332,7 +332,7 @@ pub unsafe extern "system" fn vkDestroyDescriptorPool(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkResetDescriptorPool(
     _h: vk::Device,
     p: vk::DescriptorPool,
@@ -347,12 +347,12 @@ pub unsafe extern "system" fn vkResetDescriptorPool(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkAllocateDescriptorSets(
     h: vk::Device,
     p: *const vk::DescriptorSetAllocateInfo,
     o: *mut vk::DescriptorSet,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let p = &*p;
     let mut s = state();
     let Some(&(dev, max)) = s.descriptor_pools.get(&p.descriptor_pool.as_raw()) else {
@@ -388,34 +388,34 @@ pub unsafe extern "system" fn vkAllocateDescriptorSets(
         *o.add(j) = vk::DescriptorSet::from_raw(id)
     }
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkFreeDescriptorSets(
     _h: vk::Device,
     _pool: vk::DescriptorPool,
     n: u32,
     p: *const vk::DescriptorSet,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let mut s = state();
     for d in slice(p, n) {
         s.sets.remove(&d.as_raw());
     }
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkUpdateDescriptorSets(
     h: vk::Device,
     n: u32,
     p: *const vk::WriteDescriptorSet,
     cn: u32,
     cp: *const vk::CopyDescriptorSet,
-) {
+) { unsafe {
     let mut s = state();
     for w in slice(p, n) {
         let valid = s
@@ -465,4 +465,4 @@ pub unsafe extern "system" fn vkUpdateDescriptorSets(
             }
         }
     }
-}
+}}

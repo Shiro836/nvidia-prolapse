@@ -138,7 +138,7 @@ fn null<T>(p: *const T, what: &str) -> Result<(), VideoError> {
 
 /// # Safety
 /// `out` must be writable; `info` NULL or writable.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_device_open(
     out: *mut *mut NvVideoDevice,
     info: *mut NvVideoDeviceInfo,
@@ -158,7 +158,7 @@ pub unsafe extern "C" fn nv_video_device_open(
 
 /// # Safety
 /// `dev` from nv_video_device_open (or NULL), not used afterwards.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_device_close(dev: *mut NvVideoDevice) {
     if !dev.is_null() {
         // SAFETY: ownership returns from the caller.
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn nv_video_device_close(dev: *mut NvVideoDevice) {
 
 /// # Safety
 /// Valid device and writable caps.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_query_caps(
     dev: *mut NvVideoDevice,
     codec: u32,
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn nv_video_query_caps(
 
 /// # Safety
 /// Valid device, info and out pointers; codec_config readable for its length.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_session_create(
     dev: *mut NvVideoDevice,
     info: *const NvVideoSessionInfo,
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn nv_video_session_create(
 
 /// # Safety
 /// `s` from nv_video_session_create (or NULL), not used afterwards.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_session_destroy(s: *mut NvVideoSession) {
     if !s.is_null() {
         // SAFETY: ownership returns from the caller.
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn nv_video_session_destroy(s: *mut NvVideoSession) {
 
 /// # Safety
 /// Valid session; `data` readable for `len` bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_decode(
     s: *mut NvVideoSession,
     data: *const u8,
@@ -260,7 +260,7 @@ pub unsafe extern "C" fn nv_video_decode(
 
 /// # Safety
 /// Valid session and writable picture.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_next_picture(
     s: *mut NvVideoSession,
     pic: *mut NvVideoPicture,
@@ -295,7 +295,7 @@ pub unsafe extern "C" fn nv_video_next_picture(
 
 /// # Safety
 /// Valid session, writable metadata.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_picture_hdr(
     s: *mut NvVideoSession,
     id: u64,
@@ -312,7 +312,7 @@ pub unsafe extern "C" fn nv_video_picture_hdr(
 
 /// # Safety
 /// Valid session, writable width/height.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_required_size(
     s: *mut NvVideoSession,
     width: *mut u32,
@@ -335,7 +335,7 @@ pub unsafe extern "C" fn nv_video_required_size(
 
 /// # Safety
 /// Valid session.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_flush(s: *mut NvVideoSession) -> i32 {
     guard(|| {
         null(s, "session")?;
@@ -346,7 +346,7 @@ pub unsafe extern "C" fn nv_video_flush(s: *mut NvVideoSession) -> i32 {
 
 /// # Safety
 /// Valid session, target and fence pointer; target fds live for the call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_copy_out(
     s: *mut NvVideoSession,
     id: u64,
@@ -378,7 +378,7 @@ pub unsafe extern "C" fn nv_video_copy_out(
 
 /// # Safety
 /// Valid session.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_video_picture_release(s: *mut NvVideoSession, id: u64) -> i32 {
     guard(|| {
         null(s, "session")?;
@@ -387,7 +387,7 @@ pub unsafe extern "C" fn nv_video_picture_release(s: *mut NvVideoSession, id: u6
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nv_video_last_error() -> *const std::ffi::c_char {
     LAST_ERROR.with(|l| l.borrow().as_ptr())
 }

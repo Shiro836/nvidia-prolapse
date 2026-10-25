@@ -4,13 +4,13 @@ use super::*;
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateFence(
     h: vk::Device,
     p: *const vk::FenceCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::Fence,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::Fence::null();
     let p = &*p;
     if !a.is_null()
@@ -27,11 +27,11 @@ pub unsafe extern "system" fn vkCreateFence(
     );
     *o = vk::Fence::from_raw(id);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyFence(
     _h: vk::Device,
     f: vk::Fence,
@@ -42,7 +42,7 @@ pub unsafe extern "system" fn vkDestroyFence(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetFenceStatus(h: vk::Device, f: vk::Fence) -> vk::Result {
     match state().fences.get(&f.as_raw()) {
         Some(&(dev, true)) if dev == h.as_raw() => vk::Result::SUCCESS,
@@ -53,12 +53,12 @@ pub unsafe extern "system" fn vkGetFenceStatus(h: vk::Device, f: vk::Fence) -> v
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkResetFences(
     h: vk::Device,
     n: u32,
     p: *const vk::Fence,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let mut s = state();
     for f in slice(p, n) {
         let Some((dev, signal)) = s.fences.get_mut(&f.as_raw()) else {
@@ -70,18 +70,18 @@ pub unsafe extern "system" fn vkResetFences(
         *signal = false;
     }
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkWaitForFences(
     h: vk::Device,
     n: u32,
     p: *const vk::Fence,
     all: vk::Bool32,
     timeout: u64,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let start = std::time::Instant::now();
     loop {
         {
@@ -105,17 +105,17 @@ pub unsafe extern "system" fn vkWaitForFences(
         }
         std::thread::sleep(std::time::Duration::from_nanos(timeout.min(100_000)));
     }
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateSemaphore(
     h: vk::Device,
     p: *const vk::SemaphoreCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::Semaphore,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::Semaphore::null();
     let p = &*p;
     if !a.is_null() || !p.p_next.is_null() || !p.flags.is_empty() {
@@ -126,11 +126,11 @@ pub unsafe extern "system" fn vkCreateSemaphore(
     s.semaphores.insert(id, (h.as_raw(), false));
     *o = vk::Semaphore::from_raw(id);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroySemaphore(
     _h: vk::Device,
     p: vk::Semaphore,

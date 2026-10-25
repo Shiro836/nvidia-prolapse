@@ -38,7 +38,7 @@ pub struct HevcDecoder {
     epoch_max_poc: Option<i32>,
     /// Session bit depth (8 = Main, 10 = Main 10); surfaces are sized for it.
     bit_depth: u32,
-    gen: NvdecGen,
+    r#gen: NvdecGen,
 }
 
 fn filter_layout(max_height: u32) -> (FilterOffsets, u64, u64, u64) {
@@ -116,7 +116,7 @@ impl HevcDecoder {
             epoch: 0,
             epoch_max_poc: None,
             bit_depth,
-            gen: NvdecGen::of(decoder_class),
+            r#gen: NvdecGen::of(decoder_class),
         })
     }
 }
@@ -251,10 +251,10 @@ impl CodecDecoder for HevcDecoder {
         reloc(&mut w, 0x588, self.filter);
         // Stock method list (gens.rs DECODE_GATES 0x443bc / 0x443c7): 0x4c8 on GA10x+, 0x4dc on
         // blackwell_b classes only (Ada trace: 0x588, 0x4c8, no 0x4dc).
-        if self.gen.ga10x_plus() {
+        if self.r#gen.ga10x_plus() {
             reloc(&mut w, 0x4c8, self.intra_top);
         }
-        if self.gen.blackwell_b() {
+        if self.r#gen.blackwell_b() {
             reloc(&mut w, 0x4dc, self.buf_4dc);
         }
         reloc(&mut w, 0x470, slot_surface[16].luma);

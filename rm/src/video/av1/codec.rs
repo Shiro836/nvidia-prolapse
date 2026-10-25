@@ -336,7 +336,7 @@ impl CodecDecoder for Av1Decoder {
         } else {
             Surf::Session(ctx.current)
         });
-        j.build_descriptor(ctx.layout.pitch, ctx.gen().blackwell_b(), d);
+        j.build_descriptor(ctx.layout.pitch, ctx.r#gen().blackwell_b(), d);
         if let Some(q) = j.cdf_default_qctx {
             self.cdf_alias[j.cdf_read] = Some(q);
         }
@@ -411,7 +411,7 @@ impl CodecDecoder for Av1Decoder {
         r(&mut w, 0x640, cdf_read);
         r(&mut w, 0x644, cdf_write);
         // 0x4dc on blackwell_b classes only (gens.rs DECODE_GATES 0x44daf; Ada trace: none).
-        if ctx.gen().blackwell_b() {
+        if ctx.r#gen().blackwell_b() {
             r(&mut w, 0x4dc, self.filter + fl.extra_4dc);
         }
         r(&mut w, 0x450, target.luma);

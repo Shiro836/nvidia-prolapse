@@ -159,7 +159,7 @@ pub(crate) struct Config {
 
 #[cfg(target_os = "android")]
 fn property(name: &str) -> Option<String> {
-    extern "C" {
+    unsafe extern "C" {
         fn __system_property_get(
             name: *const std::os::raw::c_char,
             value: *mut std::os::raw::c_char,

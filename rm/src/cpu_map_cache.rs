@@ -45,16 +45,16 @@ impl<M> Slot<M> {
         // Drop unlinks before dropping Mapping, which can release the final
         // Device/registry owner. Weak neighbors never extend buffer lifetime.
         if let Some(registry) = self.registry.upgrade() {
-            if let Some(previous) = links.previous.upgrade() {
+            match links.previous.upgrade() { Some(previous) => {
                 previous.links.borrow_mut().next = links.next.clone();
-            } else {
+            } _ => {
                 registry.ends.borrow_mut().head = links.next.clone();
-            }
-            if let Some(next) = links.next.upgrade() {
+            }}
+            match links.next.upgrade() { Some(next) => {
                 next.links.borrow_mut().previous = links.previous;
-            } else {
+            } _ => {
                 registry.ends.borrow_mut().tail = links.previous;
-            }
+            }}
         }
     }
     fn enqueue_idle(&self) {
@@ -63,11 +63,11 @@ impl<M> Slot<M> {
             return;
         };
         let tail = registry.ends.borrow().tail.clone();
-        if let Some(previous) = tail.upgrade() {
+        match tail.upgrade() { Some(previous) => {
             previous.links.borrow_mut().next = self.identity.clone();
-        } else {
+        } _ => {
             registry.ends.borrow_mut().head = self.identity.clone();
-        }
+        }}
         *self.links.borrow_mut() = Links {
             previous: tail,
             next: Weak::new(),

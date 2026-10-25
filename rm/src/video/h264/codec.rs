@@ -36,7 +36,7 @@ pub struct H264Decoder {
     mbhist: u64,
     history: u64,
     reorder: u32,
-    gen: NvdecGen,
+    r#gen: NvdecGen,
 }
 
 impl H264Decoder {
@@ -77,7 +77,7 @@ impl H264Decoder {
             mbhist: 0,
             history: 0,
             reorder: 16,
-            gen: NvdecGen::of(decoder_class),
+            r#gen: NvdecGen::of(decoder_class),
         })
     }
 }
@@ -205,10 +205,10 @@ impl CodecDecoder for H264Decoder {
             reloc(&mut w, 0x4d0, self.filter);
             // NEW_H264 runs on Blackwell+ only (all GA10x+); 0x4dc on blackwell_b classes only
             // (gens.rs DECODE_GATES 0x443bc / 0x43ec5).
-            if self.gen.ga10x_plus() {
+            if self.r#gen.ga10x_plus() {
                 reloc(&mut w, 0x4c8, self.intra_top);
             }
-            if self.gen.blackwell_b() {
+            if self.r#gen.blackwell_b() {
                 reloc(&mut w, 0x4dc, self.buf_4dc);
             }
         }

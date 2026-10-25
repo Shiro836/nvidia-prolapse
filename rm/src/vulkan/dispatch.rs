@@ -4,32 +4,32 @@ use super::*;
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
-pub unsafe extern "system" fn vk_icdNegotiateLoaderICDInterfaceVersion(p: *mut u32) -> vk::Result {
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn vk_icdNegotiateLoaderICDInterfaceVersion(p: *mut u32) -> vk::Result { unsafe {
     if p.is_null() {
         return vk::Result::ERROR_INITIALIZATION_FAILED;
     }
     *p = (*p).min(5);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
     h: vk::Instance,
     p: *const c_char,
-) -> vk::PFN_vkVoidFunction {
+) -> vk::PFN_vkVoidFunction { unsafe {
     vkGetInstanceProcAddr(h, p)
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vk_icdGetPhysicalDeviceProcAddr(
     h: vk::Instance,
     p: *const c_char,
-) -> vk::PFN_vkVoidFunction {
+) -> vk::PFN_vkVoidFunction { unsafe {
     if p.is_null() {
         return None;
     }
@@ -45,15 +45,15 @@ pub unsafe extern "system" fn vk_icdGetPhysicalDeviceProcAddr(
         return None;
     }
     vkGetInstanceProcAddr(h, p)
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetDeviceProcAddr(
     h: vk::Device,
     p: *const c_char,
-) -> vk::PFN_vkVoidFunction {
+) -> vk::PFN_vkVoidFunction { unsafe {
     if h == vk::Device::null() || p.is_null() {
         return None;
     }
@@ -71,18 +71,18 @@ pub unsafe extern "system" fn vkGetDeviceProcAddr(
         return None;
     }
     lookup(p, false)
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkGetInstanceProcAddr(
     h: vk::Instance,
     p: *const c_char,
-) -> vk::PFN_vkVoidFunction {
+) -> vk::PFN_vkVoidFunction { unsafe {
     lookup(p, h == vk::Instance::null())
-}
-unsafe fn lookup(p: *const c_char, global: bool) -> vk::PFN_vkVoidFunction {
+}}
+unsafe fn lookup(p: *const c_char, global: bool) -> vk::PFN_vkVoidFunction { unsafe {
     if p.is_null() {
         return None;
     }
@@ -171,4 +171,4 @@ unsafe fn lookup(p: *const c_char, global: bool) -> vk::PFN_vkVoidFunction {
         vkDestroySemaphore
     );
     None
-}
+}}

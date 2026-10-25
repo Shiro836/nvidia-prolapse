@@ -24,11 +24,11 @@ struct Dispatch {
 fn dispatch() -> u64 {
     Box::into_raw(Box::new(Dispatch { loader: 0x01CDC0DE })) as u64
 }
-unsafe fn drop_dispatch(h: u64) {
+unsafe fn drop_dispatch(h: u64) { unsafe {
     if h != 0 {
         drop(Box::from_raw(h as *mut Dispatch));
     }
-}
+}}
 struct Instance {
     backend: Arc<Backend>,
     physical: u64,
@@ -135,14 +135,14 @@ fn failure(label: &str, e: impl std::fmt::Display) -> vk::Result {
     eprintln!("native Vulkan {label}: {e}");
     vk::Result::ERROR_DEVICE_LOST
 }
-unsafe fn slice<'a, T>(p: *const T, n: u32) -> &'a [T] {
+unsafe fn slice<'a, T>(p: *const T, n: u32) -> &'a [T] { unsafe {
     if n == 0 {
         &[]
     } else {
         std::slice::from_raw_parts(p, n as usize)
     }
-}
-unsafe fn enumerate<T: Copy>(count: *mut u32, out: *mut T, values: &[T]) -> vk::Result {
+}}
+unsafe fn enumerate<T: Copy>(count: *mut u32, out: *mut T, values: &[T]) -> vk::Result { unsafe {
     if count.is_null() {
         return vk::Result::ERROR_INITIALIZATION_FAILED;
     }
@@ -158,8 +158,8 @@ unsafe fn enumerate<T: Copy>(count: *mut u32, out: *mut T, values: &[T]) -> vk::
     } else {
         vk::Result::SUCCESS
     }
-}
-unsafe fn loader_chain(mut p: *const c_void, allowed: i32) -> bool {
+}}
+unsafe fn loader_chain(mut p: *const c_void, allowed: i32) -> bool { unsafe {
     let mut count = 0;
     while !p.is_null() {
         let h = &*(p as *const vk::BaseInStructure);
@@ -170,7 +170,7 @@ unsafe fn loader_chain(mut p: *const c_void, allowed: i32) -> bool {
         count += 1;
     }
     true
-}
+}}
 fn backend(s: &State, device: u64) -> Option<Arc<Backend>> {
     s.devices.get(&device).map(|d| d.backend.clone())
 }

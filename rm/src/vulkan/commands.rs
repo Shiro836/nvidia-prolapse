@@ -5,13 +5,13 @@ use super::*;
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCreateCommandPool(
     h: vk::Device,
     p: *const vk::CommandPoolCreateInfo,
     a: *const vk::AllocationCallbacks,
     o: *mut vk::CommandPool,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     *o = vk::CommandPool::null();
     let p = &*p;
     let allowed =
@@ -28,16 +28,16 @@ pub unsafe extern "system" fn vkCreateCommandPool(
     s.pools.insert(id, Pool { device: h.as_raw() });
     *o = vk::CommandPool::from_raw(id);
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkDestroyCommandPool(
     _h: vk::Device,
     p: vk::CommandPool,
     _a: *const vk::AllocationCallbacks,
-) {
+) { unsafe {
     let mut s = state();
     s.commands.retain(|h, c| {
         if c.pool == p.as_raw() {
@@ -48,7 +48,7 @@ pub unsafe extern "system" fn vkDestroyCommandPool(
         }
     });
     s.pools.remove(&p.as_raw());
-}
+}}
 fn reset(c: &mut Commands) {
     c.recording = false;
     c.executable = false;
@@ -61,7 +61,7 @@ fn reset(c: &mut Commands) {
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkResetCommandPool(
     _h: vk::Device,
     p: vk::CommandPool,
@@ -79,12 +79,12 @@ pub unsafe extern "system" fn vkResetCommandPool(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkAllocateCommandBuffers(
     h: vk::Device,
     p: *const vk::CommandBufferAllocateInfo,
     o: *mut vk::CommandBuffer,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let p = &*p;
     let mut s = state();
     if !p.p_next.is_null()
@@ -114,32 +114,32 @@ pub unsafe extern "system" fn vkAllocateCommandBuffers(
         *o.add(j) = vk::CommandBuffer::from_raw(id)
     }
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkFreeCommandBuffers(
     _h: vk::Device,
     _pool: vk::CommandPool,
     n: u32,
     p: *const vk::CommandBuffer,
-) {
+) { unsafe {
     let mut s = state();
     for c in slice(p, n) {
         if s.commands.remove(&c.as_raw()).is_some() {
             drop_dispatch(c.as_raw())
         }
     }
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkBeginCommandBuffer(
     h: vk::CommandBuffer,
     p: *const vk::CommandBufferBeginInfo,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let p = &*p;
     let mut s = state();
     let Some(c) = s.commands.get_mut(&h.as_raw()) else {
@@ -158,11 +158,11 @@ pub unsafe extern "system" fn vkBeginCommandBuffer(
     reset(c);
     c.recording = true;
     vk::Result::SUCCESS
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkEndCommandBuffer(h: vk::CommandBuffer) -> vk::Result {
     let mut s = state();
     let Some(c) = s.commands.get_mut(&h.as_raw()) else {
@@ -182,7 +182,7 @@ pub unsafe extern "system" fn vkEndCommandBuffer(h: vk::CommandBuffer) -> vk::Re
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkResetCommandBuffer(
     h: vk::CommandBuffer,
     _flags: vk::CommandBufferResetFlags,
@@ -206,7 +206,7 @@ fn record(h: vk::CommandBuffer, f: impl FnOnce(&mut Commands)) {
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCmdBindPipeline(
     h: vk::CommandBuffer,
     b: vk::PipelineBindPoint,
@@ -223,7 +223,7 @@ pub unsafe extern "system" fn vkCmdBindPipeline(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCmdBindDescriptorSets(
     h: vk::CommandBuffer,
     b: vk::PipelineBindPoint,
@@ -233,7 +233,7 @@ pub unsafe extern "system" fn vkCmdBindDescriptorSets(
     p: *const vk::DescriptorSet,
     dn: u32,
     _dp: *const u32,
-) {
+) { unsafe {
     record(h, |c| {
         if b != vk::PipelineBindPoint::COMPUTE || first != 0 || n != 1 || dn != 0 {
             c.error = true
@@ -241,11 +241,11 @@ pub unsafe extern "system" fn vkCmdBindDescriptorSets(
             c.set = Some((*p).as_raw())
         }
     })
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCmdPushConstants(
     h: vk::CommandBuffer,
     l: vk::PipelineLayout,
@@ -253,7 +253,7 @@ pub unsafe extern "system" fn vkCmdPushConstants(
     offset: u32,
     size: u32,
     p: *const c_void,
-) {
+) { unsafe {
     let max = state()
         .pipeline_layouts
         .get(&l.as_raw())
@@ -270,11 +270,11 @@ pub unsafe extern "system" fn vkCmdPushConstants(
                 .copy_from_slice(std::slice::from_raw_parts(p as *const u8, size as usize))
         }
     })
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCmdDispatch(h: vk::CommandBuffer, x: u32, y: u32, z: u32) {
     record(h, |c| {
         if [x, y, z].iter().any(|&v| v > 65535) {
@@ -296,14 +296,14 @@ pub unsafe extern "system" fn vkCmdDispatch(h: vk::CommandBuffer, x: u32, y: u32
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCmdCopyBuffer(
     h: vk::CommandBuffer,
     src: vk::Buffer,
     dst: vk::Buffer,
     n: u32,
     p: *const vk::BufferCopy,
-) {
+) { unsafe {
     record(h, |c| {
         c.commands.push(Command::Copy(
             src.as_raw(),
@@ -311,11 +311,11 @@ pub unsafe extern "system" fn vkCmdCopyBuffer(
             slice(p, n).to_vec(),
         ))
     })
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCmdFillBuffer(
     h: vk::CommandBuffer,
     b: vk::Buffer,
@@ -331,14 +331,14 @@ pub unsafe extern "system" fn vkCmdFillBuffer(
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCmdUpdateBuffer(
     h: vk::CommandBuffer,
     b: vk::Buffer,
     offset: u64,
     size: u64,
     p: *const c_void,
-) {
+) { unsafe {
     record(h, |c| {
         if size > 65536 || !size.is_multiple_of(4) || !offset.is_multiple_of(4) {
             c.error = true
@@ -350,11 +350,11 @@ pub unsafe extern "system" fn vkCmdUpdateBuffer(
             ))
         }
     })
-}
+}}
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkCmdPipelineBarrier(
     h: vk::CommandBuffer,
     _src: vk::PipelineStageFlags,
@@ -366,7 +366,7 @@ pub unsafe extern "system" fn vkCmdPipelineBarrier(
     bp: *const vk::BufferMemoryBarrier,
     in_: u32,
     _ip: *const vk::ImageMemoryBarrier,
-) {
+) { unsafe {
     record(h, |c| {
         if in_ != 0
             || !(flags & !vk::DependencyFlags::BY_REGION).is_empty()
@@ -382,7 +382,7 @@ pub unsafe extern "system" fn vkCmdPipelineBarrier(
             c.error = true
         }
     })
-}
+}}
 fn execute(s: &State, dev: u64, b: &Backend, cmd: &Command) -> Result<(), vk::Result> {
     match cmd {
         Command::Copy(src, dst, regions) => {
@@ -461,13 +461,13 @@ fn execute(s: &State, dev: u64, b: &Backend, cmd: &Command) -> Result<(), vk::Re
 /// # Safety
 /// The caller must satisfy this Vulkan command's pointer, handle lifetime and
 /// external synchronization requirements from the Vulkan specification.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkQueueSubmit(
     q: vk::Queue,
     n: u32,
     p: *const vk::SubmitInfo,
     f: vk::Fence,
-) -> vk::Result {
+) -> vk::Result { unsafe {
     let mut s = state();
     let Some(&d) = s.queues.get(&q.as_raw()) else {
         return BAD;
@@ -524,4 +524,4 @@ pub unsafe extern "system" fn vkQueueSubmit(
         s.fences.get_mut(&f.as_raw()).unwrap().1 = true
     }
     vk::Result::SUCCESS
-}
+}}

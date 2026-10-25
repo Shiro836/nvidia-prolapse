@@ -972,14 +972,14 @@ mod tests {
             }
             clients += 1;
             macro_rules! control {
-                ($command:expr, $value:expr) => {{
+                ($command:expr_2021, $value:expr_2021) => {{
                     let name = c.control_layout($command).unwrap();
                     c.pack(name, &$value)
                         .unwrap_or_else(|e| panic!("{version} {name}: {e}"));
                 }};
             }
             macro_rules! alloc {
-                ($class:expr, $value:expr) => {{
+                ($class:expr_2021, $value:expr_2021) => {{
                     let value = $value;
                     let name = c
                         .allocation_layout($class, std::mem::size_of_val(&value))

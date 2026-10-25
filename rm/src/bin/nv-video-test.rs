@@ -35,7 +35,7 @@ fn wait_fd(fd: i32) {
         e: i16,
         r: i16,
     }
-    extern "C" {
+    unsafe extern "C" {
         fn poll(f: *mut P, n: std::ffi::c_ulong, t: i32) -> i32;
         fn close(fd: i32) -> i32;
     }
