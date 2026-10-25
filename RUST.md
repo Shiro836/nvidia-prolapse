@@ -214,5 +214,14 @@ plus the component's own checks (ABI/symbol tests, fuzz smoke, differential test
 
 ## Existing code
 
-These rules apply in full to new crates and ports. Older Rust brought into the workspace is brought up to
-them where a change touches it, and in dedicated cleanup passes; it does not get exemptions by being old.
+These rules apply in full to new crates and ports. Rust written before this standard is not a reference
+for new code, and gets no exemption for being old. When such a crate joins the workspace:
+
+- It uses the workspace lints like every other member. Each lint it still violates is listed once, at the
+  top of its `lib.rs`, as `#![expect(clippy::…, reason = "pre-standard code; cleanup tracked")]`. That
+  list is the crate's debt ledger: it never grows, and `#[expect]` turns an entry into an error once the
+  lint stops firing, so a cleanup has to delete the entry.
+- A change that touches an item brings that item up to the standard. Dedicated cleanup passes shrink the
+  ledger lint by lint.
+- Unsafe in such a crate gets its SAFETY comments and one-operation blocks before anything else, because
+  those are the soundness arguments the rest of the review depends on.
