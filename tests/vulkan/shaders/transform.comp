@@ -1,0 +1,16 @@
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { uint values[]; } input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer Output { uint values[]; } output_data;
+layout(push_constant) uniform Parameters {
+    uint count;
+    uint multiplier;
+    uint addend;
+    uint xor_mask;
+} parameters;
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index < parameters.count)
+        output_data.values[index] = (input_data.values[index] ^ parameters.xor_mask)
+            + index * parameters.multiplier + parameters.addend;
+}
