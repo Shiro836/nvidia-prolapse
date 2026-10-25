@@ -1,0 +1,11 @@
+# Unsafe and panics are allowed in tests only through the test-specific
+# switches below; library code gets the full workspace lint set.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+allow-indexing-slicing-in-tests = true
+# SAFETY comments must sit directly on the block they justify.
+accept-comment-above-statement = false
+accept-comment-above-attributes = false

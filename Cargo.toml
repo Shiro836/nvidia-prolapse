@@ -1,0 +1,81 @@
+# Workspace for the Rust driver components. Policy: RUST.md.
+# Every member uses `[lints] workspace = true` and `edition.workspace = true`.
+[workspace]
+resolver = "3"
+members = []
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+let_underscore_drop = "warn"
+unused_qualifications = "warn"
+unexpected_cfgs = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that fight the project's style more than they help.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+# Unsafe discipline (RUST.md §2).
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+transmute_ptr_to_ptr = "deny"
+transmute_undefined_repr = "deny"
+ptr_as_ptr = "warn"
+ptr_cast_constness = "warn"
+borrow_as_ptr = "warn"
+mem_forget = "deny"
+
+# Integers (RUST.md §6).
+as_conversions = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+cast_lossless = "warn"
+cast_ptr_alignment = "warn"
+
+# Errors, panics, output (RUST.md §7).
+unwrap_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+let_underscore_must_use = "deny"
+let_underscore_untyped = "warn"
+map_err_ignore = "warn"
+
+# Exhaustive matching on our own enums (RUST.md §5).
+wildcard_enum_match_arm = "warn"
+
+# Lint suppression must carry a reason (RUST.md §10).
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+[profile.dev]
+overflow-checks = true
+
+[profile.release]
+# The FFI panic guard needs unwinding (RUST.md §4).
+panic = "unwind"
+# A silent wrap in a size computation is a GPU address-space bug (RUST.md §6).
+overflow-checks = true
+debug = 1
+lto = "thin"
+codegen-units = 1
+
+[profile.test]
+overflow-checks = true

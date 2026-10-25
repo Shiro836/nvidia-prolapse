@@ -1,0 +1,7 @@
+# Pinned stable toolchain for building and testing. Miri, cargo-fuzz and the
+# sanitizers use the dated nightly named in RUST.md "Gate".
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy", "rust-src"]
+targets = ["x86_64-linux-android", "i686-linux-android", "x86_64-unknown-linux-gnu"]
+profile = "minimal"
