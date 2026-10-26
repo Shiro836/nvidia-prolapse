@@ -64,6 +64,9 @@ pub enum VideoError {
     /// unimplemented feature, else `NV_VIDEO_E_BITSTREAM`.
     #[error(transparent)]
     Hevc(#[from] crate::hevc::HevcError),
+    /// HDR static metadata scan failure (`NV_VIDEO_E_BITSTREAM`).
+    #[error(transparent)]
+    Hdr(#[from] crate::hdr::HdrError),
 }
 
 impl VideoError {
@@ -85,11 +88,22 @@ impl VideoError {
                     -3
                 }
             }
-            Self::Unsupported(_) | Self::Av1(crate::av1::obu::Av1Error::Unsupported(_)) => -2,
+            Self::Unsupported(_)
+            | Self::Av1(
+                crate::av1::obu::Av1Error::Unsupported(_)
+                | crate::av1::obu::Av1Error::SessionFormat { .. },
+            ) => -2,
+            Self::Vp9(e) => {
+                if e.is_unsupported() {
+                    -2
+                } else {
+                    -3
+                }
+            }
             Self::Bitstream(_)
             | Self::Bits(_)
+            | Self::Hdr(_)
             | Self::Range(_)
-            | Self::Vp9(_)
             | Self::Av1(
                 crate::av1::obu::Av1Error::Truncated(_)
                 | crate::av1::obu::Av1Error::Invalid(_)
@@ -117,7 +131,8 @@ impl VideoError {
             | Self::Av1(_)
             | Self::Vp9(_)
             | Self::H264(_)
-            | Self::Hevc(_) => Cow::Owned(self.to_string()),
+            | Self::Hevc(_)
+            | Self::Hdr(_) => Cow::Owned(self.to_string()),
         }
     }
 }

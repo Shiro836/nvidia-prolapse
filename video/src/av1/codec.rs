@@ -7,6 +7,7 @@
 //! creation, so the four default q-context tables live in four constant buffers and an LRU index that
 //! stock would have filled with defaults is aliased to the constant buffer (the engine never writes a
 //! read buffer, so saving that index as a context stays valid).
+use super::obu::Av1Error;
 use crate::fit;
 use nv_rm_core::conv::{u64_from_usize, usize_from_u32};
 
@@ -224,20 +225,19 @@ impl CodecDecoder for Av1Decoder {
             .parser
             .seq
             .clone()
-            .ok_or_else(|| VideoError::Bitstream("AV1: no sequence header".into()))?;
+            .ok_or(Av1Error::NoSequenceHeader)?;
         if u32::from(seq.bit_depth) != self.bit_depth
             || seq.mono_chrome
             || !(seq.subsampling_x && seq.subsampling_y)
         {
-            return Err(VideoError::Unsupported(format!(
-                "AV1 bit depth {} / mono {} / subsampling {}{} in a {}-bit 4:2:0 session \
-                 (8- or 10-bit 4:2:0, session created with the stream's bit depth)",
-                seq.bit_depth,
-                seq.mono_chrome,
-                u8::from(seq.subsampling_x),
-                u8::from(seq.subsampling_y),
-                self.bit_depth
-            )));
+            return Err(Av1Error::SessionFormat {
+                bit_depth: seq.bit_depth,
+                mono_chrome: seq.mono_chrome,
+                subsampling_x: u8::from(seq.subsampling_x),
+                subsampling_y: u8::from(seq.subsampling_y),
+                session_bit_depth: self.bit_depth,
+            }
+            .into());
         }
         match out {
             Av1Out::ShowExisting { slot, hdr } => {
@@ -245,9 +245,10 @@ impl CodecDecoder for Av1Decoder {
                     Some(Surf::Session(s)) if !hdr.film_grain.apply_grain => s,
                     Some(Surf::Grain { display: Some(s) }) if hdr.film_grain.apply_grain => s,
                     Some(Surf::Grain { display: None }) => {
-                        return Err(VideoError::Bitstream(
-                            "AV1: show_existing_frame of a frame that is not showable".into(),
-                        ));
+                        return Err(Av1Error::Invalid(
+                            "show_existing_frame of a frame that is not showable",
+                        )
+                        .into());
                     }
                     Some(_) => {
                         return Err(VideoError::Invalid(
@@ -256,9 +257,7 @@ impl CodecDecoder for Av1Decoder {
                         ));
                     }
                     None => {
-                        return Err(VideoError::Bitstream(
-                            "AV1: show_existing of an undecoded slot".into(),
-                        ));
+                        return Err(Av1Error::Invalid("show_existing of an undecoded slot").into());
                     }
                 };
                 let r = self.c.slot_record(slot);
@@ -276,9 +275,7 @@ impl CodecDecoder for Av1Decoder {
                     // reports error_status 0xd on the fifth picture of the capture stream, so a
                     // field outside the compared region is still missing. Refuse rather than
                     // submit a descriptor that is known incomplete.
-                    return Err(VideoError::Unsupported(
-                        "AV1 superres on inter frames".into(),
-                    ));
+                    return Err(Av1Error::Unsupported("superres on inter frames").into());
                 }
                 if h.upscaled_width > self.max.0 || h.frame_height > self.max.1 {
                     // A shown key frame refreshes every reference slot (spec 5.9.2:
@@ -293,11 +290,11 @@ impl CodecDecoder for Av1Decoder {
                     ));
                 }
                 if j.apply_grain && !self.grain_capable {
-                    return Err(VideoError::Unsupported(
-                        "AV1 film grain: pass the sequence header as codec_config (reference surfaces are \
-                         allocated at session creation)"
-                            .into(),
-                    ));
+                    return Err(Av1Error::Unsupported(
+                        "film grain: pass the sequence header as codec_config (reference surfaces are \
+                         allocated at session creation)",
+                    )
+                    .into());
                 }
                 self.pending_refs = j
                     .ref_slots

@@ -87,6 +87,62 @@ pub enum Vp9Error {
     /// A syntax-derived value does not fit the field it is stored in.
     #[error("VP9: {0}")]
     Range(#[from] crate::OutOfRange),
+    /// A frame of zero bytes.
+    #[error("VP9: empty frame")]
+    EmptyFrame,
+    /// The uncompressed + compressed headers are longer than the frame.
+    #[error("VP9: headers overrun frame")]
+    HeadersOverrun,
+    /// A reference outside the 2x / 16x scaling range (6.2.6 / 7.2.5); unsupported.
+    #[error(
+        "VP9 reference {ref_width}x{ref_height} outside the 2x/16x scale range of {width}x{height}"
+    )]
+    ReferenceScale {
+        /// Reference frame width.
+        ref_width: u32,
+        /// Reference frame height.
+        ref_height: u32,
+        /// Current frame width.
+        width: u32,
+        /// Current frame height.
+        height: u32,
+    },
+    /// A frame whose profile does not match the session's bit depth; unsupported.
+    #[error(
+        "VP9 profile {profile} in a {session_bit_depth}-bit session (profile 0 = 8-bit, profile 2 = 10-bit 4:2:0; create the session with the stream's bit depth)"
+    )]
+    SessionProfile {
+        /// The frame's profile.
+        profile: u8,
+        /// The session's bit depth.
+        session_bit_depth: u32,
+    },
+    /// A frame whose bit depth does not match the session's; unsupported.
+    #[error("VP9 {frame}-bit frame in a {session}-bit session")]
+    SessionBitDepth {
+        /// The frame's bit depth.
+        frame: u32,
+        /// The session's.
+        session: u32,
+    },
+    /// A coded size change on a non-key picture after segment maps were written; unsupported.
+    #[error(
+        "VP9 coded size change on a non-key picture after segment maps were written (libvpx zeroes both maps at every size change): the engine's handling of a map written at the old extent is not established"
+    )]
+    SegmentMapResize,
+}
+
+impl Vp9Error {
+    /// True for valid streams this decoder does not implement (`NV_VIDEO_E_UNSUPPORTED`).
+    pub fn is_unsupported(&self) -> bool {
+        matches!(
+            self,
+            Self::ReferenceScale { .. }
+                | Self::SessionProfile { .. }
+                | Self::SessionBitDepth { .. }
+                | Self::SegmentMapResize
+        )
+    }
 }
 
 /// The RM-backend callers of the VP9 front end report its errors as broken input contracts.

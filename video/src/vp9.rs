@@ -26,7 +26,7 @@ use super::{
     VideoError,
 };
 use crate::fit;
-use crate::nvdec_vp9::{FrameHeader, KEY_FRAME, Vp9State, split_superframe, tile_sizes};
+use crate::nvdec_vp9::{FrameHeader, KEY_FRAME, Vp9Error, Vp9State, split_superframe, tile_sizes};
 use nv_rm_core::conv::u64_from_usize;
 use nv_rm_core::push::method;
 use nv_rm_sys::nvdec_drv::{Pod, Vp9Dims, Vp9EntropyCounts, Vp9PicS};
@@ -101,11 +101,9 @@ impl Vp9Decoder {
 
     /// Profile from the first byte (frame_marker 2, profile_low, profile_high).
     fn profile(frame: &[u8]) -> VResult<u8> {
-        let b = *frame
-            .first()
-            .ok_or_else(|| VideoError::Bitstream("VP9: empty frame".into()))?;
+        let b = *frame.first().ok_or(Vp9Error::EmptyFrame)?;
         if b >> 6 != 2 {
-            return Err(VideoError::Bitstream("VP9: frame marker".into()));
+            return Err(Vp9Error::FrameMarker.into());
         }
         Ok((b >> 5 & 1) | (b >> 4 & 1) << 1)
     }
@@ -183,10 +181,13 @@ impl Vp9Decoder {
                 let (rw, rh) = self.st.slot_size(h.ref_frame_idx[i]);
                 if 2 * h.width < rw || 2 * h.height < rh || h.width > 16 * rw || h.height > 16 * rh
                 {
-                    return Err(VideoError::Unsupported(format!(
-                        "VP9 reference {rw}x{rh} outside the 2x/16x scale range of {}x{}",
-                        h.width, h.height
-                    )));
+                    return Err(Vp9Error::ReferenceScale {
+                        ref_width: rw,
+                        ref_height: rh,
+                        width: h.width,
+                        height: h.height,
+                    }
+                    .into());
                 }
             }
         }
@@ -328,11 +329,11 @@ impl CodecDecoder for Vp9Decoder {
             let profile = Self::profile(f)?;
             let session_profile = if self.bit_depth == 8 { 0 } else { 2 };
             if profile != session_profile {
-                return Err(VideoError::Unsupported(format!(
-                    "VP9 profile {profile} in a {}-bit session (profile 0 = 8-bit, profile 2 = 10-bit \
-                     4:2:0; create the session with the stream's bit depth)",
-                    self.bit_depth
-                )));
+                return Err(Vp9Error::SessionProfile {
+                    profile,
+                    session_bit_depth: self.bit_depth,
+                }
+                .into());
             }
             // show_existing_frame bit follows the profile bits (profiles 0-2).
             if f[0] >> 3 & 1 == 0 {
@@ -356,15 +357,17 @@ impl CodecDecoder for Vp9Decoder {
         }
         let h = self.st.parse(&frame)?;
         if self.st.bit_depth != self.bit_depth {
-            return Err(VideoError::Unsupported(format!(
-                "VP9 {}-bit frame in a {}-bit session",
-                self.st.bit_depth, self.bit_depth
-            )));
+            return Err(Vp9Error::SessionBitDepth {
+                frame: self.st.bit_depth,
+                session: self.bit_depth,
+            }
+            .into());
         }
         if h.show_existing_frame {
-            let surface = self.st.slot_surface(h.frame_to_show).ok_or_else(|| {
-                VideoError::Bitstream("VP9: show_existing of an empty slot".into())
-            })?;
+            let surface = self
+                .st
+                .slot_surface(h.frame_to_show)
+                .ok_or(Vp9Error::ShowEmptySlot(h.frame_to_show))?;
             let (w, hh) = self.st.slot_size(h.frame_to_show);
             let mut info = self.info(&h, w, hh);
             info.keyframe = false;
@@ -397,7 +400,7 @@ impl CodecDecoder for Vp9Decoder {
         let info = self.info(&h, h.width, h.height);
         let tiles = frame
             .get(h.uncompressed_size + h.header_size..)
-            .ok_or_else(|| VideoError::Bitstream("VP9: headers overrun frame".into()))?
+            .ok_or(Vp9Error::HeadersOverrun)?
             .to_vec();
         let readback = (!h.error_resilient && !h.frame_parallel)
             .then(|| COUNTS..COUNTS + std::mem::size_of::<Vp9EntropyCounts>());
@@ -434,12 +437,7 @@ impl CodecDecoder for Vp9Decoder {
         let probs = self.st.entropy_table();
         d[PROBS..PROBS + probs.as_bytes().len()].copy_from_slice(probs.as_bytes());
         if self.seg_extent_change {
-            return Err(VideoError::Unsupported(
-                "VP9 coded size change on a non-key picture after segment maps were written \
-                 (libvpx zeroes both maps at every size change): the engine's handling of a \
-                 map written at the old extent is not established"
-                    .into(),
-            ));
+            return Err(Vp9Error::SegmentMapResize.into());
         }
         let da = ctx.descriptor;
         let mut w = Vec::new();
@@ -619,30 +617,30 @@ mod tests {
         assert_eq!(Vp9Decoder::profile(&[0x92]).unwrap(), 2);
         assert!(Vp9Decoder::profile(&[0x02]).is_err());
         let d = Vp9Decoder::new(0xcfb0, 640, 480, 8);
-        assert!(matches!(
-            d.surfaces_needed(&[0x92, 0, 0]),
-            Err(VideoError::Unsupported(_))
-        ));
+        assert_eq!(
+            d.surfaces_needed(&[0x92, 0, 0]).map_err(|e| e.code()),
+            Err(-2)
+        );
         // Profile 1 (4:4:4) is refused in every session: NVDEC's VP9 decode
         // supports profiles 0 and 2 only (the engine input is NV12/P010;
         // 4:2:0 is a session surface contract), so there is no 4:4:4 path to
         // size a surface for.
-        assert!(matches!(
-            d.surfaces_needed(&[0xa2, 0, 0]),
-            Err(VideoError::Unsupported(_))
-        ));
+        assert_eq!(
+            d.surfaces_needed(&[0xa2, 0, 0]).map_err(|e| e.code()),
+            Err(-2)
+        );
         assert_eq!(d.surfaces_needed(&[0x88]).unwrap(), 0); // show_existing
         // Profile 2 (10-bit) only in a 10-bit session; profile 1 (4:4:4) never.
         let d10 = Vp9Decoder::new(0xcfb0, 640, 480, 10);
         assert_eq!(d10.surfaces_needed(&[0x92, 0, 0]).unwrap(), 1);
         assert_eq!(d10.surfaces_needed(&[0x98]).unwrap(), 0); // show_existing
-        assert!(matches!(
-            d10.surfaces_needed(&[0x82, 0, 0]),
-            Err(VideoError::Unsupported(_))
-        ));
-        assert!(matches!(
-            d10.surfaces_needed(&[0xa2, 0, 0]),
-            Err(VideoError::Unsupported(_))
-        ));
+        assert_eq!(
+            d10.surfaces_needed(&[0x82, 0, 0]).map_err(|e| e.code()),
+            Err(-2)
+        );
+        assert_eq!(
+            d10.surfaces_needed(&[0xa2, 0, 0]).map_err(|e| e.code()),
+            Err(-2)
+        );
     }
 }

@@ -15,7 +15,7 @@
 //! with several AV1 frames therefore reports the unit's metadata for each of them; a
 //! stream that changes the metadata inside one temporal unit is not represented (the C2
 //! HAL attaches metadata per output buffer, and a unit maps to one time step).
-use super::{CODEC_AV1, CODEC_H264, CODEC_HEVC, VResult, VideoError, bitstream};
+use super::{CODEC_AV1, CODEC_H264, CODEC_HEVC, VResult};
 
 /// `mastering_display_colour_volume()`: chromaticities in units of 0.00002, luminance in
 /// units of 0.0001 cd/m² (ST 2086, as coded in the SEI / AV1 metadata).
@@ -102,10 +102,15 @@ pub fn parse_unit(codec: u32, unit: &[u8]) -> VResult<HdrStaticMetadata> {
                     continue;
                 }
                 let Some((metadata_type, used)) = leb128(payload, 0) else {
-                    return bitstream("AV1 metadata OBU: truncated metadata_type");
+                    return Err(
+                        HdrError::Truncated("AV1 metadata OBU: truncated metadata_type").into(),
+                    );
                 };
                 let Some(body) = payload.get(used..) else {
-                    return bitstream("AV1 metadata OBU: metadata_type past the payload");
+                    return Err(HdrError::Truncated(
+                        "AV1 metadata OBU: metadata_type past the payload",
+                    )
+                    .into());
                 };
                 let metadata_type = crate::fit::<u32, _>(metadata_type, "metadata_type")?;
                 match metadata_type {
@@ -134,15 +139,45 @@ fn u32_at(b: &[u8], o: usize) -> u32 {
     u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
+/// Why the HDR metadata scan rejected a unit (`NV_VIDEO_E_BITSTREAM`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HdrError {
+    /// A truncated syntax element, named.
+    #[error("{0}")]
+    Truncated(&'static str),
+    /// A metadata payload shorter than its fixed fields.
+    #[error("{what}: {len} payload bytes, at least {need} expected")]
+    ShortPayload {
+        /// The payload kind.
+        what: &'static str,
+        /// Bytes present.
+        len: usize,
+        /// Bytes its fields need.
+        need: usize,
+    },
+    /// An SEI payload whose size runs past its NAL.
+    #[error("SEI payload type {kind}: size {size} runs past the NAL ({len} bytes)")]
+    PayloadOverrun {
+        /// payloadType.
+        kind: u32,
+        /// payloadSize.
+        size: usize,
+        /// Bytes in the NAL.
+        len: usize,
+    },
+}
+
 /// `mastering_display_colour_volume(payloadSize)`, 24 bytes: per component the x/y
 /// chromaticity pair, then the white point, then max/min luminance.
 fn mastering_display(p: &[u8]) -> VResult<MasteringDisplay> {
     // The fields are a fixed prefix; padding bits/bytes after them are allowed and ignored.
     if p.len() < 24 {
-        return bitstream(format!(
-            "SEI mastering display colour volume: {} payload bytes, at least 24 expected",
-            p.len()
-        ));
+        return Err(HdrError::ShortPayload {
+            what: "SEI mastering display colour volume",
+            len: p.len(),
+            need: 24,
+        }
+        .into());
     }
     Ok(MasteringDisplay {
         primaries_x: [u16_at(p, 0), u16_at(p, 4), u16_at(p, 8)],
@@ -156,10 +191,12 @@ fn mastering_display(p: &[u8]) -> VResult<MasteringDisplay> {
 
 fn content_light(p: &[u8]) -> VResult<(u16, u16)> {
     if p.len() < 4 {
-        return bitstream(format!(
-            "content light level info: {} payload bytes, at least 4 expected",
-            p.len()
-        ));
+        return Err(HdrError::ShortPayload {
+            what: "content light level info",
+            len: p.len(),
+            need: 4,
+        }
+        .into());
     }
     Ok((u16_at(p, 0), u16_at(p, 2)))
 }
@@ -169,10 +206,12 @@ fn content_light(p: &[u8]) -> VResult<(u16, u16)> {
 /// AV1 5.8.2, FFmpeg cbs_av1_syntax_template.c `metadata_hdr_mdcv`).
 fn av1_mastering_display(p: &[u8]) -> VResult<MasteringDisplay> {
     if p.len() < 24 {
-        return bitstream(format!(
-            "AV1 HDR_MDCV metadata: {} payload bytes, at least 24 expected",
-            p.len()
-        ));
+        return Err(HdrError::ShortPayload {
+            what: "AV1 HDR_MDCV metadata",
+            len: p.len(),
+            need: 24,
+        }
+        .into());
     }
     Ok(MasteringDisplay {
         primaries_x: [u16_at(p, 0), u16_at(p, 4), u16_at(p, 8)],
@@ -256,7 +295,7 @@ fn sei_payloads(b: &[u8]) -> VResult<Vec<(u32, &[u8])>> {
             i += 1;
         }
         if i >= b.len() {
-            return bitstream("SEI: truncated payloadType");
+            return Err(HdrError::Truncated("SEI: truncated payloadType").into());
         }
         kind += u32::from(b[i]);
         i += 1;
@@ -266,19 +305,18 @@ fn sei_payloads(b: &[u8]) -> VResult<Vec<(u32, &[u8])>> {
             i += 1;
         }
         if i >= b.len() {
-            return bitstream("SEI: truncated payloadSize");
+            return Err(HdrError::Truncated("SEI: truncated payloadSize").into());
         }
         size += usize::from(b[i]);
         i += 1;
-        let end = i
-            .checked_add(size)
-            .filter(|e| *e <= b.len())
-            .ok_or_else(|| {
-                VideoError::Bitstream(format!(
-                    "SEI payload type {kind}: size {size} runs past the NAL ({} bytes)",
-                    b.len()
-                ))
-            })?;
+        let end =
+            i.checked_add(size)
+                .filter(|e| *e <= b.len())
+                .ok_or(HdrError::PayloadOverrun {
+                    kind,
+                    size,
+                    len: b.len(),
+                })?;
         out.push((kind, &b[i..end]));
         i = end;
     }

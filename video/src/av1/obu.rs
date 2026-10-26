@@ -21,6 +21,23 @@ pub enum Av1Error {
     /// A syntax-derived value does not fit the field it is stored in.
     #[error("AV1 bitstream invalid: {0}")]
     Range(#[from] crate::OutOfRange),
+    /// A sequence whose format the session cannot hold: bit depth other than the session's,
+    /// monochrome or not 4:2:0 (unsupported).
+    #[error(
+        "AV1 bit depth {bit_depth} / mono {mono_chrome} / subsampling {subsampling_x}{subsampling_y} in a {session_bit_depth}-bit 4:2:0 session (8- or 10-bit 4:2:0, session created with the stream's bit depth)"
+    )]
+    SessionFormat {
+        /// BitDepth.
+        bit_depth: u8,
+        /// mono_chrome.
+        mono_chrome: bool,
+        /// subsampling_x.
+        subsampling_x: u8,
+        /// subsampling_y.
+        subsampling_y: u8,
+        /// The session's bit depth.
+        session_bit_depth: u32,
+    },
 }
 
 /// `Result` of the AV1 parser.
