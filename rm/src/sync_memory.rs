@@ -13,6 +13,7 @@ use std::{
     fs::File,
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
     ptr::NonNull,
+    sync::atomic::AtomicU64,
 };
 
 pub(crate) const PAYLOAD_SIZE: usize = 4096;
@@ -42,10 +43,11 @@ pub(crate) struct SyncMemory {
     file: File,
 }
 // SAFETY: an owned MAP_SHARED mapping of a sealed fixed-size memfd plus its
-// File. All accesses through cpu_address() are aligned AtomicU64 operations,
-// so sharing/moving the owner between threads introduces no data race; the
-// mapping is unmapped only by Drop, after every owner is gone.
+// File. All accesses go through word(), aligned AtomicU64 operations, so
+// moving the owner between threads introduces no data race; the mapping is
+// unmapped only by Drop, after every owner is gone.
 unsafe impl Send for SyncMemory {}
+// SAFETY: as Send: shared access is atomic-only.
 unsafe impl Sync for SyncMemory {}
 impl SyncMemory {
     pub(crate) fn new_cpu() -> Result<Self> {
@@ -81,7 +83,9 @@ impl SyncMemory {
             .metadata()
             .map_err(|e| Error::Io("stat sync memfd", e))?;
         validate_properties(stat.file_type().is_file(), stat.len(), seals)?;
-        // SAFETY: fixed sealed extent, offset zero, read/write MAP_SHARED.
+        // SAFETY: fixed sealed extent (no SIGBUS by truncation), offset zero,
+        // read/write MAP_SHARED at a kernel-chosen address (NULL hint, no
+        // MAP_FIXED): no existing mapping is replaced. Owned by Self from here.
         let raw = unsafe {
             platform::mmap(
                 std::ptr::null_mut(),
@@ -110,8 +114,25 @@ impl SyncMemory {
             .try_clone_to_owned()
             .map_err(|e| Error::Io("export sync memfd", e))
     }
-    pub(crate) fn cpu_address(&self) -> usize {
-        self.pointer.as_ptr() as usize
+    /// The 64-bit word at `offset` of the shared payload. Other processes map
+    /// the same pages and update the words concurrently, so every access goes
+    /// through the returned atomic and never through a plain reference.
+    ///
+    /// Panics when `offset` is not 8-aligned or leaves the payload (callers
+    /// use the protocol's constant offsets).
+    #[inline]
+    pub(crate) fn word(&self, offset: usize) -> &AtomicU64 {
+        assert!(
+            offset.is_multiple_of(8) && offset <= PAYLOAD_SIZE - 8,
+            "sync memfd word offset {offset} outside the payload"
+        );
+        // SAFETY: offset + 8 <= PAYLOAD_SIZE (asserted), inside this owned
+        // mapping, which stays mapped while `self` is borrowed (Drop unmaps).
+        let word = unsafe { self.pointer.as_ptr().add(offset) };
+        // SAFETY: the page-aligned mapping plus an 8-aligned offset is
+        // 8-aligned; AtomicU64 tolerates the other processes' concurrent
+        // atomic writes.
+        unsafe { &*word.cast::<AtomicU64>() }
     }
 }
 impl Drop for SyncMemory {
@@ -131,9 +152,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     fn word(memory: &SyncMemory, offset: usize) -> &AtomicU64 {
-        assert!(offset.is_multiple_of(8) && offset <= PAYLOAD_SIZE - 8);
-        // SAFETY: test payload uses only aligned AtomicU64, mapping retains pages.
-        unsafe { &*((memory.cpu_address() + offset) as *const AtomicU64) }
+        memory.word(offset)
     }
     #[test]
     fn rejects_wrong_extent_type_and_seals() {

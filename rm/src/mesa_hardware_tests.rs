@@ -3,7 +3,17 @@
 //! Run alone: cargo test --offline --no-default-features --lib
 //!   mesa::hardware_tests -- --ignored --test-threads=1 --nocapture
 use super::*;
-use std::{sync::Barrier, thread, time::Duration};
+use std::{
+    os::fd::{AsFd, FromRawFd, OwnedFd},
+    sync::Barrier,
+    thread,
+    time::Duration,
+};
+use test_ffi::{self as c, Point, SyncHandle};
+
+/// Safe calls into the C ABI, shared by the sibling fixture modules.
+#[path = "mesa_test_ffi.rs"]
+pub(super) mod test_ffi;
 
 fn selected_pci() -> [u32; 4] {
     let client = Client::open().unwrap();
@@ -20,104 +30,78 @@ fn selected_pci() -> [u32; 4] {
         card.pci.function as u32,
     ]
 }
-fn open() -> Box<Bridge> {
-    Box::new(Bridge::new(selected_pci()).unwrap().0)
+fn open() -> Arc<Bridge> {
+    Arc::new(Bridge::new(selected_pci()).unwrap().0)
 }
-fn context(b: &mut Bridge) -> u64 {
+fn context(b: &Bridge) -> u64 {
     let mut id = 0;
-    assert_eq!(unsafe { nv_rm_context_create(b, 1, &mut id) }, 0);
+    assert_eq!(c::context_create(b, 1, &mut id), 0);
     id
 }
-fn create(b: &mut Bridge, timeline: bool, initial: u64) -> u64 {
-    let mut id = 0;
-    assert_eq!(
-        unsafe { nv_rm_sync_create(b, u32::from(timeline), initial, &mut id) },
-        0
-    );
-    id
+fn create(b: &Bridge, timeline: bool, initial: u64) -> SyncHandle {
+    c::sync_create(b, u32::from(timeline), initial).expect("nv_rm_sync_create status 0")
 }
 fn fd_count() -> usize {
     std::fs::read_dir("/proc/self/fd").unwrap().count()
 }
-struct SendPtr(*mut Bridge);
-unsafe impl Send for SendPtr {}
-unsafe impl Sync for SendPtr {}
 
 #[test]
 #[ignore = "local NVIDIA GPU: ordinary signal then exporter close; independent imported counter must complete"]
 fn clean_exporter_close_publishes_gpu_completion() {
-    let mut producer = open();
-    let mut consumer = open();
-    let ctx = context(&mut producer);
-    let signal = create(&mut producer, true, 0);
+    let producer = open();
+    let consumer = open();
+    let ctx = context(&producer);
+    let signal = create(&producer, true, 0);
     let mut exported = -1;
     assert_eq!(
-        unsafe { nv_rm_sync_export_fd(&mut *producer, signal, 1, -1, &mut exported) },
+        c::sync_export_fd(&producer, &signal, 1, None, &mut exported),
         0
     );
-    let imported = create(&mut consumer, true, 0);
+    assert!(exported >= 0, "opaque export returns a descriptor");
+    // SAFETY: a successful opaque export returns a new open descriptor that
+    // only this test owns (nv_rm_sync_export_fd hands out `into_raw_fd`), and
+    // it is not -1 (asserted above).
+    let exported = unsafe { OwnedFd::from_raw_fd(exported) };
+    let imported = create(&consumer, true, 0);
     assert_eq!(
-        unsafe { nv_rm_sync_import_fd(&mut *consumer, imported, exported, 1) },
+        c::sync_import_fd(&consumer, &imported, exported.as_fd(), 1),
         0
     );
     let mut token = 0;
-    let point = SyncPoint {
-        sync: signal,
+    let point = Point {
+        sync: &signal,
         value: 1,
     };
-    assert_eq!(
-        unsafe { nv_rm_context_signal(&mut *producer, ctx, &point, 1, &mut token) },
-        0
-    );
+    assert_eq!(c::context_signal(&producer, ctx, &[point], &mut token), 0);
     // No CPU status query, fence wait, or grace period before close.
-    assert_eq!(unsafe { nv_rm_sync_destroy(&mut *producer, signal) }, 0);
+    assert_eq!(c::sync_destroy(&producer, signal), 0);
     drop(producer);
-    unsafe { libc_close(exported) };
+    drop(exported);
     let mut value = 0;
-    assert_eq!(
-        unsafe { nv_rm_sync_get_value(&mut *consumer, imported, &mut value) },
-        0
-    );
+    assert_eq!(c::sync_get_value(&consumer, &imported, &mut value), 0);
     assert_eq!(value, 1);
-    assert_eq!(unsafe { nv_rm_sync_destroy(&mut *consumer, imported) }, 0);
-}
-unsafe extern "C" {
-    #[link_name = "close"]
-    fn libc_close(fd: i32) -> i32;
+    assert_eq!(c::sync_destroy(&consumer, imported), 0);
 }
 
 #[test]
 #[ignore = "local NVIDIA GPU: bounded teardown of owned unsignaled timeline gate, no foreign kernel callbacks"]
 fn unsignaled_owned_gate_has_bounded_context_teardown() {
-    let mut bridge = open();
-    let ctx = context(&mut bridge);
-    let wait = create(&mut bridge, true, 0);
+    let bridge = open();
+    let ctx = context(&bridge);
+    let wait = create(&bridge, true, 0);
     let mut token = 0;
-    let point = SyncPoint {
-        sync: wait,
+    let point = Point {
+        sync: &wait,
         value: 1,
     };
-    assert_eq!(
-        unsafe {
-            nv_rm_submit_sync(
-                &mut *bridge,
-                ctx,
-                std::ptr::null(),
-                0,
-                &point,
-                1,
-                &mut token,
-            )
-        },
-        0
-    );
+    assert_eq!(c::submit_sync(&bridge, ctx, &[], &[point], &mut token), 0);
     assert!(!bridge.wait_token(ctx, token, 0).unwrap());
     let start = Instant::now();
-    assert_eq!(unsafe { nv_rm_context_destroy(&mut *bridge, ctx) }, 0);
+    assert_eq!(c::context_destroy(&bridge, ctx), 0);
     assert!(start.elapsed() >= Duration::from_secs(5));
     assert!(start.elapsed() < Duration::from_secs(10));
     assert!(bridge.core.is_lost());
-    assert_eq!(unsafe { nv_rm_sync_destroy(&mut *bridge, wait) }, 0);
+    assert_eq!(c::sync_destroy(&bridge, wait), 0);
     drop(bridge);
     println!(
         "owned unsignaled GPU gate context+device cleanup {:?}",
@@ -131,60 +115,42 @@ fn unsignaled_owned_gate_has_bounded_context_teardown() {
 /// threads wait the timeline itself (host signal -> Dekker notify).
 fn two_waiters(gpu: bool) -> (Duration, Duration, Duration) {
     let before = fd_count();
-    let mut bridge = open();
-    let ctx = context(&mut bridge);
-    let gate = create(&mut bridge, true, 0);
-    let fence = create(&mut bridge, false, 0);
+    let bridge = open();
+    let ctx = context(&bridge);
+    let gate = Arc::new(create(&bridge, true, 0));
+    let fence = Arc::new(create(&bridge, false, 0));
     let rounds = 300u64;
     let mut first = Vec::new();
     let mut second = Vec::new();
     for round in 1..=rounds {
         let target = if gpu {
             let mut token = 0;
-            let w = SyncPoint {
-                sync: gate,
+            let w = Point {
+                sync: &gate,
                 value: round,
             };
-            let s = SyncPoint {
-                sync: fence,
+            let s = Point {
+                sync: &fence,
                 value: 0,
             };
             assert_eq!(
-                unsafe {
-                    nv_rm_submit_batch(
-                        &mut *bridge,
-                        ctx,
-                        std::ptr::null(),
-                        0,
-                        &w,
-                        1,
-                        &s,
-                        1,
-                        &mut token,
-                    )
-                },
+                c::submit_batch(&bridge, ctx, &[], &[w], &[s], &mut token),
                 0
             );
-            SyncPoint {
-                sync: fence,
-                value: 0,
-            }
+            (Arc::clone(&fence), 0)
         } else {
-            SyncPoint {
-                sync: gate,
-                value: round,
-            }
+            (Arc::clone(&gate), round)
         };
         let ready = Arc::new(Barrier::new(3));
-        let pointer = Arc::new(SendPtr(&mut *bridge));
         let waiters: Vec<_> = (0..2)
             .map(|_| {
                 let ready = Arc::clone(&ready);
-                let pointer = Arc::clone(&pointer);
+                let bridge = Arc::clone(&bridge);
+                let (sync, value) = (Arc::clone(&target.0), target.1);
                 thread::spawn(move || {
                     ready.wait();
-                    let p = pointer.0;
-                    let r = unsafe { nv_rm_sync_wait_many(p, &target, 1, 0, u64::MAX) };
+                    let target = Point { sync: &sync, value };
+                    let r = c::sync_wait_many(&bridge, &[target], 0, u64::MAX);
                     assert_eq!(r, 0);
                     Instant::now()
                 })
@@ -197,22 +163,24 @@ fn two_waiters(gpu: bool) -> (Duration, Duration, Duration) {
         }
         thread::sleep(Duration::from_micros(300));
         let start = Instant::now();
-        assert_eq!(unsafe { nv_rm_sync_signal(&mut *bridge, gate, round) }, 0);
+        assert_eq!(c::sync_signal(&bridge, &gate, round), 0);
         let mut times: Vec<_> = waiters
             .into_iter()
             .map(|t| t.join().unwrap().saturating_duration_since(start))
             .collect();
+        drop(target);
         times.sort();
         first.push(times[0]);
         second.push(times[1]);
         if gpu {
-            assert_eq!(unsafe { nv_rm_sync_reset(&mut *bridge, fence) }, 0);
+            assert_eq!(c::sync_reset(&bridge, &fence), 0);
         }
     }
     for id in [gate, fence] {
-        assert_eq!(unsafe { nv_rm_sync_destroy(&mut *bridge, id) }, 0);
+        let id = Arc::into_inner(id).expect("every waiter thread was joined");
+        assert_eq!(c::sync_destroy(&bridge, id), 0);
     }
-    assert_eq!(unsafe { nv_rm_context_destroy(&mut *bridge, ctx) }, 0);
+    assert_eq!(c::context_destroy(&bridge, ctx), 0);
     drop(bridge);
     assert_eq!(fd_count(), before, "fd leak");
     // Follower lag: how long after the first waiter the second one woke.
@@ -261,53 +229,41 @@ fn two_waiters_host_timeline_wake_latency() {
 #[ignore = "local NVIDIA GPU: slot recycling across retire, binary wait detach, reset, move, import"]
 fn slot_lifetime_recycles_under_gpu_retirement() {
     let before = fd_count();
-    let mut bridge = open();
-    let ctx = context(&mut bridge);
-    let semaphore = create(&mut bridge, false, 0);
-    let fence = create(&mut bridge, false, 0);
-    let timeline = create(&mut bridge, true, 0);
+    let bridge = open();
+    let ctx = context(&bridge);
+    let semaphore = create(&bridge, false, 0);
+    let fence = create(&bridge, false, 0);
+    let timeline = create(&bridge, true, 0);
     for frame in 1..=3000u64 {
         // Frame: wait previous semaphore signal (detach), signal semaphore +
         // fence + timeline in one batch.
         let waits = if frame > 1 {
-            vec![SyncPoint {
-                sync: semaphore,
+            vec![Point {
+                sync: &semaphore,
                 value: 0,
             }]
         } else {
             vec![]
         };
         let signals = [
-            SyncPoint {
-                sync: semaphore,
+            Point {
+                sync: &semaphore,
                 value: 0,
             },
-            SyncPoint {
-                sync: fence,
+            Point {
+                sync: &fence,
                 value: 0,
             },
-            SyncPoint {
-                sync: timeline,
+            Point {
+                sync: &timeline,
                 value: frame,
             },
         ];
         let mut token = 0;
         loop {
-            let r = unsafe {
-                nv_rm_submit_batch(
-                    &mut *bridge,
-                    ctx,
-                    std::ptr::null(),
-                    0,
-                    waits.as_ptr(),
-                    waits.len() as u32,
-                    signals.as_ptr(),
-                    3,
-                    &mut token,
-                )
-            };
+            let r = c::submit_batch(&bridge, ctx, &[], &waits, &signals, &mut token);
             if r == 1 {
-                assert_eq!(unsafe { nv_rm_wait(&mut *bridge, ctx, token, u64::MAX) }, 0);
+                assert_eq!(c::wait(&bridge, ctx, token, u64::MAX), 0);
                 continue;
             }
             assert_eq!(r, 0);
@@ -315,68 +271,50 @@ fn slot_lifetime_recycles_under_gpu_retirement() {
         }
         // Copy-export semantics: reset while the GPU release may be pending.
         if frame % 2 == 0 {
-            let p = SyncPoint {
-                sync: fence,
+            let p = Point {
+                sync: &fence,
                 value: 0,
             };
-            assert_eq!(
-                unsafe { nv_rm_sync_wait_many(&mut *bridge, &p, 1, 0, u64::MAX) },
-                0
-            );
+            assert_eq!(c::sync_wait_many(&bridge, &[p], 0, u64::MAX), 0);
         }
-        assert_eq!(unsafe { nv_rm_sync_reset(&mut *bridge, fence) }, 0);
+        assert_eq!(c::sync_reset(&bridge, &fence), 0);
         if frame % 100 == 0 {
             // Move: dst takes the pending payload, src gets a fresh slot.
-            let dst = create(&mut bridge, false, 0);
-            assert_eq!(
-                unsafe { nv_rm_sync_move(&mut *bridge, dst, semaphore, 0) },
-                0
-            );
-            let p = SyncPoint {
-                sync: dst,
+            let dst = create(&bridge, false, 0);
+            assert_eq!(c::sync_move(&bridge, &dst, &semaphore, 0), 0);
+            let p = Point {
+                sync: &dst,
                 value: 0,
             };
-            assert_eq!(
-                unsafe { nv_rm_sync_wait_many(&mut *bridge, &p, 1, 0, u64::MAX) },
-                0
-            );
-            assert_eq!(unsafe { nv_rm_sync_destroy(&mut *bridge, dst) }, 0);
+            assert_eq!(c::sync_wait_many(&bridge, &[p], 0, u64::MAX), 0);
+            assert_eq!(c::sync_destroy(&bridge, dst), 0);
             // The semaphore lost its signal to dst: re-signal on the CPU so
             // the next frame's wait has a signal operation.
-            assert_eq!(unsafe { nv_rm_sync_signal(&mut *bridge, semaphore, 0) }, 0);
+            assert_eq!(c::sync_signal(&bridge, &semaphore, 0), 0);
         }
     }
-    let p = SyncPoint {
-        sync: timeline,
+    let p = Point {
+        sync: &timeline,
         value: 3000,
     };
-    assert_eq!(
-        unsafe { nv_rm_sync_wait_many(&mut *bridge, &p, 1, 0, u64::MAX) },
-        0
-    );
+    assert_eq!(c::sync_wait_many(&bridge, &[p], 0, u64::MAX), 0);
     let mut value = 0;
-    assert_eq!(
-        unsafe { nv_rm_sync_get_value(&mut *bridge, timeline, &mut value) },
-        0
-    );
+    assert_eq!(c::sync_get_value(&bridge, &timeline, &mut value), 0);
     assert_eq!(value, 3000);
     // Retire everything, then confirm a single pool page sufficed.
     let token = queue_ref(&bridge.lock().0, ctx).unwrap().last_token();
-    assert_eq!(unsafe { nv_rm_wait(&mut *bridge, ctx, token, u64::MAX) }, 0);
+    assert_eq!(c::wait(&bridge, ctx, token, u64::MAX), 0);
     let mut t = 0;
-    assert_eq!(
-        unsafe { nv_rm_submit(&mut *bridge, ctx, std::ptr::null(), 0, &mut t) },
-        0
-    );
+    assert_eq!(c::submit(&bridge, ctx, &[], &mut t), 0);
     assert_eq!(
         bridge.core.pool.next_page(),
         Some(1),
         "slots were not recycled"
     );
     for id in [semaphore, fence, timeline] {
-        assert_eq!(unsafe { nv_rm_sync_destroy(&mut *bridge, id) }, 0);
+        assert_eq!(c::sync_destroy(&bridge, id), 0);
     }
-    assert_eq!(unsafe { nv_rm_context_destroy(&mut *bridge, ctx) }, 0);
+    assert_eq!(c::context_destroy(&bridge, ctx), 0);
     assert!(!bridge.core.is_lost());
     drop(bridge);
     assert_eq!(fd_count(), before, "fd leak");
@@ -390,104 +328,179 @@ fn slot_lifetime_recycles_under_gpu_retirement() {
 #[ignore = "local NVIDIA GPU: GPFIFO ring full behind a host gate, payloads untouched on NOT_READY"]
 fn ring_full_leaves_payloads_untouched() {
     let before = fd_count();
-    let mut bridge = open();
-    let ctx = context(&mut bridge);
-    let gate = create(&mut bridge, true, 0);
-    let consumed = create(&mut bridge, false, 1);
+    let bridge = open();
+    let ctx = context(&bridge);
+    let gate = create(&bridge, true, 0);
+    let consumed = create(&bridge, false, 1);
     let mut accepted = Vec::new();
     let full_token = loop {
-        let target = create(&mut bridge, false, 0);
+        let target = create(&bridge, false, 0);
         let waits = [
-            SyncPoint {
-                sync: gate,
+            Point {
+                sync: &gate,
                 value: 1,
             },
-            SyncPoint {
-                sync: consumed,
+            Point {
+                sync: &consumed,
                 value: 0,
             },
         ];
-        let signal = SyncPoint {
-            sync: target,
+        let signal = Point {
+            sync: &target,
             value: 0,
         };
         // Only the retry after the ring is full includes the consuming wait.
-        let wait_count = 1u32;
+        let wait_count = 1;
         let mut token = 0;
-        let r = unsafe {
-            nv_rm_submit_batch(
-                &mut *bridge,
-                ctx,
-                std::ptr::null(),
-                0,
-                waits.as_ptr(),
-                wait_count,
-                &signal,
-                1,
-                &mut token,
-            )
-        };
+        let r = c::submit_batch(
+            &bridge,
+            ctx,
+            &[],
+            &waits[..wait_count],
+            &[signal],
+            &mut token,
+        );
         if r == 1 {
             // Retry the same batch with the consuming wait: still full.
-            let slot_of = |id: u64| match sync_ref(id).unwrap().lock().payload {
+            let slot_of = |h: &SyncHandle| match h.obj().unwrap().lock().payload {
                 crate::syncobj::Payload::Native(slot) => slot,
                 _ => panic!("native"),
             };
-            let (c_slot, t_slot) = (slot_of(consumed), slot_of(target));
-            let r2 = unsafe {
-                nv_rm_submit_batch(
-                    &mut *bridge,
-                    ctx,
-                    std::ptr::null(),
-                    0,
-                    waits.as_ptr(),
-                    2,
-                    &signal,
-                    1,
-                    &mut token,
-                )
-            };
+            let (c_slot, t_slot) = (slot_of(&consumed), slot_of(&target));
+            let r2 = c::submit_batch(&bridge, ctx, &[], &waits[..2], &[signal], &mut token);
             assert_eq!(r2, 1, "still full");
-            assert_eq!(slot_of(consumed), c_slot, "consuming wait not committed");
-            assert_eq!(slot_of(target), t_slot);
+            assert_eq!(slot_of(&consumed), c_slot, "consuming wait not committed");
+            assert_eq!(slot_of(&target), t_slot);
             assert_eq!(bridge.core.pool.refs(c_slot), 1);
             assert_eq!(bridge.core.pool.refs(t_slot), 1);
-            assert!(sync_ref(consumed).unwrap().ready(0, false).unwrap().0);
-            assert!(sync_ref(target).unwrap().lock().pending.is_none());
-            assert_eq!(unsafe { nv_rm_sync_destroy(&mut *bridge, target) }, 0);
+            assert!(consumed.obj().unwrap().ready(0, false).unwrap().0);
+            assert!(target.obj().unwrap().lock().pending.is_none());
+            assert_eq!(c::sync_destroy(&bridge, target), 0);
             break token;
         }
         assert_eq!(r, 0);
         accepted.push(target);
     };
     assert!(accepted.len() > 300, "ring filled after {}", accepted.len());
-    assert_eq!(unsafe { nv_rm_sync_signal(&mut *bridge, gate, 1) }, 0);
-    assert_eq!(
-        unsafe { nv_rm_wait(&mut *bridge, ctx, full_token, u64::MAX) },
-        0
-    );
+    assert_eq!(c::sync_signal(&bridge, &gate, 1), 0);
+    assert_eq!(c::wait(&bridge, ctx, full_token, u64::MAX), 0);
     let last = queue_ref(&bridge.lock().0, ctx).unwrap().last_token();
-    assert_eq!(unsafe { nv_rm_wait(&mut *bridge, ctx, last, u64::MAX) }, 0);
-    for id in &accepted {
-        let p = SyncPoint {
-            sync: *id,
+    assert_eq!(c::wait(&bridge, ctx, last, u64::MAX), 0);
+    let accepted_count = accepted.len();
+    for id in accepted {
+        let p = Point {
+            sync: &id,
             value: 0,
         };
-        assert_eq!(
-            unsafe { nv_rm_sync_wait_many(&mut *bridge, &p, 1, 0, 0) },
-            0
-        );
-        assert_eq!(unsafe { nv_rm_sync_destroy(&mut *bridge, *id) }, 0);
+        assert_eq!(c::sync_wait_many(&bridge, &[p], 0, 0), 0);
+        assert_eq!(c::sync_destroy(&bridge, id), 0);
     }
     for id in [gate, consumed] {
-        assert_eq!(unsafe { nv_rm_sync_destroy(&mut *bridge, id) }, 0);
+        assert_eq!(c::sync_destroy(&bridge, id), 0);
     }
-    assert_eq!(unsafe { nv_rm_context_destroy(&mut *bridge, ctx) }, 0);
+    assert_eq!(c::context_destroy(&bridge, ctx), 0);
     assert!(!bridge.core.is_lost());
     drop(bridge);
     assert_eq!(fd_count(), before);
     println!(
-        "PASS: ring full after {} gated batches, NOT_READY transactional, all signals completed",
-        accepted.len()
+        "PASS: ring full after {accepted_count} gated batches, NOT_READY transactional, all signals completed"
+    );
+}
+
+unsafe extern "C" {
+    fn fork() -> i32;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn kill(pid: i32, signal: i32) -> i32;
+    fn _exit(status: i32) -> !;
+}
+/// Runs `child` in a forked child, which exits with its return value, and
+/// returns that exit code; `None` if the child did not exit normally within
+/// `timeout` (it is then killed).
+fn in_forked_child(child: impl FnOnce() -> i32, timeout: Duration) -> Option<i32> {
+    // SAFETY: fork has no memory-safety precondition. The child runs only
+    // `child` and then _exit: it never unwinds or returns into the test
+    // harness and runs no destructors of the parent's state.
+    let pid = unsafe { fork() };
+    assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+    if pid == 0 {
+        let code = child();
+        // SAFETY: async-signal-safe process exit; nothing runs after it.
+        unsafe { _exit(code) };
+    }
+    let start = Instant::now();
+    let mut status = 0;
+    loop {
+        // SAFETY: waits for our own child; `status` is a live local.
+        // WNOHANG (1): the wait is bounded by `timeout`.
+        let got = unsafe { waitpid(pid, &mut status, 1) };
+        if got == pid {
+            break;
+        }
+        assert!(got == 0, "waitpid: {}", std::io::Error::last_os_error());
+        if start.elapsed() > timeout {
+            // SAFETY: signals our own child (SIGKILL), then reaps it.
+            unsafe { kill(pid, 9) };
+            // SAFETY: as above; blocking reap of the killed child.
+            unsafe { waitpid(pid, &mut status, 0) };
+            return None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    // WIFEXITED: the low 7 bits (terminating signal) are zero; WEXITSTATUS:
+    // bits 8..15 (sys/wait.h).
+    (status.trailing_zeros() >= 7).then_some((status >> 8) & 0xff)
+}
+
+/// A device inherited across fork fails in the child instead of acting on
+/// the parent's RM objects (rm/src/process.rs): a submit returns
+/// VK_ERROR_DEVICE_LOST (-4), nv_rm_is_lost reads 1, and close keeps every
+/// object and descriptor. The parent's device is untouched.
+#[test]
+#[ignore = "local NVIDIA GPU: device inherited across fork fails in the child, parent keeps working"]
+fn forked_child_cannot_use_or_tear_down_the_parents_device() {
+    let before = fd_count();
+    let (status, opened) = c::OpenedBridge::open(selected_pci());
+    assert_eq!(status, 0);
+    let opened = opened.expect("nv_rm_open returned a device");
+    let ctx = context(opened.bridge());
+    let mut token = 0;
+    assert_eq!(c::submit(opened.bridge(), ctx, &[], &mut token), 0);
+    assert_eq!(c::wait(opened.bridge(), ctx, token, 10_000_000_000), 0);
+    let code = in_forked_child(
+        || {
+            // SAFETY: this is the forked child, which ends in _exit and never
+            // returns into the code holding `opened`.
+            let child = unsafe { opened.alias_in_forked_child() };
+            let fds = fd_count();
+            let mut t = 0;
+            let mut failed = 0;
+            if c::submit(child.bridge(), ctx, &[], &mut t) != -4 {
+                failed |= 1;
+            }
+            if c::is_lost(child.bridge()) != 1 {
+                failed |= 2;
+            }
+            child.close();
+            if fd_count() != fds {
+                failed |= 4;
+            }
+            failed
+        },
+        Duration::from_secs(10),
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "child: 1 = submit not -4, 2 = is_lost not 1, 4 = close released descriptors"
+    );
+    assert_eq!(c::is_lost(opened.bridge()), 0);
+    let mut token = 0;
+    assert_eq!(c::submit(opened.bridge(), ctx, &[], &mut token), 0);
+    assert_eq!(c::wait(opened.bridge(), ctx, token, 10_000_000_000), 0);
+    assert_eq!(c::context_destroy(opened.bridge(), ctx), 0);
+    opened.close();
+    assert_eq!(fd_count(), before, "fd leak");
+    println!(
+        "PASS: forked child got -4, read lost, close kept its descriptors; parent submits after the child exited"
     );
 }

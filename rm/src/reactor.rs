@@ -53,6 +53,7 @@ pub(crate) struct WakeFd(OwnedFd);
 impl WakeFd {
     pub fn new() -> Result<Self> {
         // Linux UAPI EFD_CLOEXEC | EFD_NONBLOCK. The RM event FD stays blocking.
+        // SAFETY: no pointer arguments.
         let fd = unsafe { eventfd(0, 0o2000000 | 0o4000) };
         if fd < 0 {
             return Err(Error::Io(
@@ -60,11 +61,13 @@ impl WakeFd {
                 io::Error::last_os_error(),
             ));
         }
+        // SAFETY: a successful eventfd returns a new descriptor nobody else owns.
         Ok(Self(unsafe { OwnedFd::from_raw_fd(fd) }))
     }
     pub fn notify(&self) -> Result<()> {
         let value = 1u64;
         loop {
+            // SAFETY: writes 8 bytes from a live local u64 to an owned fd.
             let n = unsafe { write(self.as_raw_fd(), (&value as *const u64).cast(), 8) };
             if n == 8 {
                 return Ok(());
@@ -81,6 +84,7 @@ impl WakeFd {
     pub fn drain(&self) -> Result<()> {
         let mut value = 0u64;
         loop {
+            // SAFETY: reads at most 8 bytes into a live local u64 from an owned fd.
             let n = unsafe { read(self.as_raw_fd(), (&mut value as *mut u64).cast(), 8) };
             if n == 8 {
                 return Ok(());
@@ -173,6 +177,8 @@ impl Readiness {
         let pointer = spec
             .as_ref()
             .map_or(std::ptr::null(), |spec| spec as *const TimeSpec);
+        // SAFETY: `count` pollfds in the live Vec, a NULL or live local
+        // timespec, and no signal mask (the app's mask stays untouched).
         let n = unsafe { ppoll(fds.as_mut_ptr(), count, pointer, std::ptr::null()) };
         if n >= 0 {
             if fds.iter().any(|p| p.revents & 0x20 != 0) {

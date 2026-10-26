@@ -129,8 +129,7 @@ pub(crate) struct Shared {
 }
 impl Shared {
     fn word(&self, offset: usize) -> &AtomicU64 {
-        // Validated page-aligned memfd mapping, aligned offsets inside 4096.
-        unsafe { &*((self.memory.cpu_address() + offset) as *const AtomicU64) }
+        self.memory.word(offset)
     }
     fn load(&self, offset: usize) -> u64 {
         self.word(offset).load(Ordering::Acquire)

@@ -18,9 +18,10 @@ use std::{
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 #[repr(C, align(8))]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, Immutable)]
 struct Layout {
     max_submitted: u64,
     monitored: u64,
@@ -29,24 +30,28 @@ struct Layout {
     padding: u32,
 }
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct Allocate {
     memory: u32,
     max_submitted_memory: u32,
     flags: u64,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct Bind {
     channel: u32,
     count: u32,
     indices: [u32; 8],
 }
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct Import {
     client: u32,
     surface: u32,
     size: u64,
 }
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct ContextCreate {
     index: u64,
     parameters: u64,
@@ -55,6 +60,7 @@ struct ContextCreate {
     padding: u32,
 }
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct FenceCreate {
     context: u32,
     timeout_ms: u32,
@@ -64,6 +70,7 @@ struct FenceCreate {
 }
 #[cfg(test)]
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct FenceWait {
     context: u32,
     fd: i32,
@@ -71,12 +78,13 @@ struct FenceWait {
     post: u64,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct GemClose {
     handle: u32,
     padding: u32,
 }
 #[repr(C, align(8))]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, Immutable)]
 struct SyncFileInfo {
     name: [u8; 32],
     status: i32,
@@ -98,7 +106,7 @@ struct SyncFenceInfo {
 const fn request(group: u8, number: u8, bytes: usize, direction: u32) -> u32 {
     (direction << 30) | ((bytes as u32) << 16) | ((group as u32) << 8) | number as u32
 }
-fn call<T>(
+fn call<T: FromBytes + IntoBytes + Immutable>(
     fd: RawFd,
     group: u8,
     number: u8,
@@ -106,8 +114,10 @@ fn call<T>(
     value: &mut T,
     operation: &'static str,
 ) -> Result<()> {
-    // SAFETY: all private callers supply exact initialized public wire structs.
-    // Nested pointers remain borrowed until this synchronous ioctl returns.
+    // SAFETY: `value` is a live, exclusively borrowed buffer of exactly the
+    // encoded size; any bytes the kernel writes are a valid T (FromBytes).
+    // Nested pointers (u64 fields) stay borrowed until this synchronous ioctl
+    // returns.
     let ret = unsafe {
         crate::platform::ioctl(
             fd,
@@ -396,25 +406,12 @@ impl NativeFenceSurface {
     pub(crate) fn native64(&self) -> bool {
         self.mode == PayloadMode::Native64
     }
+    /// The maxSubmitted word of a Tracked32 surface (see `PayloadMode`).
     fn maximum(&self, offset: usize) -> Result<&AtomicU64> {
-        let address = self
-            .mapping
-            .cpu_address()
-            .checked_add(offset)
-            .ok_or_else(|| Error::Contract("semaphore CPU address overflow".into()))?;
-        if address % std::mem::align_of::<AtomicU64>() != 0
-            || offset
-                .checked_add(8)
-                .is_none_or(|end| end > self.size as usize)
-        {
-            return Err(Error::Contract(
-                "unaligned/out-of-bounds cached semaphore atomic".into(),
-            ));
-        }
-        // SAFETY: this word is in owned CPU-cached system memory, not MMIO or
-        // GPU payload. RM and userspace both use aligned64 atomic operations;
-        // GPU never writes this word. Mapping outlives the borrowed atomic.
-        Ok(unsafe { &*(address as *const AtomicU64) })
+        // This word is in owned CPU-cached system memory, not MMIO or GPU
+        // payload: RM and userspace both use aligned 64-bit atomics on it and
+        // the GPU never writes it.
+        self.mapping.atomic_u64(offset)
     }
     pub(crate) fn publish_maximum(&self, token: u64) -> Result<()> {
         if let PayloadMode::Tracked32 { maximum_offset } = self.mode {
@@ -442,7 +439,12 @@ impl NativeFenceSurface {
             }
         }
     }
-    fn with_context<T>(
+    /// Run `action` with this surface's DRM fence context, created on first use
+    /// through a duplicate of `drm_fd`.
+    ///
+    /// # Safety
+    /// `drm_fd` is negative (rejected) or an open descriptor for the whole call.
+    unsafe fn with_context<T>(
         &self,
         drm_fd: RawFd,
         action: impl FnOnce(&DrmContext) -> Result<T>,
@@ -454,8 +456,8 @@ impl NativeFenceSurface {
         }
         let mut cached = self.context.borrow_mut();
         if cached.is_none() {
-            // SAFETY: C/Rust caller lends this live DRM fd for the duration of
-            // the call. Duplicate it so its GEM namespace outlives the caller.
+            // SAFETY: non-negative (checked above) and open for the call (#
+            // Safety). Duplicated so its GEM namespace outlives the caller.
             let fd = unsafe { BorrowedFd::borrow_raw(drm_fd) }
                 .try_clone_to_owned()
                 .map_err(|e| Error::Io("retain DRM semaphore context fd", e))?;
@@ -510,13 +512,16 @@ impl NativeFenceSurface {
     /// Returns an owned CLOEXEC sync_file. Payload may still be unsignalled.
     /// The matching kernel caps its lifetime at five seconds; zero does not
     /// mean infinite. This is an external fence deadline, not GPU retirement.
-    pub(crate) fn context_fence(&self, drm_fd: RawFd, token: u64) -> Result<OwnedFd> {
+    ///
+    /// # Safety
+    /// `drm_fd` is negative (rejected) or an open descriptor for the whole call.
+    pub(crate) unsafe fn context_fence(&self, drm_fd: RawFd, token: u64) -> Result<OwnedFd> {
         if token == 0 {
             return Err(Error::Contract(
                 "zero is not a submitted fence token".into(),
             ));
         }
-        self.with_context(drm_fd, |ctx| {
+        let export = |ctx: &DrmContext| -> Result<OwnedFd> {
             let mut create = FenceCreate {
                 context: ctx.handle,
                 timeout_ms: 5000,
@@ -540,12 +545,18 @@ impl NativeFenceSurface {
             // SAFETY: successful CREATE transfers a newly installed fd.
             let fd = unsafe { OwnedFd::from_raw_fd(create.fd) };
             Ok(fd)
-        })
+        };
+        // SAFETY: `drm_fd` is this function's, under its contract.
+        unsafe { self.with_context(drm_fd, export) }
     }
     /// Kernel callback advances this timeline to post only after both the
     /// external sync_file and the pre value complete. Input fd stays borrowed.
+    ///
+    /// # Safety
+    /// `drm_fd` is negative (rejected) or open, and `sync_fd` is an open
+    /// sync_file, for the whole call.
     #[cfg(test)]
-    pub(crate) fn install_wait(
+    pub(crate) unsafe fn install_wait(
         &self,
         drm_fd: RawFd,
         sync_fd: RawFd,
@@ -566,10 +577,12 @@ impl NativeFenceSurface {
         }
         // Retain before installing: an allocation failure must not leave an
         // accepted dependency whose eventual error we cannot observe.
+        // SAFETY: `sync_fd` is open for the call (# Safety); the borrow ends
+        // with this statement.
         let retained = unsafe { BorrowedFd::borrow_raw(sync_fd) }
             .try_clone_to_owned()
             .map_err(|e| Error::Io("retain external sync_file health", e))?;
-        self.with_context(drm_fd, |ctx| {
+        let install = |ctx: &DrmContext| {
             let mut wait = FenceWait {
                 context: ctx.handle,
                 fd: sync_fd,
@@ -584,7 +597,9 @@ impl NativeFenceSurface {
                 &mut wait,
                 "install GPU external semaphore wait",
             )
-        })?;
+        };
+        // SAFETY: `drm_fd` is this function's, under its contract.
+        unsafe { self.with_context(drm_fd, install) }?;
         self.health.borrow_mut().push(retained);
         Ok(())
     }
@@ -959,6 +974,7 @@ mod tests {
     }
     fn set_value(surface: &NativeFenceSurface, value: u64) {
         #[repr(C, align(8))]
+        #[derive(FromBytes, IntoBytes, Immutable)]
         struct Set {
             index: u64,
             value: u64,
@@ -1228,13 +1244,15 @@ mod tests {
             let space = AddressSpace::new(&device).unwrap();
             let a = NativeFenceSurface::allocate(&device, &space).unwrap();
             let b = NativeFenceSurface::allocate(&device, &space).unwrap();
-            let first = a.context_fence(drm.as_raw_fd(), 1).unwrap();
-            let second = b.context_fence(drm.as_raw_fd(), 1).unwrap();
+            // SAFETY: `drm` is an open File owned by this test for the whole call.
+            let first = unsafe { a.context_fence(drm.as_raw_fd(), 1) }.unwrap();
+            // SAFETY: `drm` is an open File owned by this test for the whole call.
+            let second = unsafe { b.context_fence(drm.as_raw_fd(), 1) }.unwrap();
             assert_eq!(sync_status(first.as_raw_fd()).unwrap(), 0);
             assert_eq!(sync_status(second.as_raw_fd()).unwrap(), 0);
             assert!(!poll_readable(first.as_raw_fd(), 0));
-            b.install_wait(drm.as_raw_fd(), first.as_raw_fd(), 0, 1)
-                .unwrap();
+            // SAFETY: `drm` and the sync_file `first` are open and owned by this test.
+            unsafe { b.install_wait(drm.as_raw_fd(), first.as_raw_fd(), 0, 1) }.unwrap();
             assert_eq!(sync_status(second.as_raw_fd()).unwrap(), 0);
             set_value(&a, 1);
             assert!(poll_readable(first.as_raw_fd(), 1000));
@@ -1244,13 +1262,15 @@ mod tests {
             assert_eq!(b.read_completed().unwrap(), 1);
             // Native 64-bit values, not an accidentally working low-word path.
             let wide = 0x1_0000_0001;
-            let third = a.context_fence(drm.as_raw_fd(), wide).unwrap();
+            // SAFETY: `drm` is an open File owned by this test for the whole call.
+            let third = unsafe { a.context_fence(drm.as_raw_fd(), wide) }.unwrap();
             assert_eq!(sync_status(third.as_raw_fd()).unwrap(), 0);
             set_value(&a, wide);
             assert!(poll_readable(third.as_raw_fd(), 1000));
             assert_eq!(a.read_completed().unwrap(), wide);
             assert_eq!(sync_status(third.as_raw_fd()).unwrap(), 1);
-            let cancelled = b.context_fence(drm.as_raw_fd(), 2).unwrap();
+            // SAFETY: `drm` is an open File owned by this test for the whole call.
+            let cancelled = unsafe { b.context_fence(drm.as_raw_fd(), 2) }.unwrap();
             drop(b);
             assert!(poll_readable(cancelled.as_raw_fd(), 1000));
             assert!(sync_status(cancelled.as_raw_fd()).unwrap() < 0);
@@ -1276,7 +1296,8 @@ mod tests {
             let (device, drm) = device_and_drm();
             let space = AddressSpace::new(&device).unwrap();
             let surface = NativeFenceSurface::allocate(&device, &space).unwrap();
-            let gate = surface.context_fence(drm.as_raw_fd(), 1).unwrap();
+            // SAFETY: `drm` is an open File owned by this test for the whole call.
+            let gate = unsafe { surface.context_fence(drm.as_raw_fd(), 1) }.unwrap();
             assert_eq!(sync_status(gate.as_raw_fd()).unwrap(), 0);
             // Always release the external dependency if the child fails or the
             // parent assertion unwinds. This fixture never spins the GPU.

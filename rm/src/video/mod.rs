@@ -189,11 +189,13 @@ impl TestDmaBuf {
         })
     }
     pub fn read(&self, offset: usize, out: &mut [u8]) -> VResult<()> {
+        // Sound only after the GPU handoff: test helper: the caller waited for every copy into this dma-buf.
         self.memory.map()?.read_bytes(offset, out)?;
         Ok(())
     }
     pub fn fill(&self, byte: u8) -> VResult<()> {
         let v = vec![byte; self.memory.size];
+        // Sound only after the GPU handoff: test helper: called before any GPU work references the buffer.
         self.memory.map()?.write_bytes(0, &v)?;
         Ok(())
     }

@@ -1,0 +1,7 @@
+# Dependencies build from the vendored copies only (RUST.md §9: offline, reproducible).
+# Refresh with `cargo vendor --locked --versioned-dirs vendor` after a Cargo.lock change.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

@@ -19,7 +19,6 @@
 //!   blocks on GPU progress or a foreign fence while holding Inner.
 //! * Sync payloads (`SyncObj`, Arc): the C id is the raw Arc pointer; their
 //!   mapped slots are read/written without Inner.
-#![allow(clippy::missing_safety_doc)]
 use crate::diag::diag;
 use crate::{
     abi, capabilities,
@@ -271,17 +270,18 @@ struct Inner {
     /// bound before it.
     bind_info: HashMap<u64, (u64, u64, u64, u64)>,
 }
-/// SAFETY (Send): the raw C `data` pointers of deferred VA releases are the
-/// caller's device objects, which nv_rm.h requires to outlive nv_rm_close and
-/// to be usable from any thread. Every Rc/Cell/RefCell reachable from Inner
-/// was created inside it and never escapes: all entry points run with the Bridge mutex
-/// held and return only plain data (ids, addresses, owned fds, Arcs of
-/// Send+Sync types). Rc reference counts are therefore only modified by the
-/// mutex owner, and the mutex provides the happens-before between successive
-/// owners on different threads. RM objects are per-client descriptors without
-/// thread affinity. Moving the whole graph between threads (never sharing it
-/// unlocked) is exactly what `Send` permits.
+/// Inner, made movable between threads under the Bridge mutex.
 struct Confined(Inner);
+// SAFETY: the raw C `data` pointers of deferred VA releases are the
+// caller's device objects, which nv_rm.h requires to outlive nv_rm_close and
+// to be usable from any thread. Every Rc/Cell/RefCell reachable from Inner
+// was created inside it and never escapes: all entry points run with the Bridge mutex
+// held and return only plain data (ids, addresses, owned fds, Arcs of
+// Send+Sync types). Rc reference counts are therefore only modified by the
+// mutex owner, and the mutex provides the happens-before between successive
+// owners on different threads. RM objects are per-client descriptors without
+// thread affinity. Moving the whole graph between threads (never sharing it
+// unlocked) is exactly what `Send` permits.
 unsafe impl Send for Confined {}
 
 pub struct Bridge {
@@ -290,9 +290,21 @@ pub struct Bridge {
     /// Perf capture armed (frame markers take the lock only then); set at
     /// open or by a late arm from submit.
     capture: std::sync::atomic::AtomicBool,
+    /// Set by the C-boundary guard when a panic interrupted a call on this
+    /// bridge (crate::ffi); never cleared.
+    failed: crate::ffi::FailFlag,
+    /// The process that opened the device: a forked child inherits the
+    /// handle but not its RM objects' owner or threads, so it may neither use
+    /// nor tear it down (RUST.md §13).
+    process: crate::process::ProcessBound,
 }
 
-fn sync_ref<'a>(id: u64) -> Result<&'a SyncObj> {
+/// The payload behind a C sync id.
+///
+/// # Safety
+/// `id` is 0 (rejected) or an nv_rm_sync_create id whose payload is not
+/// destroyed during `'a`.
+unsafe fn sync_ref<'a>(id: u64) -> Result<&'a SyncObj> {
     let pointer = id as usize as *const SyncObj;
     if pointer.is_null() {
         return Err(Error::Contract("null synchronization id".into()));
@@ -353,6 +365,9 @@ impl Bridge {
         let bridge = Self {
             core,
             capture: std::sync::atomic::AtomicBool::new(capture.is_some()),
+            failed: crate::ffi::FailFlag::default(),
+            process: crate::process::ProcessBound::new()
+                .map_err(|e| Error::Io("register the fork handler", e))?,
             inner: Mutex::new(Confined(Inner {
                 queues: Vec::new(),
                 acquires: Vec::new(),
@@ -406,9 +421,15 @@ impl Bridge {
                 "GPU semaphore pool collides with Mesa VA heap".into(),
             ));
         }
-        self.core
-            .pool
-            .install_page(cpu.cpu_address(), gpu.address())?;
+        // SAFETY: `cpu` maps the whole PAGE_BYTES allocation and is kept in
+        // Inner.pages, which is dropped only after Bridge::drop closed the
+        // pool (no page access after close); only the pool's atomics and the
+        // GPU touch the page.
+        unsafe {
+            self.core
+                .pool
+                .install_page(cpu.cpu_address(), gpu.address())
+        }?;
         inner.pages.push(PoolPage {
             _gpu: gpu,
             _cpu: cpu,
@@ -794,13 +815,18 @@ impl Bridge {
     }
 
     /// Evaluate ANY/ALL over C points (no allocation).
-    fn points_ready(&self, points: &[SyncPoint], flags: u32) -> Result<bool> {
+    ///
+    /// # Safety
+    /// Every `sync` id in `points` is 0 or a live nv_rm_sync_create payload
+    /// for the whole call.
+    unsafe fn points_ready(&self, points: &[SyncPoint], flags: u32) -> Result<bool> {
         let any = flags & 2 != 0;
         let pending = flags & 1 != 0;
         let mut ready = !any;
         let mut broadcast = false;
         for point in points {
-            let (one, changed) = sync_ref(point.sync)?.ready(point.value, pending)?;
+            // SAFETY: the ids come from this function's arguments, live for the call (# Safety).
+            let (one, changed) = unsafe { sync_ref(point.sync) }?.ready(point.value, pending)?;
             broadcast |= changed;
             if any {
                 ready |= one;
@@ -817,10 +843,19 @@ impl Bridge {
         self.broadcast(broadcast);
         Ok(ready || points.is_empty())
     }
-    fn wait_points(&self, points: &[SyncPoint], flags: u32, timeout_ns: u64) -> Result<bool> {
+    /// # Safety
+    /// Every `sync` id in `points` is 0 or a live nv_rm_sync_create payload
+    /// for the whole call.
+    unsafe fn wait_points(
+        &self,
+        points: &[SyncPoint],
+        flags: u32,
+        timeout_ns: u64,
+    ) -> Result<bool> {
         let start = Instant::now();
         self.check()?;
-        if self.points_ready(points, flags)? {
+        // SAFETY: same ids as this function's, under its contract.
+        if unsafe { self.points_ready(points, flags) }? {
             return Ok(true);
         }
         if timeout_ns == 0 {
@@ -841,12 +876,14 @@ impl Bridge {
         // Pending foreign sync_files wake us through the watcher; everything
         // else is a mapped word (HOST interrupt or CPU notify).
         for point in points {
-            if let Some(foreign) = sync_ref(point.sync)?.foreign() {
+            // SAFETY: the ids come from this function's arguments, live for the call (# Safety).
+            if let Some(foreign) = unsafe { sync_ref(point.sync) }?.foreign() {
                 self.core.watcher.watch_cpu(&self.core, foreign)?;
             }
         }
         self.wait_until(deadline(start, timeout_ns), || {
-            self.points_ready(points, flags)
+            // SAFETY: same ids as this function's; the wait ends within the call.
+            unsafe { self.points_ready(points, flags) }
         })
     }
 
@@ -856,7 +893,11 @@ impl Bridge {
     /// (ring pressure) or an error releases everything allocated and leaves
     /// all payloads untouched; phase 3 applies payload changes only after the
     /// batch was accepted.
-    fn submit(
+    ///
+    /// # Safety
+    /// Every `sync` id in `waits` and `signals` is 0 or a live
+    /// nv_rm_sync_create payload for the whole call.
+    unsafe fn submit(
         &self,
         context: u64,
         pushes: &[Push],
@@ -883,15 +924,18 @@ impl Bridge {
         scratch.actions.clear();
         scratch.shadows.clear();
         scratch.acquires.clear();
-        let result = self.submit_locked(
-            inner,
-            context,
-            pushes,
-            waits,
-            foreign,
-            signals,
-            &mut scratch,
-        );
+        // SAFETY: same ids as this function's, under its contract.
+        let result = unsafe {
+            self.submit_locked(
+                inner,
+                context,
+                pushes,
+                waits,
+                foreign,
+                signals,
+                &mut scratch,
+            )
+        };
         match &result {
             Ok(SubmitStatus::Submitted(token)) => {
                 let token = *token;
@@ -913,7 +957,9 @@ impl Bridge {
                 for action in scratch.actions.drain(..) {
                     match action {
                         Action::Consume(sync, planned, fresh) => {
-                            // SAFETY: C keeps payloads alive during the call.
+                            // SAFETY: every Action pointer came from sync_ref on
+                            // an id of this call (`submit`'s # Safety): C keeps
+                            // the payload alive until the call returns.
                             let sync = unsafe { &*sync };
                             let mut state = sync.lock();
                             check_planned(&state, planned, "wait");
@@ -923,10 +969,12 @@ impl Bridge {
                             notify = true;
                         }
                         Action::Rebind(sync, fresh) => {
+                            // SAFETY: as for Consume: a payload of this call's ids.
                             let sync = unsafe { &*sync };
                             sync.rebind_native(&mut sync.lock(), fresh);
                         }
                         Action::Signal(sync, value, planned) => {
+                            // SAFETY: as for Consume: a payload of this call's ids.
                             let sync = unsafe { &*sync };
                             let mut state = sync.lock();
                             check_planned(&state, planned, "signal");
@@ -981,8 +1029,11 @@ impl Bridge {
         inner.scratch = scratch;
         result
     }
+    /// # Safety
+    /// As for `submit`: every `sync` id in `waits` and `signals` is 0 or a
+    /// live nv_rm_sync_create payload for the whole call.
     #[allow(clippy::too_many_arguments)]
-    fn submit_locked(
+    unsafe fn submit_locked(
         &self,
         inner: &mut Inner,
         context: u64,
@@ -1005,7 +1056,8 @@ impl Bridge {
             }
         }
         for point in waits {
-            let sync = sync_ref(point.sync)?;
+            // SAFETY: the ids come from this function's arguments, live for the call (# Safety).
+            let sync = unsafe { sync_ref(point.sync) }?;
             let (plan, consumes) = {
                 let state = sync.lock();
                 (
@@ -1063,7 +1115,8 @@ impl Bridge {
             }
         }
         for point in signals {
-            let sync = sync_ref(point.sync)?;
+            // SAFETY: the ids come from this function's arguments, live for the call (# Safety).
+            let sync = unsafe { sync_ref(point.sync) }?;
             // A payload consumed by a wait in this same batch is signalled on
             // its replacement slot (Vulkan: wait then signal of one binary).
             let rebound = s.actions.iter().rev().find_map(|a| match a {
@@ -1160,8 +1213,14 @@ impl Bridge {
         Ok(())
     }
 
-    fn export_sync_file(&self, id: u64, drm_fd: i32) -> Result<Option<OwnedFd>> {
-        let sync = sync_ref(id)?;
+    /// SYNC_FD export of the binary payload `id`.
+    ///
+    /// # Safety
+    /// `id` is 0 or a live nv_rm_sync_create payload, and `drm_fd` is
+    /// negative (rejected where needed) or open, for the whole call.
+    unsafe fn export_sync_file(&self, id: u64, drm_fd: i32) -> Result<Option<OwnedFd>> {
+        // SAFETY: `id` is this function's, under its contract.
+        let sync = unsafe { sync_ref(id) }?;
         if sync.timeline {
             return Err(Error::Contract("timeline SYNC_FD export is invalid".into()));
         }
@@ -1228,9 +1287,11 @@ impl Bridge {
         };
         match next {
             Next::Done(fd) => Ok(fd),
-            Next::Fence(context, token) => queue_ref(inner, context)?
-                .context_fence(drm_fd, token)
-                .map(Some),
+            Next::Fence(context, token) => {
+                let queue = queue_ref(inner, context)?;
+                // SAFETY: `drm_fd` is this function's, under its contract.
+                unsafe { queue.context_fence(drm_fd, token) }.map(Some)
+            }
             Next::Slot(slot) => {
                 // The export batch acquires the reserved slot directly: the
                 // submit thread's later GPU release completes it. No CPU wait
@@ -1265,9 +1326,9 @@ impl Bridge {
                     Err(error) => return Err(error),
                 };
                 record_acquires(inner, context, token, [Acquire::Binary(slot)]);
-                queue_ref(inner, context)?
-                    .context_fence(drm_fd, token)
-                    .map(Some)
+                let queue = queue_ref(inner, context)?;
+                // SAFETY: `drm_fd` is this function's, under its contract.
+                unsafe { queue.context_fence(drm_fd, token) }.map(Some)
             }
             Next::Gate(shared, target) => {
                 // Imported shared payloads have no process-local producer
@@ -1321,9 +1382,9 @@ impl Bridge {
                     self.lose_locked(inner);
                     return Err(error);
                 }
-                queue_ref(inner, context)?
-                    .context_fence(drm_fd, token)
-                    .map(Some)
+                let queue = queue_ref(inner, context)?;
+                // SAFETY: `drm_fd` is this function's, under its contract.
+                unsafe { queue.context_fence(drm_fd, token) }.map(Some)
             }
         }
     }
@@ -1509,6 +1570,8 @@ fn capture_read(
     let mut words = vec![0u8; size as usize];
     let read = buffer.cpu.acquire(
         || Err(Error::Contract("capture: mapping vanished".into())),
+        // Sound only after the GPU handoff: UNVERIFIED: capture copies pushbuffers NVK finished
+        // writing before nv_rm_submit; another app thread could still write a bind (capture mode only).
         |m: &Mapping| m.read_bytes(at, &mut words),
     );
     match read {
@@ -1759,29 +1822,40 @@ fn query_zcull(d: &Device) -> Result<(abi::ZcullInfo, abi::EngineContextProperti
     }
     Ok((info, ctxsw))
 }
-/// Every C entry point runs inside this guard: a Rust panic on a caller
-/// thread must not unwind into C (process abort) and must not leave callers
-/// blocked. It publishes device loss (waking every waiter, as the former
-/// worker's liveness guard did) and returns VK_ERROR_DEVICE_LOST. Inner may be
-/// poisoned afterwards; later calls only see the loss and tear down.
-fn ffi(bridge: *const Bridge, f: impl FnOnce() -> i32) -> i32 {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(status) => status,
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "non-string payload".into());
-            // The panic hook (diag::install_panic_hook) logged the location.
-            diag!("nvk Rust RM: internal panic on caller thread ({message}); device lost");
-            // SAFETY: the caller keeps the bridge alive for this call.
-            if let Some(bridge) = unsafe { bridge.as_ref() } {
-                bridge.core.mark_lost();
-            }
-            -4
+/// A panic interrupting a call on a Bridge publishes device loss (waking
+/// every waiter) and marks the Bridge failed: every later entry point on it
+/// returns VK_ERROR_DEVICE_LOST without touching its state (crate::ffi).
+impl crate::ffi::Failable for Bridge {
+    /// Also true in a forked child: it gets VK_ERROR_DEVICE_LOST and must
+    /// open its own device.
+    fn failed(&self) -> bool {
+        if !self.process.is_current() {
+            diag!(
+                "nvk Rust RM: device opened by pid {} used in a forked child; open a new device in this process",
+                self.process.creator()
+            );
+            return true;
         }
+        self.failed.is_set()
     }
+    fn mark_failed(&self) {
+        self.failed.set();
+        self.core.mark_lost();
+    }
+}
+/// The shared C-boundary guard (crate::ffi::guard) for an entry point on
+/// `bridge`, failing with VK_ERROR_DEVICE_LOST.
+fn guarded(entry: &'static str, bridge: Option<&Bridge>, f: impl FnOnce() -> i32) -> i32 {
+    crate::ffi::guard(
+        entry,
+        bridge.map(|b| b as &dyn crate::ffi::Failable),
+        || -4,
+        f,
+    )
+}
+/// The bridge argument of an entry point, or the named error for NULL.
+fn present(bridge: Option<&Bridge>) -> Result<&Bridge> {
+    bridge.ok_or_else(|| Error::Contract("null RM bridge".into()))
 }
 fn report(result: Result<()>) -> i32 {
     match result {
@@ -1796,16 +1870,23 @@ fn report(result: Result<()>) -> i32 {
         }
     }
 }
-unsafe fn bridge<'a>(p: *mut Bridge) -> Result<&'a Bridge> {
-    unsafe { p.as_ref() }.ok_or_else(|| Error::Contract("null RM bridge".into()))
-}
+/// Write an entry point's result to its output pointer.
+///
+/// # Safety
+/// `p` is NULL (rejected) or valid and aligned for a write of `T`.
 unsafe fn output<T>(p: *mut T, value: T) -> Result<()> {
     if p.is_null() {
         return Err(Error::Contract("null RM output".into()));
     }
+    // SAFETY: non-NULL (checked above), writable and aligned (# Safety).
     unsafe { p.write(value) };
     Ok(())
 }
+/// An entry point's input array, at most `maximum` elements.
+///
+/// # Safety
+/// When `count` is nonzero, `ptr` is NULL (rejected) or points to `count`
+/// initialised, aligned `T`s that nothing writes during `'a`.
 unsafe fn input<'a, T>(ptr: *const T, count: u32, maximum: u32) -> Result<&'a [T]> {
     if count > maximum || (count != 0 && ptr.is_null()) {
         return Err(Error::Contract("invalid RM input array".into()));
@@ -1813,6 +1894,8 @@ unsafe fn input<'a, T>(ptr: *const T, count: u32, maximum: u32) -> Result<&'a [T
     Ok(if count == 0 {
         &[]
     } else {
+        // SAFETY: non-NULL with count <= maximum (checked above); the
+        // elements are readable and unchanged for 'a (# Safety).
         unsafe { std::slice::from_raw_parts(ptr, count as usize) }
     })
 }
@@ -1826,11 +1909,18 @@ fn status_of(result: Result<SubmitStatus>, out: *mut u64) -> i32 {
                 oldest
             }
         };
+        // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
         unsafe { output(out, token) }
     })());
     if code == 0 { status } else { code }
 }
 
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_open(
     domain: u32,
@@ -1840,33 +1930,56 @@ pub unsafe extern "C" fn nv_rm_open(
     out: *mut *mut Bridge,
     info: *mut Info,
 ) -> i32 {
-    ffi(std::ptr::null(), move || {
+    guarded("nv_rm_open", None, move || {
         report((|| {
             if out.is_null() || info.is_null() {
                 return Err(Error::Contract("null RM open output".into()));
             }
             let (b, i) = Bridge::new([domain, bus, device, function])?;
-            unsafe {
-                info.write(i);
-                out.write(Box::into_raw(Box::new(b)));
-            }
+            // SAFETY: nv_rm.h: `info` is a writable NvRmInfo for the call
+            // (non-NULL checked above); Info is its #[repr(C)] layout.
+            unsafe { info.write(i) };
+            // SAFETY: nv_rm.h: `out` is writable for the call (non-NULL
+            // checked above). The Box is released only by nv_rm_close.
+            unsafe { out.write(Box::into_raw(Box::new(b))) };
             Ok(())
         })())
     })
 }
+/// Destroys a device made by nv_rm_open.
+///
+/// # Safety
+/// `p` is NULL or a device from nv_rm_open, given back here exactly once,
+/// with no call on it in flight and none after.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_close(p: *mut Bridge) {
-    if !p.is_null() {
-        // Teardown panics must not unwind into C either; the bridge memory is
-        // then leaked rather than freed in an unknown state.
-        let owned = unsafe { Box::from_raw(p) };
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(owned))).is_err() {
-            diag!("nvk Rust RM: panic during device close");
+    crate::ffi::guard_or_abort("nv_rm_close", || {
+        if p.is_null() {
+            return;
         }
-    }
+        // SAFETY: nv_rm.h: `p` is a device from nv_rm_open that the caller
+        // gives back here exactly once, with no call on it in flight or later.
+        let owned = unsafe { Box::from_raw(p) };
+        if crate::ffi::Failable::failed(&*owned) {
+            // A panic interrupted an earlier call (its state may be
+            // inconsistent), or this is a forked child (the RM objects and
+            // threads are the parent's): keep it, with every RM object and
+            // descriptor it owns, until process exit rather than tear it down.
+            diag!("nv_rm_close: device is failed or from another process; its resources are kept");
+            std::mem::forget(owned);
+            return;
+        }
+        drop(owned);
+    });
 }
 /// nv_rm.h NV_RM_PLACEMENT_VRAM_COMPRESSIBLE.
 const PLACEMENT_VRAM_COMPRESSIBLE: u32 = 2;
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_alloc(
     p: *mut Bridge,
@@ -1877,12 +1990,14 @@ pub unsafe extern "C" fn nv_rm_alloc(
     tile: u32,
     out: *mut Allocation,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_alloc", object, move || {
         report((|| {
             if out.is_null() {
                 return Err(Error::Contract("null allocation output".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             // `tile` (nouveau's per-BO tile mode for legacy GL importers) has
             // no RM memory attribute: the block height travels in the DRM
@@ -1926,6 +2041,7 @@ pub unsafe extern "C" fn nv_rm_alloc(
                     memory,
                 },
             );
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, a) }
         })())
     })
@@ -1939,14 +2055,23 @@ fn next_id(s: &mut Inner) -> Result<u64> {
 }
 /// Logical maps are independent from the lazy retained allocation mapping.
 /// Idle mappings remain reclaimable; allocation free performs real teardown.
+///
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_map(p: *mut Bridge, memory: u64, out: *mut usize) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_map", object, move || {
         report((|| {
             if out.is_null() {
                 return Err(Error::Contract("null CPU map output".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             let mut guard = b.lock();
             let s = &mut guard.0;
@@ -1962,15 +2087,24 @@ pub unsafe extern "C" fn nv_rm_map(p: *mut Bridge, memory: u64, out: *mut usize)
                 b.lose_locked(s);
             }
             let address = result?;
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, address) }
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_unmap(p: *mut Bridge, memory: u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_unmap", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             // Cleanup remains possible after loss. A failed final teardown keeps
             // both its logical reference and the partially released lease owned.
             let mut guard = b.lock();
@@ -1988,11 +2122,19 @@ pub unsafe extern "C" fn nv_rm_unmap(p: *mut Bridge, memory: u64) -> i32 {
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_free", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             // Never waits for GPU work (it may be gated on a fence this very
             // thread must produce): the RM object is freed once the work
             // outstanding now has retired (reclaim.rs). Cleanup stays possible
@@ -2020,6 +2162,12 @@ pub unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: u64) -> i32 {
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_bind(
     p: *mut Bridge,
@@ -2030,12 +2178,14 @@ pub unsafe extern "C" fn nv_rm_bind(
     kind: u32,
     out: *mut u64,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_bind", object, move || {
         report((|| {
             if out.is_null() {
                 return Err(Error::Contract("null bind output".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             if address < 1 << 34 || address.checked_add(size).is_none_or(|n| n > 1 << 40) {
                 return Err(Error::Contract("Mesa VA outside reserved range".into()));
@@ -2072,6 +2222,7 @@ pub unsafe extern "C" fn nv_rm_bind(
                 }
                 cap.binds.insert(address, (size, memory, offset));
             }
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, id) }
         })())
     })
@@ -2079,11 +2230,20 @@ pub unsafe extern "C" fn nv_rm_bind(
 /// Immediate RM unmap, no GPU wait. Only for application-ordered Vulkan
 /// binds: Vulkan forbids rebinding/unbinding memory that pending work uses
 /// (see nv_rm.h). Driver teardown of a VA uses nv_rm_va_free instead.
+///
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_unbind", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             let mut guard = b.lock();
             let s = &mut guard.0;
             b.reclaim_locked(s, false);
@@ -2110,6 +2270,15 @@ pub unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: u64) -> i32 {
 /// the RM unmaps run and `release(data, address, size)` hands the range back
 /// to the caller's heap only once every queue's work submitted before this
 /// call has retired (immediately when nothing is outstanding). See nv_rm.h.
+///
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
+/// `release(data, ..)` stays callable from any thread until nv_rm_close
+/// returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_va_free(
     p: *mut Bridge,
@@ -2120,9 +2289,12 @@ pub unsafe extern "C" fn nv_rm_va_free(
     release: VaRelease,
     data: *mut c_void,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_va_free", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
+            // SAFETY: nv_rm.h: an input array holds `count` readable elements for the call (NULL only with count 0; input() checks both).
             let ids = unsafe { input(mappings, count, 65536) }?;
             let release =
                 release.ok_or_else(|| Error::Contract("null VA release callback".into()))?;
@@ -2151,6 +2323,8 @@ pub unsafe extern "C" fn nv_rm_va_free(
             if ids.is_empty() {
                 // Nothing is mapped in the range: no GPU access can reach it.
                 b.reclaim_locked(s, false);
+                // SAFETY: nv_rm_va_free's contract: `release(data, ..)` is
+                // callable until nv_rm_close returns; nothing maps the range.
                 unsafe { release(data, address, size) };
                 return Ok(());
             }
@@ -2176,17 +2350,26 @@ pub unsafe extern "C" fn nv_rm_va_free(
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_create(p: *mut Bridge, engines: u32, out: *mut u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_context_create", object, move || {
         report((|| {
             if out.is_null() {
                 return Err(Error::Contract("null context output".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             let mut guard = b.lock();
             let id = b.create_context(&mut guard.0, engines, None)?;
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, id) }
         })())
     })
@@ -2194,6 +2377,13 @@ pub unsafe extern "C" fn nv_rm_context_create(p: *mut Bridge, engines: u32, out:
 /// Create a context whose channel joins `share`'s TSG on the lowest free
 /// subcontext (VEID); work on the two contexts can run on the GR engine at
 /// the same time. Compute engine only; needs Volta+ subcontexts.
+///
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_create_shared(
     p: *mut Bridge,
@@ -2201,24 +2391,35 @@ pub unsafe extern "C" fn nv_rm_context_create_shared(
     share: u64,
     out: *mut u64,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_context_create_shared", object, move || {
         report((|| {
             if out.is_null() {
                 return Err(Error::Contract("null context output".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             let mut guard = b.lock();
             let id = b.create_context(&mut guard.0, engines, Some(share))?;
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, id) }
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_context_destroy", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             let token = queue_ref(&b.lock().0, id)?.last_token();
             // Bounded quiesce: an unsignaled (e.g. foreign-gated) batch is lost
             // after 5 s; its acquires are then released so the channel runs
@@ -2249,6 +2450,12 @@ pub unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -> i32 {
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_submit_waits(
     p: *mut Bridge,
@@ -2260,12 +2467,16 @@ pub unsafe extern "C" fn nv_rm_submit_waits(
     wait_count: u32,
     out: *mut u64,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_submit_waits", object, move || {
         let result = (|| {
             if out.is_null() {
                 return Err(Error::Contract("null submit token output".into()));
             }
+            // SAFETY: nv_rm.h: an input array holds `count` readable elements for the call (NULL only with count 0; input() checks both).
             let pushes = unsafe { input(pushes, count, 1000) }?;
+            // SAFETY: nv_rm.h: an input array holds `count` readable elements for the call (NULL only with count 0; input() checks both).
             let fds = unsafe { input(wait_fds, wait_count, 1024) }?;
             if !fds.is_empty() && drm_fd < 0 {
                 return Err(Error::Contract("missing dependency DRM fd".into()));
@@ -2278,16 +2489,25 @@ pub unsafe extern "C" fn nv_rm_submit_waits(
                     return Err(Error::Contract("negative dependency fd".into()));
                 }
                 let status = crate::fences::sync_status(fd)?;
+                // SAFETY: nv_rm.h: a descriptor argument is open for the whole call; the borrow ends with it.
                 let owned = unsafe { BorrowedFd::borrow_raw(fd) }
                     .try_clone_to_owned()
                     .map_err(|e| Error::Io("retain submit dependency", e))?;
                 foreign.push(Arc::new(Foreign::new(owned, status)));
             }
-            unsafe { bridge(p) }?.submit(id, pushes, &[], &foreign, &[])
+            let b = present(object)?;
+            // SAFETY: no sync ids (waits and signals are empty).
+            unsafe { b.submit(id, pushes, &[], &foreign, &[]) }
         })();
         status_of(result, out)
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_submit(
     p: *mut Bridge,
@@ -2296,10 +2516,19 @@ pub unsafe extern "C" fn nv_rm_submit(
     count: u32,
     out: *mut u64,
 ) -> i32 {
-    ffi(p as *const Bridge, move || unsafe {
-        nv_rm_submit_waits(p, id, pushes, count, -1, std::ptr::null(), 0, out)
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_submit", object, move || {
+        // SAFETY: forwards this entry point's own arguments, under its contract.
+        unsafe { nv_rm_submit_waits(p, id, pushes, count, -1, std::ptr::null(), 0, out) }
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_poll(
     p: *mut Bridge,
@@ -2307,24 +2536,35 @@ pub unsafe extern "C" fn nv_rm_poll(
     token: u64,
     complete: *mut u32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_poll", object, move || {
         report((|| {
             if complete.is_null() {
                 return Err(Error::Contract("null poll output".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             let done = b.wait_token(id, token, 0)?;
             b.reclaim_try();
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(complete, u32::from(done)) }
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_wait(p: *mut Bridge, id: u64, token: u64, timeout_ns: u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_wait", object, move || {
         let mut status = 0;
         let result = report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             if !b.wait_token(id, token, timeout_ns)? {
                 status = 2;
             }
@@ -2334,6 +2574,12 @@ pub unsafe extern "C" fn nv_rm_wait(p: *mut Bridge, id: u64, token: u64, timeout
         if result == 0 { status } else { result }
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_fence(
     p: *mut Bridge,
@@ -2342,23 +2588,39 @@ pub unsafe extern "C" fn nv_rm_context_fence(
     drm_fd: i32,
     out: *mut i32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_context_fence", object, move || {
         report((|| {
             if out.is_null() || drm_fd < 0 {
                 return Err(Error::Contract("invalid context fence output/fd".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             if b.capture.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Some(cap) = b.lock().0.capture.as_mut() {
                     cap.mark(id, token, 1);
                 }
             }
-            let fd = queue_ref(&b.lock().0, id)?.context_fence(drm_fd, token)?;
+            let fence = {
+                let guard = b.lock();
+                let queue = queue_ref(&guard.0, id)?;
+                // SAFETY: nv_rm.h: `drm_fd` is open for the whole call
+                // (non-negative checked above).
+                unsafe { queue.context_fence(drm_fd, token) }
+            };
+            let fd = fence?;
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, fd.into_raw_fd()) }
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_exec(
     p: *mut Bridge,
@@ -2366,13 +2628,18 @@ pub unsafe extern "C" fn nv_rm_exec(
     pushes: *const Push,
     count: u32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_exec", object, move || {
         loop {
             let mut token = 0;
+            // SAFETY: this entry point's own arguments, under the same
+            // contract; `token` is a live local.
             let result = unsafe { nv_rm_submit(p, id, pushes, count, &mut token) };
             if result != 0 && result != 1 {
                 return result;
             }
+            // SAFETY: this entry point's own device argument.
             let wait = unsafe { nv_rm_wait(p, id, token, u64::MAX) };
             if wait != 0 {
                 return wait;
@@ -2386,11 +2653,20 @@ pub unsafe extern "C" fn nv_rm_exec(
 /// Mesa's device-status hook (after Vulkan waits): loss flag plus the
 /// throttled authoritative channel scan; foreign/shared producer errors were
 /// already published as loss by their observer.
+///
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_check_status(p: *mut Bridge) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_check_status", object, move || {
         let result = report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.check()?;
             b.reclaim_try();
             Ok(())
@@ -2406,36 +2682,71 @@ pub unsafe extern "C" fn nv_rm_check_status(p: *mut Bridge) -> i32 {
 /// run under a Mesa queue mutex: atomics, condvar notify and eventfd writes
 /// only — never Inner, RM ioctls or GPU waits. Submission stop and shared
 /// failure publication follow on the next locked call / watcher / close.
+///
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_mark_lost(p: *const Bridge) {
-    if let Some(bridge) = unsafe { p.as_ref() } {
-        bridge.core.mark_lost();
-    }
+    crate::ffi::guard_or_abort("nv_rm_mark_lost", || {
+        // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open
+        // device, kept alive by the caller for the whole call.
+        if let Some(bridge) = unsafe { p.as_ref() } {
+            bridge.core.mark_lost();
+        }
+    });
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_is_lost(p: *const Bridge) -> i32 {
-    ffi(p, move || {
-        if p.is_null() {
-            return 1;
-        }
-        i32::from(unsafe { &*p }.core.is_lost())
-    })
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    // A failed device reads as lost (1), like NULL.
+    crate::ffi::guard(
+        "nv_rm_is_lost",
+        object.map(|b| b as &dyn crate::ffi::Failable),
+        || 1,
+        move || object.map_or(1, |b| i32::from(b.core.is_lost())),
+    )
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_timestamp(p: *mut Bridge, out: *mut u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_timestamp", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             let guard = b.lock();
             let device = &guard.0.device;
             let mut time = 0u64;
             device
                 .client
                 .control(device.subdevice, 0x20800403, &mut time)?;
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, time) }
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_export(
     p: *mut Bridge,
@@ -2443,12 +2754,14 @@ pub unsafe extern "C" fn nv_rm_export(
     drm_fd: i32,
     out: *mut i32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_export", object, move || {
         report((|| {
             if drm_fd < 0 || out.is_null() {
                 return Err(Error::Contract("invalid external-memory output/fd".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             let guard = b.lock();
             let buffer = guard
@@ -2458,11 +2771,19 @@ pub unsafe extern "C" fn nv_rm_export(
                 .ok_or_else(|| Error::Contract("export unknown allocation".into()))?;
             // Caller retains fd for the duration of this synchronous call.
             let fd =
+                // SAFETY: nv_rm.h: a descriptor argument is open for the whole call; the borrow ends with it.
                 crate::external::export(&buffer.memory, unsafe { BorrowedFd::borrow_raw(drm_fd) })?;
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, fd.into_raw_fd()) }
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_import(
     p: *mut Bridge,
@@ -2470,21 +2791,24 @@ pub unsafe extern "C" fn nv_rm_import(
     dma_fd: i32,
     out: *mut Allocation,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_import", object, move || {
         report((|| {
             if drm_fd < 0 || dma_fd < 0 || out.is_null() {
                 return Err(Error::Contract("invalid dma-buf import arguments".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             let mut guard = b.lock();
             let s = &mut guard.0;
             b.reclaim_locked(s, false);
-            let memory = crate::external::import(
-                &s.device,
-                unsafe { BorrowedFd::borrow_raw(drm_fd) },
-                unsafe { BorrowedFd::borrow_raw(dma_fd) },
-            )?;
+            // SAFETY: nv_rm.h: `drm_fd` is open for the whole call
+            // (non-negative checked above); the borrow ends with it.
+            let drm = unsafe { BorrowedFd::borrow_raw(drm_fd) };
+            // SAFETY: as `drm_fd`, for the dma-buf.
+            let dma_buf = unsafe { BorrowedFd::borrow_raw(dma_fd) };
+            let memory = crate::external::import(&s.device, drm, dma_buf)?;
             let id = next_id(s)?;
             let result = Allocation {
                 id,
@@ -2498,12 +2822,19 @@ pub unsafe extern "C" fn nv_rm_import(
                     memory,
                 },
             );
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, result) }
         })())
     })
 }
 
 // ---- synchronization ABI (all caller-side) ------------------------------
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_create(
     p: *mut Bridge,
@@ -2511,12 +2842,14 @@ pub unsafe extern "C" fn nv_rm_sync_create(
     initial: u64,
     out: *mut u64,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_create", object, move || {
         report((|| {
             if out.is_null() || flags & !7 != 0 {
                 return Err(Error::Contract("invalid sync create arguments".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             let slot = b.slot()?;
             let sync = match SyncObj::new(&b.core.pool, flags & 1 != 0, initial, slot) {
@@ -2527,15 +2860,22 @@ pub unsafe extern "C" fn nv_rm_sync_create(
                 }
             };
             let id = Arc::into_raw(Arc::new(sync)) as usize as u64;
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, id) }
         })())
     })
 }
+/// # Safety
+/// `id` is a live nv_rm_sync_create payload, destroyed exactly once, with no
+/// other call using it in flight or after; the device pointer is unused.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_destroy(_p: *mut Bridge, id: u64) -> i32 {
-    ffi(_p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { _p.as_ref() };
+    guarded("nv_rm_sync_destroy", object, move || {
         report((|| {
-            sync_ref(id)?;
+            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+            unsafe { sync_ref(id) }?;
             // SAFETY: id is the Arc pointer created by nv_rm_sync_create; Mesa
             // destroys each vk_sync exactly once. Accepted submissions own their
             // slot references independently of this payload.
@@ -2546,25 +2886,40 @@ pub unsafe extern "C" fn nv_rm_sync_destroy(_p: *mut Bridge, id: u64) -> i32 {
 }
 /// Kept for ABI stability: destruction is now immediate on the caller (there
 /// is no worker queue to defer to); Mesa's void finish callback still uses it.
+///
+/// # Safety
+/// As nv_rm_sync_destroy; `p` is NULL or a live nv_rm_open device.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_destroy_deferred(p: *mut Bridge, id: u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_destroy_deferred", object, move || {
         if p.is_null() {
             return report(Err(Error::Contract("null RM bridge".into())));
         }
+        // SAFETY: this entry point's own arguments, under the same contract.
         unsafe { nv_rm_sync_destroy(p, id) }
     })
 }
 fn needs_slot(error: &Error) -> bool {
     matches!(error, Error::Contract(m) if m.ends_with("needs a replacement slot"))
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_reset", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
-            let sync = sync_ref(id)?;
+            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+            let sync = unsafe { sync_ref(id) }?;
             let mut fresh = if sync.needs_fresh_slot() {
                 Some(b.slot()?)
             } else {
@@ -2586,6 +2941,12 @@ pub unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: u64) -> i32 {
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_move(
     p: *mut Bridge,
@@ -2593,14 +2954,17 @@ pub unsafe extern "C" fn nv_rm_sync_move(
     src: u64,
     _shared_source: u32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_move", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             if src == dst {
                 return Err(Error::Contract("invalid binary sync move".into()));
             }
-            let (source, target) = (sync_ref(src)?, sync_ref(dst)?);
+            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+            let (source, target) = (unsafe { sync_ref(src) }?, unsafe { sync_ref(dst) }?);
             if source.timeline || target.timeline {
                 return Err(Error::Contract("invalid binary sync move".into()));
             }
@@ -2618,13 +2982,22 @@ pub unsafe extern "C" fn nv_rm_sync_move(
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_signal(p: *mut Bridge, id: u64, value: u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_signal", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
-            let sync = sync_ref(id)?;
+            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+            let sync = unsafe { sync_ref(id) }?;
             let mut fresh = if !sync.timeline && sync.needs_fresh_slot() {
                 Some(b.slot()?)
             } else {
@@ -2648,21 +3021,37 @@ pub unsafe extern "C" fn nv_rm_sync_signal(p: *mut Bridge, id: u64, value: u64) 
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_get_value(p: *mut Bridge, id: u64, out: *mut u64) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_get_value", object, move || {
         report((|| {
             if out.is_null() {
                 return Err(Error::Contract("null counter output".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.check()?;
-            let (value, changed) = sync_ref(id)?.value()?;
+            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+            let (value, changed) = unsafe { sync_ref(id) }?.value()?;
             b.broadcast(changed);
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, value) }
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_status_many(
     p: *mut Bridge,
@@ -2671,22 +3060,34 @@ pub unsafe extern "C" fn nv_rm_sync_status_many(
     flags: u32,
     out: *mut u32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_status_many", object, move || {
         report((|| {
             if out.is_null() || flags & !3 != 0 {
                 return Err(Error::Contract("invalid sync status arguments".into()));
             }
+            // SAFETY: nv_rm.h: an input array holds `count` readable elements for the call (NULL only with count 0; input() checks both).
             let points = unsafe { input(points, count, 65536) }?;
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.check()?;
-            let ready = b.points_ready(points, flags)?;
+            // SAFETY: nv_rm.h: the points' sync ids are live for the call.
+            let ready = unsafe { b.points_ready(points, flags) }?;
             b.reclaim_try();
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, u32::from(ready)) }
         })())
     })
 }
 /// Returns 0 on completion, 2 on caller timeout, negative on failure. Waits
 /// on the calling thread (leader/follower on the device HOST descriptor).
+///
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_wait_many(
     p: *mut Bridge,
@@ -2695,14 +3096,18 @@ pub unsafe extern "C" fn nv_rm_sync_wait_many(
     flags: u32,
     timeout_ns: u64,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_wait_many", object, move || {
         let result = (|| {
             if flags & !3 != 0 {
                 return Err(Error::Contract("invalid sync wait flags".into()));
             }
+            // SAFETY: nv_rm.h: an input array holds `count` readable elements for the call (NULL only with count 0; input() checks both).
             let points = unsafe { input(points, count, 65536) }?;
-            let b = unsafe { bridge(p) }?;
-            let ready = b.wait_points(points, flags, timeout_ns)?;
+            let b = present(object)?;
+            // SAFETY: nv_rm.h: the points' sync ids are live for the call.
+            let ready = unsafe { b.wait_points(points, flags, timeout_ns) }?;
             b.reclaim_try();
             Ok(ready)
         })();
@@ -2713,6 +3118,12 @@ pub unsafe extern "C" fn nv_rm_sync_wait_many(
         }
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_import_fd(
     p: *mut Bridge,
@@ -2720,14 +3131,18 @@ pub unsafe extern "C" fn nv_rm_sync_import_fd(
     fd: i32,
     opaque: u32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_import_fd", object, move || {
         report((|| {
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             if fd < 0 {
                 return Err(Error::Contract("invalid synchronization import fd".into()));
             }
-            let sync = sync_ref(id)?;
+            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+            let sync = unsafe { sync_ref(id) }?;
+            // SAFETY: nv_rm.h: a descriptor argument is open for the whole call; the borrow ends with it.
             let fd = unsafe { BorrowedFd::borrow_raw(fd) };
             if opaque != 0 {
                 sync.import_opaque(fd)
@@ -2737,6 +3152,12 @@ pub unsafe extern "C" fn nv_rm_sync_import_fd(
         })())
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_export_fd(
     p: *mut Bridge,
@@ -2745,12 +3166,14 @@ pub unsafe extern "C" fn nv_rm_sync_export_fd(
     drm_fd: i32,
     out: *mut i32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_export_fd", object, move || {
         report((|| {
             if out.is_null() {
                 return Err(Error::Contract("null synchronization fd output".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             if b.capture.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Some(cap) = b.lock().0.capture.as_mut() {
@@ -2758,7 +3181,8 @@ pub unsafe extern "C" fn nv_rm_sync_export_fd(
                 }
             }
             let fd = if opaque != 0 {
-                let shared = sync_ref(id)?.share()?;
+                // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+                let shared = unsafe { sync_ref(id) }?.share()?;
                 if shared.has_local_work() {
                     let mut guard = b.lock();
                     b.ensure_watcher_host(&mut guard.0)?;
@@ -2767,8 +3191,11 @@ pub unsafe extern "C" fn nv_rm_sync_export_fd(
                 }
                 Some(shared.export()?)
             } else {
-                b.export_sync_file(id, drm_fd)?
+                // SAFETY: nv_rm.h: `id` is live and `drm_fd` negative or open
+                // for the call.
+                unsafe { b.export_sync_file(id, drm_fd) }?
             };
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, fd.map_or(-1, IntoRawFd::into_raw_fd)) }
         })())
     })
@@ -2778,6 +3205,13 @@ pub unsafe extern "C" fn nv_rm_sync_export_fd(
 /// slot; `src` reports the signal as pending. `*reserved` = 0 when `src`
 /// cannot be reserved (not an unsignaled native binary without a pending
 /// signal), in which case nothing changed.
+///
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_sync_reserve(
     p: *mut Bridge,
@@ -2785,28 +3219,40 @@ pub unsafe extern "C" fn nv_rm_sync_reserve(
     src: u64,
     reserved: *mut u32,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_sync_reserve", object, move || {
         report((|| {
             if reserved.is_null() {
                 return Err(Error::Contract("null reservation output".into()));
             }
-            let b = unsafe { bridge(p) }?;
+            let b = present(object)?;
             b.core.live()?;
             if src == dst {
                 return Err(Error::Contract("invalid binary signal reservation".into()));
             }
-            let (done, changed) = sync_ref(src)?.reserve_into(sync_ref(dst)?)?;
+            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+            let (done, changed) =
+                unsafe { sync_ref(src) }?.reserve_into(unsafe { sync_ref(dst) }?)?;
             b.broadcast(changed);
             // WAIT_PENDING waiters observe the reservation as a submission.
             std::sync::atomic::fence(Ordering::SeqCst);
             if done && b.core.pending_waiters.load(Ordering::SeqCst) != 0 {
                 b.core.waiters.notify();
             }
+            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(reserved, u32::from(done)) }
         })())
     })
 }
 /// Submit commands, dependencies and final signal payloads in one transaction.
+///
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_submit_batch(
     p: *mut Bridge,
@@ -2819,19 +3265,33 @@ pub unsafe extern "C" fn nv_rm_submit_batch(
     signal_count: u32,
     out: *mut u64,
 ) -> i32 {
-    ffi(p as *const Bridge, move || {
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_submit_batch", object, move || {
         let result = (|| {
             if out.is_null() {
                 return Err(Error::Contract("null submit token output".into()));
             }
+            // SAFETY: nv_rm.h: an input array holds `count` readable elements for the call (NULL only with count 0; input() checks both).
             let pushes = unsafe { input(pushes, count, 1000) }?;
+            // SAFETY: nv_rm.h: an input array holds `count` readable elements for the call (NULL only with count 0; input() checks both).
             let waits = unsafe { input(waits, wait_count, 1024) }?;
+            // SAFETY: nv_rm.h: an input array holds `count` readable elements for the call (NULL only with count 0; input() checks both).
             let signals = unsafe { input(signals, signal_count, 65536) }?;
-            unsafe { bridge(p) }?.submit(id, pushes, waits, &[], signals)
+            let b = present(object)?;
+            // SAFETY: nv_rm.h: the waits' and signals' sync ids are live for
+            // the call.
+            unsafe { b.submit(id, pushes, waits, &[], signals) }
         })();
         status_of(result, out)
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_submit_sync(
     p: *mut Bridge,
@@ -2842,20 +3302,31 @@ pub unsafe extern "C" fn nv_rm_submit_sync(
     wait_count: u32,
     out: *mut u64,
 ) -> i32 {
-    ffi(p as *const Bridge, move || unsafe {
-        nv_rm_submit_batch(
-            p,
-            id,
-            pushes,
-            count,
-            waits,
-            wait_count,
-            std::ptr::null(),
-            0,
-            out,
-        )
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_submit_sync", object, move || {
+        // SAFETY: forwards this entry point's own arguments, under its contract.
+        unsafe {
+            nv_rm_submit_batch(
+                p,
+                id,
+                pushes,
+                count,
+                waits,
+                wait_count,
+                std::ptr::null(),
+                0,
+                out,
+            )
+        }
     })
 }
+/// # Safety
+/// nv_rm.h's contract for every entry point: the device pointer is NULL or a
+/// live nv_rm_open device that stays alive for the whole call; every output
+/// pointer is NULL or writable, and every input array readable for its count;
+/// every descriptor argument is open for the call; every sync id is 0 or a
+/// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_signal(
     p: *mut Bridge,
@@ -2864,18 +3335,23 @@ pub unsafe extern "C" fn nv_rm_context_signal(
     count: u32,
     out: *mut u64,
 ) -> i32 {
-    ffi(p as *const Bridge, move || unsafe {
-        nv_rm_submit_batch(
-            p,
-            id,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-            signals,
-            count,
-            out,
-        )
+    // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
+    let object = unsafe { p.as_ref() };
+    guarded("nv_rm_context_signal", object, move || {
+        // SAFETY: forwards this entry point's own arguments, under its contract.
+        unsafe {
+            nv_rm_submit_batch(
+                p,
+                id,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                signals,
+                count,
+                out,
+            )
+        }
     })
 }
 
@@ -2905,21 +3381,26 @@ mod tests {
     fn caller_panic_becomes_device_lost_instead_of_unwinding_into_c() {
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let status = ffi(std::ptr::null(), || panic!("injected backend panic"));
+        let status = guarded("test_entry", None, || panic!("injected backend panic"));
         std::panic::set_hook(hook);
         assert_eq!(status, -4);
-        assert_eq!(ffi(std::ptr::null(), || 7), 7);
+        assert_eq!(guarded("test_entry", None, || 7), 7);
     }
     #[test]
     fn null_and_invalid_handles_fail_without_touching_state() {
+        // SAFETY: NULL is a valid device argument (nv_rm.h).
         assert_eq!(unsafe { nv_rm_is_lost(std::ptr::null()) }, 1);
+        // SAFETY: as above.
         unsafe { nv_rm_mark_lost(std::ptr::null()) };
         assert_ne!(
+            // SAFETY: a NULL device is rejected before the id is used.
             unsafe { nv_rm_sync_destroy_deferred(std::ptr::null_mut(), 7) },
             0
         );
+        // SAFETY: as above.
         assert_ne!(unsafe { nv_rm_sync_reset(std::ptr::null_mut(), 7) }, 0);
-        assert!(sync_ref(0).is_err());
+        // SAFETY: id 0 is rejected before any dereference.
+        assert!(unsafe { sync_ref(0) }.is_err());
     }
 }
 

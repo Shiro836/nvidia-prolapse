@@ -40,6 +40,7 @@ path = "src/bin/nv-nvdec-probe.rs"
 nv-rm-core = { path = "../rm-core" }
 nv-rm-sys = { path = "../rm-sys" }
 nv-video = { path = "../video" }
+zerocopy.workspace = true
 
 [features]
 # vast.ai hardware-invariant probe only; never enabled for the NVK bridge.

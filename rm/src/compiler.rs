@@ -83,26 +83,61 @@ struct Functions {
     compile: Compile,
     free: Free,
 }
+/// A dlsym result as the function-pointer type its symbol is declared with:
+/// the one conversion std offers no cast for (RUST.md §2 forbids transmute
+/// everywhere else).
+///
+/// # Safety
+/// `address` is non-NULL and is the address of a function whose C signature
+/// is exactly `F`, an `unsafe extern "C" fn` pointer type.
+unsafe fn symbol<F: Copy>(address: *mut c_void) -> F {
+    const { assert!(std::mem::size_of::<F>() == std::mem::size_of::<*mut c_void>()) };
+    // SAFETY: F is a function-pointer type of pointer size (asserted above);
+    // data and function pointers share one representation on every target
+    // this crate builds for (platform.rs); the caller names the signature.
+    unsafe { std::mem::transmute_copy::<*mut c_void, F>(&address) }
+}
+
 static COMPILER: OnceLock<std::result::Result<Mutex<Functions>, String>> = OnceLock::new();
 
 fn functions() -> Result<&'static Mutex<Functions>> {
     let loaded=COMPILER.get_or_init(|| {
         let path=std::env::var("NV_NATIVE_COMPILER_PATH").unwrap_or_else(|_|"libnv_native_nak.so".into());
         let path=CString::new(path).map_err(|_|"compiler path contains NUL".to_string())?;
-        // SAFETY: NUL strings and platform dynamic loader ABI. Handle is kept for
-        // process lifetime; function pointers cannot outlive the loaded DSO.
-        unsafe {
-            let handle=dlopen(path.as_ptr(),2); // RTLD_NOW | RTLD_LOCAL
-            if handle.is_null() {
-                let error=dlerror();
-                let message=if error.is_null(){"unknown loader error".into()}else{CStr::from_ptr(error).to_string_lossy().into_owned()};
-                return Err(format!("load source-built NAK compiler: {message}; build native/compiler and set NV_NATIVE_COMPILER_PATH"));
-            }
-            let compile=dlsym(handle,c"nv_nak_compile".as_ptr());
-            let free=dlsym(handle,c"nv_nak_free".as_ptr());
-            if compile.is_null() || free.is_null() { dlclose(handle); return Err("NAK compiler is missing bridge entrypoints".into()); }
-            Ok(Mutex::new(Functions{compile:std::mem::transmute::<*mut c_void,Compile>(compile),free:std::mem::transmute::<*mut c_void,Free>(free)}))
+        // dlclose stance: a loaded compiler stays loaded for the process
+        // lifetime (the OnceLock keeps its function pointers), so they can
+        // never outlive the DSO.
+        // SAFETY: a NUL-terminated path; loading runs the compiler DSO's
+        // initialisers, which is what selecting it via the path means.
+        let handle=unsafe { dlopen(path.as_ptr(),2) }; // RTLD_NOW | RTLD_LOCAL
+        if handle.is_null() {
+            // SAFETY: no arguments; reads this thread's loader error state.
+            let error=unsafe { dlerror() };
+            let message=if error.is_null(){"unknown loader error".into()}else{
+                // SAFETY: non-NULL dlerror() result: a NUL-terminated string
+                // valid until the next loader call on this thread.
+                unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned()};
+            return Err(format!("load source-built NAK compiler: {message}; build native/compiler and set NV_NATIVE_COMPILER_PATH"));
         }
+        // SAFETY: a live handle from dlopen and a static NUL-terminated name.
+        let compile=unsafe { dlsym(handle,c"nv_nak_compile".as_ptr()) };
+        // SAFETY: as above.
+        let free=unsafe { dlsym(handle,c"nv_nak_free".as_ptr()) };
+        if compile.is_null() || free.is_null() {
+            // SAFETY: the handle from dlopen above; nothing from it is kept.
+            unsafe { dlclose(handle) };
+            return Err("NAK compiler is missing bridge entrypoints".into());
+        }
+        // SAFETY: non-NULL (checked above); nv_nak_compile is declared
+        // `int nv_nak_compile(const uint32_t*, size_t, const char*, uint32_t,
+        // struct nv_nak_result*, char*, size_t)` (mesa/compiler/nv_nak.h:26),
+        // exactly the Compile type.
+        let compile=unsafe { symbol::<Compile>(compile) };
+        // SAFETY: non-NULL (checked above); nv_nak_free is declared
+        // `void nv_nak_free(struct nv_nak_result*)` (mesa/compiler/nv_nak.h:29),
+        // exactly the Free type.
+        let free=unsafe { symbol::<Free>(free) };
+        Ok(Mutex::new(Functions{compile,free}))
     });
     loaded.as_ref().map_err(|e| Error::Contract(e.clone()))
 }
@@ -131,6 +166,7 @@ pub fn compile(words: &[u32], entry: &CStr) -> Result<Shader> {
     };
     if status != 0 {
         error[2047] = 0;
+        // SAFETY: the buffer is NUL-terminated (last byte set above).
         let message = unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy();
         return Err(Error::Contract(format!(
             "SPIR-V compilation failed: {message}"
@@ -156,6 +192,8 @@ pub fn compile(words: &[u32], entry: &CStr) -> Result<Shader> {
             workgroup: result.workgroup,
         })
     };
+    // SAFETY: `result` was filled by this compile call and is freed once;
+    // `code` (borrowed above) was copied out first.
     unsafe { (functions.free)(&mut result) };
     let shader = shader?;
     shader.validate()?;

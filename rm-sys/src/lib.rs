@@ -6,6 +6,7 @@
 //!
 //! Both are hand-written mirrors checked against the C headers; generating them with `bindgen` from the
 //! pinned headers replaces them.
+#![forbid(unsafe_code)]
 // Debt ledger (RUST.md "Existing code"): every workspace lint this crate still violates.
 #![expect(
     clippy::allow_attributes_without_reason,
@@ -13,9 +14,6 @@
     clippy::cast_possible_truncation,
     clippy::doc_markdown,
     clippy::missing_panics_doc,
-    clippy::ptr_as_ptr,
-    clippy::ref_as_ptr,
-    clippy::undocumented_unsafe_blocks,
     missing_debug_implementations,
     missing_docs,
     unused_qualifications,

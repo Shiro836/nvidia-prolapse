@@ -71,6 +71,7 @@ unsafe extern "C" {
 pub(crate) fn create_sealable_memfd() -> io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
     // Linux UAPI linux/memfd.h: MFD_CLOEXEC | MFD_ALLOW_SEALING.
+    // SAFETY: a static NUL-terminated name; memfd_create reads only it.
     let fd = unsafe { memfd_create(c"nv-native-sync".as_ptr(), 1 | 2) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -81,6 +82,8 @@ pub(crate) fn create_sealable_memfd() -> io::Result<std::os::fd::OwnedFd> {
 
 pub(crate) fn file_seals(fd: c_int) -> io::Result<u32> {
     // Linux UAPI linux/fcntl.h: F_GET_SEALS = F_LINUX_SPECIFIC_BASE + 10.
+    // SAFETY: F_GET_SEALS takes no pointer; any fd value is a valid argument
+    // (a bad one fails with EBADF).
     let result = unsafe { fcntl(fd, 1034, 0 as c_int) };
     if result < 0 {
         Err(io::Error::last_os_error())
@@ -91,6 +94,7 @@ pub(crate) fn file_seals(fd: c_int) -> io::Result<u32> {
 
 pub(crate) fn add_file_seals(fd: c_int, seals: u32) -> io::Result<()> {
     // F_ADD_SEALS = F_LINUX_SPECIFIC_BASE + 9; the third argument is an int.
+    // SAFETY: F_ADD_SEALS takes an int, no pointer; a bad fd fails with EBADF.
     let result = unsafe { fcntl(fd, 1033, seals as c_int) };
     if result < 0 {
         Err(io::Error::last_os_error())
@@ -106,6 +110,7 @@ pub(crate) fn add_file_seals(fd: c_int, seals: u32) -> io::Result<()> {
 /// layout, initialized-byte and lifetime requirements. The libc variadic call
 /// handles target calling conventions; never substitute a raw syscall here.
 pub(crate) unsafe fn ioctl(fd: c_int, request: u32, argument: *mut c_void) -> c_int {
+    // SAFETY: the caller's contract (# Safety) covers the argument buffer.
     unsafe { libc_ioctl(fd, request as IoctlRequest, argument) }
 }
 
@@ -122,12 +127,14 @@ pub(crate) unsafe fn mmap(
     fd: c_int,
     offset: i64,
 ) -> *mut c_void {
+    // SAFETY: the caller's contract (# Safety).
     unsafe { libc_mmap(address, length, protection, flags, fd, offset) }
 }
 
 /// # Safety
 /// The caller owns this mapping and must stop all accesses before unmapping it.
 pub(crate) unsafe fn munmap(address: *mut c_void, length: usize) -> c_int {
+    // SAFETY: the caller's contract (# Safety).
     unsafe { libc_munmap(address, length) }
 }
 
@@ -136,6 +143,7 @@ pub(crate) unsafe fn munmap(address: *mut c_void, length: usize) -> c_int {
 /// # Safety
 /// The caller must coordinate ownership of the file description and offset.
 pub(crate) unsafe fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
+    // SAFETY: the caller's contract (# Safety); no pointer arguments.
     unsafe { libc_lseek(fd, offset, whence) }
 }
 
@@ -154,7 +162,7 @@ pub(crate) fn validate_page_size(bytes: usize) -> io::Result<usize> {
 
 /// Validate the host before opening any driver device. This is not a GPU gate.
 pub(crate) fn validate_runtime() -> io::Result<usize> {
-    // No pointer arguments, no side effects and no device access.
+    // SAFETY: no arguments, no side effects and no device access.
     let bytes = unsafe { getpagesize() };
     if bytes <= 0 {
         return Err(io::Error::other(format!(
@@ -189,6 +197,8 @@ pub(crate) fn round_to_cpu_pages(bytes: usize, page_size: usize) -> io::Result<u
 pub(crate) fn device_full_barrier() {
     // asm's default memory clobber is intentional: never use nomem/readonly.
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: mfence touches no memory, stack or flags; the default memory
+    // clobber keeps the compiler from moving accesses across it.
     unsafe {
         std::arch::asm!("mfence", options(nostack, preserves_flags));
     }
@@ -196,16 +206,20 @@ pub(crate) fn device_full_barrier() {
     #[cfg(target_arch = "x86")]
     {
         let mut scratch = 0u32;
+        // SAFETY: the locked add writes only the local `scratch` (adding 0);
+        // the memory clobber orders every other access around it.
         unsafe {
             std::arch::asm!("lock add dword ptr [{word}], 0",
             word = in(reg) &mut scratch, options(nostack));
         }
     }
     #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
     unsafe {
         std::arch::asm!("dsb sy", options(nostack, preserves_flags));
     }
     #[cfg(target_arch = "riscv64")]
+    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
     unsafe {
         std::arch::asm!("fence iorw, iorw", options(nostack, preserves_flags));
     }
@@ -215,16 +229,19 @@ pub(crate) fn device_full_barrier() {
 #[inline]
 pub(crate) fn device_read_barrier() {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
     unsafe {
         std::arch::asm!("lfence", options(nostack, preserves_flags));
     }
     #[cfg(any(target_arch = "x86", target_arch = "arm"))]
     device_full_barrier();
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
     unsafe {
         std::arch::asm!("dsb ld", options(nostack, preserves_flags));
     }
     #[cfg(target_arch = "riscv64")]
+    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
     unsafe {
         std::arch::asm!("fence ir, ir", options(nostack, preserves_flags));
     }
@@ -234,16 +251,19 @@ pub(crate) fn device_read_barrier() {
 #[inline]
 pub(crate) fn device_write_barrier() {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
     unsafe {
         std::arch::asm!("sfence", options(nostack, preserves_flags));
     }
     #[cfg(target_arch = "x86")]
     device_full_barrier();
     #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
     unsafe {
         std::arch::asm!("dsb st", options(nostack, preserves_flags));
     }
     #[cfg(target_arch = "riscv64")]
+    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
     unsafe {
         std::arch::asm!("fence ow, ow", options(nostack, preserves_flags));
     }

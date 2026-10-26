@@ -2,6 +2,20 @@
 //! Real native RM backend. Direct libc/ioctl calls; no NVIDIA userspace DSO,
 //! glibc shim, CUDA, Vulkan loader or existing HAL is loaded by this library.
 //! This is the backend foundation; a full Vulkan ICD is not implemented yet.
+//!
+//! Process model (RUST.md §13). Every descriptor the library opens is
+//! close-on-exec: std's `File`/`try_clone` (O_CLOEXEC, F_DUPFD_CLOEXEC),
+//! memfd_create(MFD_CLOEXEC), eventfd(EFD_CLOEXEC), DRM PRIME export with
+//! DRM_CLOEXEC, and the sync_files nvidia-drm creates with O_CLOEXEC
+//! (open-gpu-kernel-modules kernel-open/nvidia-drm/nvidia-drm-os-interface.c,
+//! nv_drm_create_sync_file). Nothing runs at load time; state is created by
+//! the open entry points and owned by the handles they return. A handle used
+//! in a forked child fails as lost and is never torn down there (process.rs).
+//! The library supports dlclose once every handle is closed: closing joins
+//! the device's watcher thread and releases its mappings and descriptors;
+//! libc drops the atfork handler with the library, and the per-thread
+//! nv_video_last_error buffer's destructor keeps the library loaded until
+//! that thread exits (libc's thread-local destructor accounting).
 #![deny(unsafe_op_in_unsafe_fn)]
 // Debt ledger (RUST.md "Existing code"): every workspace lint this crate still violates.
 #![expect(
@@ -28,12 +42,10 @@
     clippy::mem_forget,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::multiple_unsafe_ops_per_block,
     clippy::needless_continue,
     clippy::needless_pass_by_value,
     clippy::print_stderr,
     clippy::ptr_as_ptr,
-    clippy::ptr_cast_constness,
     clippy::redundant_closure_for_method_calls,
     clippy::ref_as_ptr,
     clippy::similar_names,
@@ -41,7 +53,6 @@
     clippy::struct_excessive_bools,
     clippy::struct_field_names,
     clippy::too_many_lines,
-    clippy::undocumented_unsafe_blocks,
     clippy::unreadable_literal,
     clippy::unwrap_used,
     clippy::used_underscore_binding,
@@ -55,7 +66,12 @@
 )]
 #![cfg_attr(
     test,
-    expect(clippy::assert_is_empty, reason = "pre-standard code; cleanup tracked")
+    expect(
+        clippy::assert_is_empty,
+        clippy::multiple_unsafe_ops_per_block,
+        clippy::undocumented_unsafe_blocks,
+        reason = "pre-standard code; cleanup tracked"
+    )
 )]
 pub use nv_rm_sys::abi;
 pub mod backend;
@@ -71,6 +87,7 @@ pub mod diagnostics;
 pub(crate) mod events;
 mod external;
 mod fences;
+mod ffi;
 pub mod gpu;
 pub mod mesa;
 pub mod nvdec;
@@ -79,6 +96,7 @@ pub use nv_video::nvdec_hevc;
 #[cfg(feature = "diagnostics")]
 pub mod perf_diagnostic;
 pub mod platform;
+mod process;
 mod reactor;
 use nv_rm_core::reclaim;
 pub mod rm;
@@ -91,17 +109,28 @@ mod waiters;
 mod watcher;
 
 /// Version of the narrow diagnostic C ABI below, not a Vulkan ICD version.
+/// No pointers, no state; callable from any thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn nv_native_backend_abi_version() -> u32 {
-    1
+    ffi::guard_or_abort("nv_native_backend_abi_version", || 1)
 }
 
 /// Execute a real backend diagnostic: 0 = mapped VRAM, 1 = hardware copy,
 /// 2 = source-built sm_120 compute shader. Returns verified word count, or -1
 /// with a named error on stderr. Objects are destroyed before returning.
 /// This narrow ABI retains the actual backend in the Android shared library.
+/// No pointers; every object it creates is owned and released inside the call;
+/// callable from any thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn nv_native_backend_check(mode: u32) -> i32 {
+    ffi::guard(
+        "nv_native_backend_check",
+        None,
+        || -1,
+        || backend_check(mode),
+    )
+}
+fn backend_check(mode: u32) -> i32 {
     fn check(mode: u32) -> rm::Result<usize> {
         if mode > 2 {
             return Err(rm::Error::Contract(format!(
