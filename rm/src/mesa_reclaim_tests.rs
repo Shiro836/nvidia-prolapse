@@ -8,10 +8,11 @@
 //!
 //! The GPU is selected by RM card identity (vendor 0x10de, an openable
 //! /dev/nvidiaN); its render node is found through sysfs by PCI address.
+use super::hardware_tests::test_ffi::{self as c, CpuMap, ReleaseSink};
 use super::*;
 use std::{
     fs::{File, OpenOptions},
-    os::fd::{AsRawFd, FromRawFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd},
     sync::{Barrier, atomic::AtomicU32, mpsc},
     thread,
     time::Duration,
@@ -61,68 +62,45 @@ fn render_node(pci: [u32; 4]) -> File {
     }
     panic!("no NVIDIA DRM render node for {name}");
 }
-fn open(pci: [u32; 4]) -> Box<Bridge> {
-    Box::new(Bridge::new(pci).unwrap().0)
+fn open(pci: [u32; 4]) -> Arc<Bridge> {
+    Arc::new(Bridge::new(pci).unwrap().0)
 }
-fn context(b: *mut Bridge) -> u64 {
+fn context(b: &Bridge) -> u64 {
     let mut id = 0;
-    assert_eq!(unsafe { nv_rm_context_create(b, 1, &mut id) }, 0);
+    assert_eq!(c::context_create(b, 1, &mut id), 0);
     id
 }
-fn create(b: *mut Bridge, timeline: bool, initial: u64) -> u64 {
+fn create(b: &Bridge, timeline: bool, initial: u64) -> u64 {
     let mut id = 0;
-    assert_eq!(
-        unsafe { nv_rm_sync_create(b, u32::from(timeline), initial, &mut id) },
-        0
-    );
+    assert_eq!(c::sync_create(b, u32::from(timeline), initial, &mut id), 0);
     id
 }
-fn alloc(b: *mut Bridge, size: u64, gart: bool) -> u64 {
+fn alloc(b: &Bridge, size: u64, gart: bool) -> u64 {
     let mut a = Allocation {
         id: 0,
         size: 0,
         cpu_address: 0,
     };
-    assert_eq!(
-        unsafe { nv_rm_alloc(b, size, 4096, u32::from(gart), 0, 0, &mut a) },
-        0
-    );
+    assert_eq!(c::alloc(b, size, 4096, u32::from(gart), 0, 0, &mut a), 0);
     a.id
 }
-fn bind(b: *mut Bridge, memory: u64, size: u64, address: u64) -> u64 {
+fn bind(b: &Bridge, memory: u64, size: u64, address: u64) -> u64 {
     let mut id = 0;
-    assert_eq!(
-        unsafe { nv_rm_bind(b, memory, 0, size, address, 0, &mut id) },
-        0
-    );
+    assert_eq!(c::bind(b, memory, 0, size, address, 0, &mut id), 0);
     id
 }
-fn map(b: *mut Bridge, memory: u64) -> usize {
-    let mut address = 0;
-    assert_eq!(unsafe { nv_rm_map(b, memory, &mut address) }, 0);
-    address
+fn map(b: &Bridge, memory: u64) -> CpuMap<'_> {
+    CpuMap::new(b, memory)
 }
 fn submit(
-    b: *mut Bridge,
+    b: &Bridge,
     ctx: u64,
     pushes: &[Push],
     waits: &[SyncPoint],
     signals: &[SyncPoint],
 ) -> u64 {
     let mut token = 0;
-    let r = unsafe {
-        nv_rm_submit_batch(
-            b,
-            ctx,
-            pushes.as_ptr(),
-            pushes.len() as u32,
-            waits.as_ptr(),
-            waits.len() as u32,
-            signals.as_ptr(),
-            signals.len() as u32,
-            &mut token,
-        )
-    };
+    let r = c::submit_batch(b, ctx, pushes, waits, signals, &mut token);
     assert_eq!(r, 0, "submit");
     token
 }
@@ -137,23 +115,15 @@ fn groups(b: &Bridge) -> usize {
 }
 /// Status calls until every retired deferred group is reclaimed (each call
 /// reclaims at most RECLAIM_BUDGET groups).
-fn drain_backlog(b: *mut Bridge) {
+fn drain_backlog(b: &Bridge) {
     for _ in 0..1_000_000 {
-        assert_eq!(unsafe { nv_rm_check_status(b) }, 0);
-        if groups(unsafe { &*b }) == 0 {
+        assert_eq!(c::check_status(b), 0);
+        if groups(b) == 0 {
             return;
         }
     }
     panic!("deferred backlog did not drain");
 }
-unsafe extern "C" {
-    #[link_name = "close"]
-    fn libc_close(fd: i32) -> i32;
-}
-#[derive(Clone, Copy)]
-struct SendPtr(*mut Bridge);
-unsafe impl Send for SendPtr {}
-unsafe impl Sync for SendPtr {}
 
 /// Records deferred VA releases (stands in for Mesa's util_vma_heap_free).
 #[derive(Default)]
@@ -161,23 +131,25 @@ struct Released {
     calls: AtomicU32,
     ranges: Mutex<Vec<(u64, u64)>>,
 }
-unsafe extern "C" fn record_release(data: *mut c_void, address: u64, size: u64) {
-    let released = unsafe { &*(data as *const Released) };
-    released.ranges.lock().unwrap().push((address, size));
-    released.calls.fetch_add(1, Ordering::SeqCst);
-}
-fn va_free(b: *mut Bridge, mappings: &[u64], address: u64, size: u64, released: &Released) -> i32 {
-    unsafe {
-        nv_rm_va_free(
-            b,
-            mappings.as_ptr(),
-            mappings.len() as u32,
-            address,
-            size,
-            Some(record_release),
-            released as *const Released as *mut c_void,
-        )
+impl ReleaseSink for Released {
+    fn release(&self, address: u64, size: u64) {
+        self.ranges.lock().unwrap().push((address, size));
+        self.calls.fetch_add(1, Ordering::SeqCst);
     }
+}
+/// The bridge may run a deferred release at any later call or at close, so
+/// the sink lives for the rest of the process (a few bytes per fixture).
+fn released() -> &'static Released {
+    Box::leak(Box::default())
+}
+fn va_free(
+    b: &Bridge,
+    mappings: &[u64],
+    address: u64,
+    size: u64,
+    released: &'static Released,
+) -> i32 {
+    c::va_free(b, mappings, address, size, released)
 }
 
 /// Producer side of a pending foreign sync_file: a batch on `producer` gated
@@ -185,25 +157,29 @@ fn va_free(b: *mut Bridge, mappings: &[u64], address: u64, size: u64, released: 
 /// SYNC_FD is the producer queue's kernel fence (pending until the host
 /// signal). Returns the owned sync_file descriptor.
 fn pending_sync_file(
-    producer: *mut Bridge,
+    producer: &Bridge,
     ctx: u64,
     gate: u64,
     value: u64,
     sem: u64,
     drm: &File,
-) -> i32 {
+) -> OwnedFd {
     // The previous round's signal completed and was never waited: unsignal
     // it first (a binary may not be signalled twice without a wait).
-    assert_eq!(unsafe { nv_rm_sync_reset(producer, sem) }, 0);
+    assert_eq!(c::sync_reset(producer, sem), 0);
     submit(producer, ctx, &[], &[point(gate, value)], &[point(sem, 0)]);
     let mut fd = -1;
     assert_eq!(
-        unsafe { nv_rm_sync_export_fd(producer, sem, 0, drm.as_raw_fd(), &mut fd) },
+        c::sync_export_fd(producer, sem, 0, Some(drm.as_fd()), &mut fd),
         0
     );
     assert!(fd >= 0);
+    // SAFETY: a successful SYNC_FD export returns a new open descriptor that
+    // only this caller owns (nv_rm_sync_export_fd hands out `into_raw_fd`),
+    // and it is not -1 (asserted above).
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     assert_eq!(
-        crate::fences::sync_status(fd).unwrap(),
+        crate::fences::sync_status(fd.as_raw_fd()).unwrap(),
         0,
         "sync_file pending"
     );
@@ -221,29 +197,25 @@ fn free_while_foreign_gated_returns_promptly_and_reclaims_after_retirement() {
     let before = fd_count();
     let pci = selected_pci();
     let drm = render_node(pci);
-    let mut producer = open(pci);
-    let mut consumer = open(pci);
-    let (pp, cp) = (&mut *producer as *mut Bridge, &mut *consumer as *mut Bridge);
-    let pctx = context(&mut *producer);
-    let cctx = context(&mut *consumer);
-    let gate = create(&mut *producer, true, 0);
-    let sem = create(&mut *producer, false, 0);
+    let producer = open(pci);
+    let consumer = open(pci);
+    let (pp, cp): (&Bridge, &Bridge) = (&producer, &consumer);
+    let pctx = context(&producer);
+    let cctx = context(&consumer);
+    let gate = create(&producer, true, 0);
+    let sem = create(&producer, false, 0);
     let sync_file = pending_sync_file(pp, pctx, gate, 1, sem, &drm);
     // Consumer batch waits on the foreign fence through a watcher-owned gate.
     let mut ctoken = 0;
     assert_eq!(
-        unsafe {
-            nv_rm_submit_waits(
-                cp,
-                cctx,
-                std::ptr::null(),
-                0,
-                drm.as_raw_fd(),
-                &sync_file,
-                1,
-                &mut ctoken,
-            )
-        },
+        c::submit_waits(
+            cp,
+            cctx,
+            &[],
+            drm.as_fd(),
+            &[sync_file.as_fd()],
+            &mut ctoken
+        ),
         0
     );
     assert!(!consumer.wait_token(cctx, ctoken, 0).unwrap());
@@ -254,28 +226,27 @@ fn free_while_foreign_gated_returns_promptly_and_reclaims_after_retirement() {
     let mapping = bind(cp, unrelated, size, va0);
     let other = alloc(cp, 65536, true);
     let other_map = bind(cp, other, 65536, va1);
-    let released = Released::default();
+    let released = released();
     // If any free blocked on the gated work, this watchdog provides the
     // producer signal so the test fails instead of hanging.
     let (tx, rx) = mpsc::channel::<()>();
     let watchdog = {
-        let pp = SendPtr(pp);
+        let pp = Arc::clone(&producer);
         thread::spawn(move || {
-            let pp = pp;
             if rx.recv_timeout(Duration::from_secs(5)).is_err() {
-                unsafe { nv_rm_sync_signal(pp.0, gate, 1) };
+                c::sync_signal(&pp, gate, 1);
                 return true;
             }
             false
         })
     };
     let start = Instant::now();
-    assert_eq!(unsafe { nv_rm_unbind(cp, other_map) }, 0);
+    assert_eq!(c::unbind(cp, other_map), 0);
     let unbind = start.elapsed();
-    assert_eq!(va_free(cp, &[mapping], va0, size, &released), 0);
+    assert_eq!(va_free(cp, &[mapping], va0, size, released), 0);
     let va = start.elapsed();
-    assert_eq!(unsafe { nv_rm_free(cp, unrelated) }, 0);
-    assert_eq!(unsafe { nv_rm_free(cp, other) }, 0);
+    assert_eq!(c::free(cp, unrelated), 0);
+    assert_eq!(c::free(cp, other), 0);
     let all = start.elapsed();
     tx.send(()).unwrap();
     assert!(
@@ -288,10 +259,10 @@ fn free_while_foreign_gated_returns_promptly_and_reclaims_after_retirement() {
     assert_eq!(released.calls.load(Ordering::SeqCst), 0);
     assert_eq!(groups(&consumer), 3, "VA group + two memory groups");
     // The producer signal (the app's next frame), then the gate opens.
-    assert_eq!(unsafe { nv_rm_sync_signal(pp, gate, 1) }, 0);
-    assert_eq!(unsafe { nv_rm_wait(cp, cctx, ctoken, 10_000_000_000) }, 0);
+    assert_eq!(c::sync_signal(pp, gate, 1), 0);
+    assert_eq!(c::wait(cp, cctx, ctoken, 10_000_000_000), 0);
     let mut done = 0;
-    assert_eq!(unsafe { nv_rm_poll(cp, cctx, ctoken, &mut done) }, 0);
+    assert_eq!(c::poll(cp, cctx, ctoken, &mut done), 0);
     assert_eq!(done, 1);
     assert_eq!(released.calls.load(Ordering::SeqCst), 1);
     assert_eq!(*released.ranges.lock().unwrap(), [(va0, size)]);
@@ -303,12 +274,12 @@ fn free_while_foreign_gated_returns_promptly_and_reclaims_after_retirement() {
         assert!(inner.unmap_failed.is_empty());
     }
     assert!(!consumer.core.is_lost() && !producer.core.is_lost());
-    unsafe { libc_close(sync_file) };
+    drop(sync_file);
     for id in [gate, sem] {
-        assert_eq!(unsafe { nv_rm_sync_destroy(pp, id) }, 0);
+        assert_eq!(c::sync_destroy(pp, id), 0);
     }
-    assert_eq!(unsafe { nv_rm_context_destroy(pp, pctx) }, 0);
-    assert_eq!(unsafe { nv_rm_context_destroy(cp, cctx) }, 0);
+    assert_eq!(c::context_destroy(pp, pctx), 0);
+    assert_eq!(c::context_destroy(cp, cctx), 0);
     drop(producer);
     drop(consumer);
     drop(drm);
@@ -348,15 +319,15 @@ fn semaphore(words: &mut Vec<u32>, address: u64, value: u64, release: bool) {
 fn freed_memory_stays_mapped_until_the_gated_batch_retires() {
     let before = fd_count();
     let pci = selected_pci();
-    let mut bridge = open(pci);
-    let b = &mut *bridge as *mut Bridge;
-    let ctx = context(&mut *bridge);
+    let bridge = open(pci);
+    let b: &Bridge = &bridge;
+    let ctx = context(&bridge);
     let channel = queue_ref(&bridge.lock().0, ctx).unwrap().channel_class();
     assert!(
         crate::gpu::modern_host(channel).unwrap(),
         "fixture encodes Volta+ host methods"
     );
-    let gate = create(&mut *bridge, true, 0);
+    let gate = create(&bridge, true, 0);
     let size = 65536;
     let (va_m, va_p, va_r) = (
         VA_BASE + (16 << 20),
@@ -369,7 +340,7 @@ fn freed_memory_stays_mapped_until_the_gated_batch_retires() {
     let push_cpu = map(b, push);
     let push_map = bind(b, push, size, va_p);
     let witness = alloc(b, size, true);
-    let witness_cpu = map(b, witness) as *mut u64;
+    let witness_cpu = map(b, witness);
     let witness_map = bind(b, witness, size, va_r);
     let value = 0x5eed_0000_0000_0000
         | (std::time::SystemTime::now()
@@ -377,13 +348,13 @@ fn freed_memory_stays_mapped_until_the_gated_batch_retires() {
             .unwrap()
             .as_nanos() as u64
             & 0xffff_ffff);
-    unsafe { witness_cpu.write_volatile(0) };
+    witness_cpu.write_u64(0, 0);
     let mut words = Vec::new();
     semaphore(&mut words, va_m, value, true);
     semaphore(&mut words, va_m, value, false);
     semaphore(&mut words, va_r, value, true);
     for (i, word) in words.iter().enumerate() {
-        unsafe { (push_cpu as *mut u32).add(i).write_volatile(*word) };
+        push_cpu.write_u32(i, *word);
     }
     std::sync::atomic::fence(Ordering::SeqCst);
     let token = submit(
@@ -397,21 +368,21 @@ fn freed_memory_stays_mapped_until_the_gated_batch_retires() {
         &[point(gate, 1)],
         &[],
     );
-    let released = Released::default();
+    let released = released();
     let start = Instant::now();
-    assert_eq!(va_free(b, &[freed_map], va_m, size, &released), 0);
-    assert_eq!(unsafe { nv_rm_free(b, freed) }, 0);
+    assert_eq!(va_free(b, &[freed_map], va_m, size, released), 0);
+    assert_eq!(c::free(b, freed), 0);
     let elapsed = start.elapsed();
     assert!(elapsed < Duration::from_millis(50), "free took {elapsed:?}");
     assert_eq!(released.calls.load(Ordering::SeqCst), 0);
     assert_eq!(groups(&bridge), 2);
     assert!(!bridge.wait_token(ctx, token, 0).unwrap(), "still gated");
     // Now the GPU runs the writes/reads of the freed range.
-    assert_eq!(unsafe { nv_rm_sync_signal(b, gate, 1) }, 0);
-    assert_eq!(unsafe { nv_rm_wait(b, ctx, token, 10_000_000_000) }, 0);
-    let observed = unsafe { witness_cpu.read_volatile() };
+    assert_eq!(c::sync_signal(b, gate, 1), 0);
+    assert_eq!(c::wait(b, ctx, token, 10_000_000_000), 0);
+    let observed = witness_cpu.read_u64(0);
     assert_eq!(observed, value, "GPU read back the freed memory");
-    assert_eq!(unsafe { nv_rm_check_status(b) }, 0);
+    assert_eq!(c::check_status(b), 0);
     assert!(!bridge.core.is_lost());
     assert_eq!(
         released.calls.load(Ordering::SeqCst),
@@ -419,18 +390,21 @@ fn freed_memory_stays_mapped_until_the_gated_batch_retires() {
         "reclaimed by the status call"
     );
     assert_eq!(groups(&bridge), 0);
-    for (memory, mapping, address) in [(push, push_map, va_p), (witness, witness_map, va_r)] {
-        assert_eq!(unsafe { nv_rm_unmap(b, memory) }, 0);
-        assert_eq!(va_free(b, &[mapping], address, size, &released), 0);
-        assert_eq!(unsafe { nv_rm_free(b, memory) }, 0);
+    for (cpu, memory, mapping, address) in [
+        (push_cpu, push, push_map, va_p),
+        (witness_cpu, witness, witness_map, va_r),
+    ] {
+        assert_eq!(cpu.unmap(), 0);
+        assert_eq!(va_free(b, &[mapping], address, size, released), 0);
+        assert_eq!(c::free(b, memory), 0);
     }
     assert_eq!(
         released.calls.load(Ordering::SeqCst),
         3,
         "idle frees are immediate"
     );
-    assert_eq!(unsafe { nv_rm_sync_destroy(b, gate) }, 0);
-    assert_eq!(unsafe { nv_rm_context_destroy(b, ctx) }, 0);
+    assert_eq!(c::sync_destroy(b, gate), 0);
+    assert_eq!(c::context_destroy(b, ctx), 0);
     drop(bridge);
     assert_eq!(fd_count(), before, "fd leak");
     println!(
@@ -446,12 +420,20 @@ struct VaPool {
     free: Mutex<Vec<u64>>,
     released: AtomicU64,
 }
-unsafe extern "C" fn pool_release(data: *mut c_void, address: u64, _size: u64) {
-    let pool = unsafe { &*(data as *const VaPool) };
-    let mut free = pool.free.lock().unwrap();
-    assert!(!free.contains(&address), "VA slot released twice");
-    free.push(address);
-    pool.released.fetch_add(1, Ordering::SeqCst);
+impl ReleaseSink for VaPool {
+    fn release(&self, address: u64, _size: u64) {
+        let mut free = self.free.lock().unwrap();
+        assert!(!free.contains(&address), "VA slot released twice");
+        free.push(address);
+        self.released.fetch_add(1, Ordering::SeqCst);
+    }
+}
+/// Like [`released`]: deferred releases may run until bridge close.
+fn va_pool(slots: impl Iterator<Item = u64>) -> &'static VaPool {
+    Box::leak(Box::new(VaPool {
+        free: Mutex::new(slots.collect()),
+        released: AtomicU64::new(0),
+    }))
 }
 const SLOT: u64 = 2 << 20;
 
@@ -469,19 +451,14 @@ fn concurrent_alloc_free_gated_submit_stress() {
     let before = fd_count();
     let pci = selected_pci();
     let drm = Arc::new(render_node(pci));
-    let mut bridge = open(pci);
-    let mut producer = open(pci);
-    let b = SendPtr(&mut *bridge);
-    let p = SendPtr(&mut *producer);
-    let pool = Arc::new(VaPool {
-        free: Mutex::new((0..512).map(|i| VA_BASE + (64 << 20) + i * SLOT).collect()),
-        released: AtomicU64::new(0),
-    });
+    let bridge = open(pci);
+    let producer = open(pci);
+    let pool = va_pool((0..512).map(|i| VA_BASE + (64 << 20) + i * SLOT));
     let stop = Arc::new(AtomicBool::new(false));
     let failures = Arc::new(Mutex::new(Vec::<String>::new()));
     let slow_free = Arc::new(AtomicU64::new(0)); // worst free, ns
     let va_frees = Arc::new(AtomicU64::new(0));
-    let timeline = create(&mut *bridge, true, 0);
+    let timeline = create(&bridge, true, 0);
     let deadline = 10_000_000_000u64;
     let timed = |slow: &AtomicU64, f: &mut dyn FnMut()| {
         let t = Instant::now();
@@ -492,14 +469,13 @@ fn concurrent_alloc_free_gated_submit_stress() {
     let mut threads = Vec::new();
     // Allocators.
     for seed in 0..3u64 {
-        let (pool, stop, slow, frees) = (
-            Arc::clone(&pool),
+        let (b, stop, slow, frees) = (
+            Arc::clone(&bridge),
             Arc::clone(&stop),
             Arc::clone(&slow_free),
             Arc::clone(&va_frees),
         );
         threads.push(thread::spawn(move || {
-            let b = b;
             let mut ops = 0u64;
             let mut x = 0x9e37_79b9_7f4a_7c15u64 ^ seed;
             while !stop.load(Ordering::Relaxed) {
@@ -508,31 +484,21 @@ fn concurrent_alloc_free_gated_submit_stress() {
                 x ^= x << 17;
                 let size = 65536 << (x % 5); // 64 KiB .. 1 MiB
                 let gart = x & 32 != 0;
-                let Some(va) = take_slot(&pool) else {
+                let Some(va) = take_slot(pool) else {
                     thread::yield_now();
                     continue;
                 };
-                let memory = alloc(b.0, size, gart);
-                let mapping = bind(b.0, memory, size, va);
+                let memory = alloc(&b, size, gart);
+                let mapping = bind(&b, memory, size, va);
                 if gart && x & 64 != 0 {
-                    let cpu = map(b.0, memory) as *mut u32;
-                    unsafe { cpu.write_volatile(ops as u32) };
-                    assert_eq!(unsafe { nv_rm_unmap(b.0, memory) }, 0);
+                    let cpu = map(&b, memory);
+                    cpu.write_u32(0, ops as u32);
+                    assert_eq!(cpu.unmap(), 0);
                 }
                 timed(&slow, &mut || {
-                    let r = unsafe {
-                        nv_rm_va_free(
-                            b.0,
-                            &mapping,
-                            1,
-                            va,
-                            SLOT,
-                            Some(pool_release),
-                            Arc::as_ptr(&pool) as *mut c_void,
-                        )
-                    };
+                    let r = c::va_free(&b, &[mapping], va, SLOT, pool);
                     assert_eq!(r, 0);
-                    assert_eq!(unsafe { nv_rm_free(b.0, memory) }, 0);
+                    assert_eq!(c::free(&b, memory), 0);
                 });
                 frees.fetch_add(1, Ordering::Relaxed);
                 ops += 1;
@@ -542,80 +508,65 @@ fn concurrent_alloc_free_gated_submit_stress() {
     }
     // Submitter: host-gated batches with a driver-internal free while gated.
     {
-        let (pool, stop, slow, frees, failures) = (
-            Arc::clone(&pool),
+        let (b, stop, slow, frees, failures) = (
+            Arc::clone(&bridge),
             Arc::clone(&stop),
             Arc::clone(&slow_free),
             Arc::clone(&va_frees),
             Arc::clone(&failures),
         );
         threads.push(thread::spawn(move || {
-            let b = b;
-            let ctx = context(b.0);
-            let gate = create(b.0, true, 0);
-            let fence = create(b.0, false, 0);
+            let ctx = context(&b);
+            let gate = create(&b, true, 0);
+            let fence = create(&b, false, 0);
             let mut k = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 k += 1;
-                let Some(va) = take_slot(&pool) else {
+                let Some(va) = take_slot(pool) else {
                     thread::yield_now();
                     k -= 1;
                     continue;
                 };
-                let memory = alloc(b.0, 65536, false);
-                let mapping = bind(b.0, memory, 65536, va);
+                let memory = alloc(&b, 65536, false);
+                let mapping = bind(&b, memory, 65536, va);
                 submit(
-                    b.0,
+                    &b,
                     ctx,
                     &[],
                     &[point(gate, k)],
                     &[point(fence, 0), point(timeline, k)],
                 );
                 timed(&slow, &mut || {
-                    assert_eq!(
-                        unsafe {
-                            nv_rm_va_free(
-                                b.0,
-                                &mapping,
-                                1,
-                                va,
-                                SLOT,
-                                Some(pool_release),
-                                Arc::as_ptr(&pool) as *mut c_void,
-                            )
-                        },
-                        0
-                    );
-                    assert_eq!(unsafe { nv_rm_free(b.0, memory) }, 0);
+                    assert_eq!(c::va_free(&b, &[mapping], va, SLOT, pool), 0);
+                    assert_eq!(c::free(&b, memory), 0);
                 });
                 frees.fetch_add(1, Ordering::Relaxed);
-                assert_eq!(unsafe { nv_rm_sync_signal(b.0, gate, k) }, 0);
+                assert_eq!(c::sync_signal(&b, gate, k), 0);
                 let f = point(fence, 0);
-                match unsafe { nv_rm_sync_wait_many(b.0, &f, 1, 0, deadline) } {
+                match c::sync_wait_many(&b, &[f], 0, deadline) {
                     0 => {}
                     r => failures
                         .lock()
                         .unwrap()
                         .push(format!("submitter fence wait {r} at {k}")),
                 }
-                assert_eq!(unsafe { nv_rm_sync_reset(b.0, fence) }, 0);
+                assert_eq!(c::sync_reset(&b, fence), 0);
             }
-            let last = queue_ref(&unsafe { &*b.0 }.lock().0, ctx)
-                .unwrap()
-                .last_token();
-            assert_eq!(unsafe { nv_rm_wait(b.0, ctx, last, deadline) }, 0);
+            let last = queue_ref(&b.lock().0, ctx).unwrap().last_token();
+            assert_eq!(c::wait(&b, ctx, last, deadline), 0);
             for id in [gate, fence] {
-                assert_eq!(unsafe { nv_rm_sync_destroy(b.0, id) }, 0);
+                assert_eq!(c::sync_destroy(&b, id), 0);
             }
-            assert_eq!(unsafe { nv_rm_context_destroy(b.0, ctx) }, 0);
+            assert_eq!(c::context_destroy(&b, ctx), 0);
             k
         }));
     }
     // Foreign-gated consumer: producer device signals a sync_file only after
     // the consumer thread freed memory behind the gated batch.
     {
-        let (pool, stop, slow, frees, failures, drm) = (
-            Arc::clone(&pool),
+        let (b, p, stop, slow, frees, failures, drm) = (
+            Arc::clone(&bridge),
+            Arc::clone(&producer),
             Arc::clone(&stop),
             Arc::clone(&slow_free),
             Arc::clone(&va_frees),
@@ -623,91 +574,64 @@ fn concurrent_alloc_free_gated_submit_stress() {
             Arc::clone(&drm),
         );
         threads.push(thread::spawn(move || {
-            let (b, p) = (b, p);
-            let ctx = context(b.0);
-            let pctx = context(p.0);
-            let gate = create(p.0, true, 0);
-            let sem = create(p.0, false, 0);
+            let ctx = context(&b);
+            let pctx = context(&p);
+            let gate = create(&p, true, 0);
+            let sem = create(&p, false, 0);
             let mut k = 0u64;
             while !stop.load(Ordering::Relaxed) {
-                let Some(va) = take_slot(&pool) else {
+                let Some(va) = take_slot(pool) else {
                     thread::yield_now();
                     continue;
                 };
                 k += 1;
-                let fd = pending_sync_file(p.0, pctx, gate, k, sem, &drm);
-                let memory = alloc(b.0, 65536, true);
-                let mapping = bind(b.0, memory, 65536, va);
+                let fd = pending_sync_file(&p, pctx, gate, k, sem, &drm);
+                let memory = alloc(&b, 65536, true);
+                let mapping = bind(&b, memory, 65536, va);
                 let mut token = 0;
                 assert_eq!(
-                    unsafe {
-                        nv_rm_submit_waits(
-                            b.0,
-                            ctx,
-                            std::ptr::null(),
-                            0,
-                            drm.as_raw_fd(),
-                            &fd,
-                            1,
-                            &mut token,
-                        )
-                    },
+                    c::submit_waits(&b, ctx, &[], drm.as_fd(), &[fd.as_fd()], &mut token),
                     0
                 );
                 timed(&slow, &mut || {
-                    assert_eq!(
-                        unsafe {
-                            nv_rm_va_free(
-                                b.0,
-                                &mapping,
-                                1,
-                                va,
-                                SLOT,
-                                Some(pool_release),
-                                Arc::as_ptr(&pool) as *mut c_void,
-                            )
-                        },
-                        0
-                    );
-                    assert_eq!(unsafe { nv_rm_free(b.0, memory) }, 0);
+                    assert_eq!(c::va_free(&b, &[mapping], va, SLOT, pool), 0);
+                    assert_eq!(c::free(&b, memory), 0);
                 });
                 frees.fetch_add(1, Ordering::Relaxed);
-                assert_eq!(unsafe { nv_rm_sync_signal(p.0, gate, k) }, 0);
-                match unsafe { nv_rm_wait(b.0, ctx, token, deadline) } {
+                assert_eq!(c::sync_signal(&p, gate, k), 0);
+                match c::wait(&b, ctx, token, deadline) {
                     0 => {}
                     r => failures
                         .lock()
                         .unwrap()
                         .push(format!("foreign-gated wait {r} at {k}")),
                 }
-                unsafe { libc_close(fd) };
+                drop(fd);
             }
-            let last = queue_ref(&unsafe { &*p.0 }.lock().0, pctx)
-                .unwrap()
-                .last_token();
-            assert_eq!(unsafe { nv_rm_wait(p.0, pctx, last, deadline) }, 0);
+            let last = queue_ref(&p.lock().0, pctx).unwrap().last_token();
+            assert_eq!(c::wait(&p, pctx, last, deadline), 0);
             for id in [gate, sem] {
-                assert_eq!(unsafe { nv_rm_sync_destroy(p.0, id) }, 0);
+                assert_eq!(c::sync_destroy(&p, id), 0);
             }
-            assert_eq!(unsafe { nv_rm_context_destroy(p.0, pctx) }, 0);
-            assert_eq!(unsafe { nv_rm_context_destroy(b.0, ctx) }, 0);
+            assert_eq!(c::context_destroy(&p, pctx), 0);
+            assert_eq!(c::context_destroy(&b, ctx), 0);
             k
         }));
     }
     // CPU waiters on the submitter's GPU-signalled timeline.
     for _ in 0..2 {
-        let (stop, failures) = (Arc::clone(&stop), Arc::clone(&failures));
+        let (b, stop, failures) = (
+            Arc::clone(&bridge),
+            Arc::clone(&stop),
+            Arc::clone(&failures),
+        );
         threads.push(thread::spawn(move || {
-            let b = b;
             let mut wakes = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 let mut value = 0;
-                assert_eq!(
-                    unsafe { nv_rm_sync_get_value(b.0, timeline, &mut value) },
-                    0
-                );
+                assert_eq!(c::sync_get_value(&b, timeline, &mut value), 0);
                 let w = point(timeline, value + 1);
-                match unsafe { nv_rm_sync_wait_many(b.0, &w, 1, 0, deadline) } {
+                match c::sync_wait_many(&b, &[w], 0, deadline) {
                     0 => wakes += 1,
                     r => failures
                         .lock()
@@ -730,7 +654,7 @@ fn concurrent_alloc_free_gated_submit_stress() {
         .enumerate()
         .map(|(i, t)| {
             if i == 5 {
-                assert_eq!(unsafe { nv_rm_sync_signal(b.0, timeline, u64::MAX / 2) }, 0);
+                assert_eq!(c::sync_signal(&bridge, timeline, u64::MAX / 2), 0);
             }
             t.join().unwrap()
         })
@@ -740,7 +664,7 @@ fn concurrent_alloc_free_gated_submit_stress() {
     assert!(failures.is_empty(), "{failures:?}");
     assert!(!bridge.core.is_lost() && !producer.core.is_lost());
     // Everything retired: status calls reclaim the backlog (bounded per call).
-    drain_backlog(b.0);
+    drain_backlog(&bridge);
     assert_eq!(groups(&bridge), 0);
     let frees = va_frees.load(Ordering::SeqCst);
     assert_eq!(
@@ -749,7 +673,7 @@ fn concurrent_alloc_free_gated_submit_stress() {
         "one release per VA free"
     );
     assert_eq!(pool.free.lock().unwrap().len(), 512);
-    assert_eq!(unsafe { nv_rm_sync_destroy(b.0, timeline) }, 0);
+    assert_eq!(c::sync_destroy(&bridge, timeline), 0);
     drop(bridge);
     drop(producer);
     drop(drm);
@@ -784,24 +708,24 @@ fn watcher_gate_release_and_contended_waiters_never_lose_a_wakeup() {
     let before = fd_count();
     let pci = selected_pci();
     let drm = render_node(pci);
-    let mut producer = open(pci);
-    let mut consumer = open(pci);
-    let (pp, cp) = (SendPtr(&mut *producer), SendPtr(&mut *consumer));
-    let pctx = context(&mut *producer);
-    let cctx = context(&mut *consumer);
-    let gate = create(&mut *producer, true, 0);
-    let sem = create(&mut *producer, false, 0);
-    let gpu_wait = create(&mut *consumer, false, 0);
-    let cpu_wait = create(&mut *consumer, false, 0);
-    let timeline = create(&mut *consumer, true, 0);
+    let producer = open(pci);
+    let consumer = open(pci);
+    let (pp, cp): (&Bridge, &Bridge) = (&producer, &consumer);
+    let pctx = context(&producer);
+    let cctx = context(&consumer);
+    let gate = create(&producer, true, 0);
+    let sem = create(&producer, false, 0);
+    let gpu_wait = create(&consumer, false, 0);
+    let cpu_wait = create(&consumer, false, 0);
+    let timeline = create(&consumer, true, 0);
     let mut lat = Vec::new();
     for round in 1..=rounds {
-        let fd = pending_sync_file(pp.0, pctx, gate, round, sem, &drm);
-        assert_eq!(unsafe { nv_rm_sync_import_fd(cp.0, gpu_wait, fd, 0) }, 0);
-        assert_eq!(unsafe { nv_rm_sync_import_fd(cp.0, cpu_wait, fd, 0) }, 0);
-        unsafe { libc_close(fd) };
+        let fd = pending_sync_file(pp, pctx, gate, round, sem, &drm);
+        assert_eq!(c::sync_import_fd(cp, gpu_wait, fd.as_fd(), 0), 0);
+        assert_eq!(c::sync_import_fd(cp, cpu_wait, fd.as_fd(), 0), 0);
+        drop(fd);
         submit(
-            cp.0,
+            cp,
             cctx,
             &[],
             &[point(gpu_wait, 0)],
@@ -811,15 +735,15 @@ fn watcher_gate_release_and_contended_waiters_never_lose_a_wakeup() {
         let waiters: Vec<_> = (0..4)
             .map(|i| {
                 let ready = Arc::clone(&ready);
+                let cp = Arc::clone(&consumer);
                 thread::spawn(move || {
-                    let cp = cp;
                     let target = if i < 2 {
                         point(timeline, round)
                     } else {
                         point(cpu_wait, 0)
                     };
                     ready.wait();
-                    let r = unsafe { nv_rm_sync_wait_many(cp.0, &target, 1, 0, 2_000_000_000) };
+                    let r = c::sync_wait_many(&cp, &[target], 0, 2_000_000_000);
                     (r, Instant::now())
                 })
             })
@@ -831,7 +755,7 @@ fn watcher_gate_release_and_contended_waiters_never_lose_a_wakeup() {
         // Let them park (leader in ppoll, followers on the condvar).
         thread::sleep(Duration::from_micros(300));
         let signal = Instant::now();
-        assert_eq!(unsafe { nv_rm_sync_signal(pp.0, gate, round) }, 0);
+        assert_eq!(c::sync_signal(pp, gate, round), 0);
         for w in waiters {
             let (r, at) = w.join().unwrap();
             assert_eq!(
@@ -845,17 +769,17 @@ fn watcher_gate_release_and_contended_waiters_never_lose_a_wakeup() {
             );
             lat.push(l);
         }
-        assert_eq!(unsafe { nv_rm_sync_reset(cp.0, cpu_wait) }, 0);
+        assert_eq!(c::sync_reset(cp, cpu_wait), 0);
     }
     assert!(!consumer.core.is_lost() && !producer.core.is_lost());
     for id in [gpu_wait, cpu_wait, timeline] {
-        assert_eq!(unsafe { nv_rm_sync_destroy(cp.0, id) }, 0);
+        assert_eq!(c::sync_destroy(cp, id), 0);
     }
     for id in [gate, sem] {
-        assert_eq!(unsafe { nv_rm_sync_destroy(pp.0, id) }, 0);
+        assert_eq!(c::sync_destroy(pp, id), 0);
     }
-    assert_eq!(unsafe { nv_rm_context_destroy(pp.0, pctx) }, 0);
-    assert_eq!(unsafe { nv_rm_context_destroy(cp.0, cctx) }, 0);
+    assert_eq!(c::context_destroy(pp, pctx), 0);
+    assert_eq!(c::context_destroy(cp, cctx), 0);
     drop(producer);
     drop(consumer);
     drop(drm);
@@ -890,6 +814,9 @@ fn poll_readable(fd: i32, timeout_ms: i32) -> bool {
     let start = Instant::now();
     loop {
         let left = timeout_ms - start.elapsed().as_millis() as i32;
+        // SAFETY: `p` is one exclusive, initialised `struct pollfd` (poll(2):
+        // int fd, short events, short revents, the layout PollFd declares) and
+        // the count is 1; poll only writes `revents`. Any fd value is allowed.
         let n = unsafe { poll(&mut p, 1, left.max(0)) };
         if n > 0 {
             return p.revents & 1 != 0;
@@ -920,8 +847,7 @@ fn startup_sync_churn_every_exported_fence_signals() {
     let before = fd_count();
     let pci = selected_pci();
     let drm = Arc::new(render_node(pci));
-    let mut devices = [open(pci), open(pci)];
-    let ptrs = [SendPtr(&mut *devices[0]), SendPtr(&mut *devices[1])];
+    let devices = [open(pci), open(pci)];
     let stop = Arc::new(AtomicBool::new(false));
     let failures = Arc::new(Mutex::new(Vec::<String>::new()));
     // Last exported release fence of each device, consumed by the other one.
@@ -931,7 +857,7 @@ fn startup_sync_churn_every_exported_fence_signals() {
     let mut threads = Vec::new();
     for t in 0..4usize {
         let device = t % 2;
-        let b = ptrs[device];
+        let b = Arc::clone(&devices[device]);
         let (stop, failures, latest, drm, worst) = (
             Arc::clone(&stop),
             Arc::clone(&failures),
@@ -940,20 +866,16 @@ fn startup_sync_churn_every_exported_fence_signals() {
             Arc::clone(&worst),
         );
         threads.push(thread::spawn(move || {
-            let b = b;
-            let mut ctx = context(b.0);
-            let fences: Vec<u64> = (0..3).map(|_| create(b.0, false, 0)).collect();
+            let mut ctx = context(&b);
+            let fences: Vec<u64> = (0..3).map(|_| create(&b, false, 0)).collect();
             // Mesa's heap: a range is reusable only after its release ran.
-            let pool = Arc::new(VaPool {
-                free: Mutex::new((0..64).map(|i| VA_BASE + (1 << 32) + ((t as u64) * 64 + i) * SLOT).collect()),
-                released: AtomicU64::new(0),
-            });
+            let pool = va_pool((0..64).map(|i| VA_BASE + (1 << 32) + ((t as u64) * 64 + i) * SLOT));
             let mut frames = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 frames += 1;
                 // vkAcquireImageANDROID(-1): temporary payload, CPU-signalled.
-                let acquire = create(b.0, false, 0);
-                assert_eq!(unsafe { nv_rm_sync_signal(b.0, acquire, 0) }, 0);
+                let acquire = create(&b, false, 0);
+                assert_eq!(c::sync_signal(&b, acquire, 0), 0);
                 let mut waits = vec![point(acquire, 0)];
                 // Foreign wait on the peer device's last release fence.
                 let peer = if frames.is_multiple_of(2) {
@@ -966,44 +888,42 @@ fn startup_sync_churn_every_exported_fence_signals() {
                     None
                 };
                 let foreign = peer.map(|fd| {
-                    let id = create(b.0, false, 0);
-                    assert_eq!(unsafe { nv_rm_sync_import_fd(b.0, id, fd.as_raw_fd(), 0) }, 0);
+                    let id = create(&b, false, 0);
+                    assert_eq!(c::sync_import_fd(&b, id, fd.as_fd(), 0), 0);
                     waits.push(point(id, 0));
                     id
                 });
-                let render_done = create(b.0, false, 0);
-                submit(b.0, ctx, &[], &waits, &[point(render_done, 0)]);
+                let render_done = create(&b, false, 0);
+                submit(&b, ctx, &[], &waits, &[point(render_done, 0)]);
                 // Mesa destroys the submitted temporaries right away.
-                assert_eq!(unsafe { nv_rm_sync_destroy(b.0, acquire) }, 0);
+                assert_eq!(c::sync_destroy(&b, acquire), 0);
                 if let Some(id) = foreign {
-                    assert_eq!(unsafe { nv_rm_sync_destroy(b.0, id) }, 0);
+                    assert_eq!(c::sync_destroy(&b, id), 0);
                 }
                 // dequeue: temporary AHB import + free (GetMemoryFdProperties).
                 let va = pool.free.lock().unwrap().pop().expect("deferred VA ranges are reclaimed");
-                let memory = alloc(b.0, 65536, true);
-                let mapping = bind(b.0, memory, 65536, va);
-                let r = unsafe {
-                    nv_rm_va_free(b.0, &mapping, 1, va, SLOT, Some(pool_release), Arc::as_ptr(&pool) as *mut c_void)
-                };
+                let memory = alloc(&b, 65536, true);
+                let mapping = bind(&b, memory, 65536, va);
+                let r = c::va_free(&b, &[mapping], va, SLOT, pool);
                 assert_eq!(r, 0);
-                assert_eq!(unsafe { nv_rm_free(b.0, memory) }, 0);
+                assert_eq!(c::free(&b, memory), 0);
                 // vkQueueSignalReleaseImageANDROID: pooled export fence.
                 let fence = fences[(frames % 3) as usize];
                 let mut ready = 0;
                 let p = point(fence, 0);
-                assert_eq!(unsafe { nv_rm_sync_status_many(b.0, &p, 1, 0, &mut ready) }, 0);
+                assert_eq!(c::sync_status_many(&b, &[p], 0, &mut ready), 0);
                 if ready == 1 {
-                    assert_eq!(unsafe { nv_rm_sync_reset(b.0, fence) }, 0);
+                    assert_eq!(c::sync_reset(&b, fence), 0);
                 }
-                submit(b.0, ctx, &[], &[point(render_done, 0)], &[point(fence, 0)]);
+                submit(&b, ctx, &[], &[point(render_done, 0)], &[point(fence, 0)]);
                 let mut fd = -1;
                 assert_eq!(
-                    unsafe { nv_rm_sync_export_fd(b.0, fence, 0, drm.as_raw_fd(), &mut fd) },
+                    c::sync_export_fd(&b, fence, 0, Some(drm.as_fd()), &mut fd),
                     0
                 );
                 // Copy transference: Mesa resets the fence after export.
-                assert_eq!(unsafe { nv_rm_sync_reset(b.0, fence) }, 0);
-                assert_eq!(unsafe { nv_rm_sync_destroy(b.0, render_done) }, 0);
+                assert_eq!(c::sync_reset(&b, fence), 0);
+                assert_eq!(c::sync_destroy(&b, render_done), 0);
                 if fd >= 0 {
                     let start = Instant::now();
                     let signalled = poll_readable(fd, 100);
@@ -1016,23 +936,26 @@ fn startup_sync_churn_every_exported_fence_signals() {
                         ));
                         stop.store(true, Ordering::SeqCst);
                     }
+                    // SAFETY: a successful SYNC_FD export returns a new open
+                    // descriptor that only this thread owns
+                    // (nv_rm_sync_export_fd hands out `into_raw_fd`); fd >= 0.
                     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
                     *latest[device].lock().unwrap() = Some(owned);
                 }
                 if frames.is_multiple_of(200) {
                     // Context churn (activity restarts recreate queues).
-                    let last = queue_ref(&unsafe { &*b.0 }.lock().0, ctx).unwrap().last_token();
-                    assert_eq!(unsafe { nv_rm_wait(b.0, ctx, last, 10_000_000_000) }, 0);
-                    assert_eq!(unsafe { nv_rm_context_destroy(b.0, ctx) }, 0);
-                    ctx = context(b.0);
+                    let last = queue_ref(&b.lock().0, ctx).unwrap().last_token();
+                    assert_eq!(c::wait(&b, ctx, last, 10_000_000_000), 0);
+                    assert_eq!(c::context_destroy(&b, ctx), 0);
+                    ctx = context(&b);
                 }
             }
-            let last = queue_ref(&unsafe { &*b.0 }.lock().0, ctx).unwrap().last_token();
-            assert_eq!(unsafe { nv_rm_wait(b.0, ctx, last, 10_000_000_000) }, 0);
+            let last = queue_ref(&b.lock().0, ctx).unwrap().last_token();
+            assert_eq!(c::wait(&b, ctx, last, 10_000_000_000), 0);
             for f in fences {
-                assert_eq!(unsafe { nv_rm_sync_destroy(b.0, f) }, 0);
+                assert_eq!(c::sync_destroy(&b, f), 0);
             }
-            assert_eq!(unsafe { nv_rm_context_destroy(b.0, ctx) }, 0);
+            assert_eq!(c::context_destroy(&b, ctx), 0);
             (frames, pool)
         }));
     }
@@ -1041,12 +964,13 @@ fn startup_sync_churn_every_exported_fence_signals() {
         thread::sleep(Duration::from_millis(100));
     }
     stop.store(true, Ordering::SeqCst);
-    let joined: Vec<(u64, Arc<VaPool>)> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    let joined: Vec<(u64, &'static VaPool)> =
+        threads.into_iter().map(|t| t.join().unwrap()).collect();
     let frames: Vec<u64> = joined.iter().map(|(f, _)| *f).collect();
     // Everything retired: one uncontended status call per device reclaims
     // every group; each deferred range came back exactly once.
-    for p in ptrs {
-        drain_backlog(p.0);
+    for d in &devices {
+        drain_backlog(d);
     }
     for (f, pool) in &joined {
         assert_eq!(
@@ -1087,37 +1011,34 @@ fn sync_fd_export_never_returns_an_unsignalable_fence() {
     let before = fd_count();
     let pci = selected_pci();
     let drm = render_node(pci);
-    let mut bridge = open(pci);
-    let b = &mut *bridge as *mut Bridge;
+    let bridge = open(pci);
+    let b: &Bridge = &bridge;
     let ctx = context(b);
     let idle = create(b, false, 0);
     let mut fd = -1;
-    assert_ne!(
-        unsafe { nv_rm_sync_export_fd(b, idle, 0, drm.as_raw_fd(), &mut fd) },
-        0
-    );
+    assert_ne!(c::sync_export_fd(b, idle, 0, Some(drm.as_fd()), &mut fd), 0);
     assert_eq!(fd, -1);
-    assert_eq!(unsafe { nv_rm_sync_signal(b, idle, 0) }, 0);
-    assert_eq!(
-        unsafe { nv_rm_sync_export_fd(b, idle, 0, drm.as_raw_fd(), &mut fd) },
-        0
-    );
+    assert_eq!(c::sync_signal(b, idle, 0), 0);
+    assert_eq!(c::sync_export_fd(b, idle, 0, Some(drm.as_fd()), &mut fd), 0);
     assert_eq!(fd, -1, "signalled payload exports as already-signalled");
     let submitted = create(b, false, 0);
     submit(b, ctx, &[], &[], &[point(submitted, 0)]);
     assert_eq!(
-        unsafe { nv_rm_sync_export_fd(b, submitted, 0, drm.as_raw_fd(), &mut fd) },
+        c::sync_export_fd(b, submitted, 0, Some(drm.as_fd()), &mut fd),
         0
     );
     if fd >= 0 {
         assert!(poll_readable(fd, 100));
-        unsafe { libc_close(fd) };
+        // SAFETY: a successful SYNC_FD export returns a new open descriptor
+        // that only this test owns (nv_rm_sync_export_fd hands out
+        // `into_raw_fd`); fd >= 0. Dropping it closes it.
+        drop(unsafe { OwnedFd::from_raw_fd(fd) });
     }
     assert!(!bridge.core.is_lost());
     for id in [idle, submitted] {
-        assert_eq!(unsafe { nv_rm_sync_destroy(b, id) }, 0);
+        assert_eq!(c::sync_destroy(b, id), 0);
     }
-    assert_eq!(unsafe { nv_rm_context_destroy(b, ctx) }, 0);
+    assert_eq!(c::context_destroy(b, ctx), 0);
     drop(bridge);
     drop(drm);
     assert_eq!(fd_count(), before);
@@ -1143,15 +1064,14 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
         .unwrap_or(20);
     let before = fd_count();
     let pci = selected_pci();
-    let mut devices = [open(pci), open(pci)];
-    let ptrs = [SendPtr(&mut *devices[0]), SendPtr(&mut *devices[1])];
+    let devices = [open(pci), open(pci)];
     let stop = Arc::new(AtomicBool::new(false));
     let failures = Arc::new(Mutex::new(Vec::<String>::new()));
     let worst = Arc::new(AtomicU64::new(0));
     let slow = Arc::new(Mutex::new(Vec::<String>::new()));
     let mut threads = Vec::new();
     for t in 0..4usize {
-        let b = ptrs[t % 2];
+        let b = Arc::clone(&devices[t % 2]);
         let (stop, failures, worst, slow) = (
             Arc::clone(&stop),
             Arc::clone(&failures),
@@ -1159,9 +1079,8 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
             Arc::clone(&slow),
         );
         threads.push(thread::spawn(move || {
-            let b = b;
-            let ctx = context(b.0);
-            let fence = create(b.0, false, 0);
+            let ctx = context(&b);
+            let fence = create(&b, false, 0);
             let mut n = 0u64;
             // NV_RM_KICK_IDLE_MS: random idle gaps (0..N ms) between batches
             // so the GPU and its memory enter idle/low-power states, as an
@@ -1179,14 +1098,14 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
                     x ^= x << 17;
                     thread::sleep(Duration::from_micros(x % (idle * 1000)));
                 }
-                let token = submit(b.0, ctx, &[], &[], &[point(fence, 0)]);
+                let token = submit(&b, ctx, &[], &[], &[point(fence, 0)]);
                 let start = Instant::now();
-                let r = unsafe { nv_rm_wait(b.0, ctx, token, 100_000_000) };
+                let r = c::wait(&b, ctx, token, 100_000_000);
                 worst.fetch_max(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 if r != 0 {
                     // Distinguish slow from stranded: 2 s more without any
                     // doorbell, then one more batch (a doorbell) on this queue.
-                    let late = unsafe { nv_rm_wait(b.0, ctx, token, 2_000_000_000) } == 0;
+                    let late = c::wait(&b, ctx, token, 2_000_000_000) == 0;
                     let waited = start.elapsed();
                     if late {
                         // Slow (GPU shared with other clients), not stranded:
@@ -1196,9 +1115,9 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
                             .push(format!("thread {t} batch {n}: {waited:?}"));
                     } else {
                         let kick = Instant::now();
-                        let next = submit(b.0, ctx, &[], &[], &[]);
-                        let after_kick = unsafe { nv_rm_wait(b.0, ctx, token, 1_000_000_000) } == 0;
-                        let next_done = unsafe { nv_rm_wait(b.0, ctx, next, 1_000_000_000) } == 0;
+                        let next = submit(&b, ctx, &[], &[], &[]);
+                        let after_kick = c::wait(&b, ctx, token, 1_000_000_000) == 0;
+                        let next_done = c::wait(&b, ctx, next, 1_000_000_000) == 0;
                         failures.lock().unwrap().push(format!(
                             "thread {t} batch {n} token {token}: STRANDED, not retired within \
                              {waited:?} without a doorbell; retired after the next doorbell: \
@@ -1208,14 +1127,12 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
                         stop.store(true, Ordering::SeqCst);
                     }
                 }
-                assert_eq!(unsafe { nv_rm_sync_reset(b.0, fence) }, 0);
+                assert_eq!(c::sync_reset(&b, fence), 0);
             }
-            let last = queue_ref(&unsafe { &*b.0 }.lock().0, ctx)
-                .unwrap()
-                .last_token();
-            assert_eq!(unsafe { nv_rm_wait(b.0, ctx, last, 10_000_000_000) }, 0);
-            assert_eq!(unsafe { nv_rm_sync_destroy(b.0, fence) }, 0);
-            assert_eq!(unsafe { nv_rm_context_destroy(b.0, ctx) }, 0);
+            let last = queue_ref(&b.lock().0, ctx).unwrap().last_token();
+            assert_eq!(c::wait(&b, ctx, last, 10_000_000_000), 0);
+            assert_eq!(c::sync_destroy(&b, fence), 0);
+            assert_eq!(c::context_destroy(&b, ctx), 0);
             n
         }));
     }
@@ -1223,22 +1140,23 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
     // NV_RM_KICK_IDLE_MS asks for an idle GPU).
     let bar1 = std::env::var("NV_RM_KICK_IDLE_MS").is_err();
     for d in (0..2usize).filter(|_| bar1) {
-        let b = ptrs[d];
+        let b = Arc::clone(&devices[d]);
         let stop = Arc::clone(&stop);
         threads.push(thread::spawn(move || {
-            let b = b;
             let size = 4u64 << 20;
-            let memory = alloc(b.0, size, false);
-            let cpu = map(b.0, memory) as *mut u64;
+            let memory = alloc(&b, size, false);
+            let cpu = map(&b, memory);
+            assert_eq!(
+                cpu.len(),
+                size as usize,
+                "the fill covers exactly the allocation"
+            );
             let mut words = 0u64;
             while !stop.load(Ordering::Relaxed) {
-                for i in 0..(size / 8) as usize {
-                    unsafe { cpu.add(i).write_volatile(words) };
-                    words += 1;
-                }
+                words = cpu.fill_u64_counting(words);
             }
-            assert_eq!(unsafe { nv_rm_unmap(b.0, memory) }, 0);
-            assert_eq!(unsafe { nv_rm_free(b.0, memory) }, 0);
+            assert_eq!(cpu.unmap(), 0);
+            assert_eq!(c::free(&b, memory), 0);
             words
         }));
     }
@@ -1291,43 +1209,41 @@ fn cpu_released_acquire_runs_without_a_doorbell_after_idle() {
         .max(1);
     let before = fd_count();
     let pci = selected_pci();
-    let mut devices = [open(pci), open(pci)];
-    let ptrs = [SendPtr(&mut *devices[0]), SendPtr(&mut *devices[1])];
+    let devices = [open(pci), open(pci)];
     let stop = Arc::new(AtomicBool::new(false));
     let failures = Arc::new(Mutex::new(Vec::<String>::new()));
     let worst = Arc::new(AtomicU64::new(0));
     let slow = Arc::new(AtomicU64::new(0));
     let threads: Vec<_> = (0..4usize)
         .map(|t| {
-            let b = ptrs[t % 2];
+            let b = Arc::clone(&devices[t % 2]);
             let (stop, failures, worst, slow) = (Arc::clone(&stop), Arc::clone(&failures), Arc::clone(&worst), Arc::clone(&slow));
             thread::spawn(move || {
-                let b = b;
-                let ctx = context(b.0);
-                let gate = create(b.0, true, 0);
+                let ctx = context(&b);
+                let gate = create(&b, true, 0);
                 let mut x = 0x9e37_79b9_7f4a_7c15u64 ^ (t as u64 + 7);
                 let mut n = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     n += 1;
-                    let token = submit(b.0, ctx, &[], &[point(gate, n)], &[]);
+                    let token = submit(&b, ctx, &[], &[point(gate, n)], &[]);
                     x ^= x << 13;
                     x ^= x >> 7;
                     x ^= x << 17;
                     thread::sleep(Duration::from_micros(x % (idle * 1000)));
-                    assert_eq!(unsafe { nv_rm_sync_signal(b.0, gate, n) }, 0);
+                    assert_eq!(c::sync_signal(&b, gate, n), 0);
                     let start = Instant::now();
-                    let r = unsafe { nv_rm_wait(b.0, ctx, token, 100_000_000) };
+                    let r = c::wait(&b, ctx, token, 100_000_000);
                     worst.fetch_max(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     if r != 0 {
-                        let late = unsafe { nv_rm_wait(b.0, ctx, token, 2_000_000_000) } == 0;
+                        let late = c::wait(&b, ctx, token, 2_000_000_000) == 0;
                         if late {
                             // Slow under GPU contention, not stranded.
                             slow.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
-                        let next = submit(b.0, ctx, &[], &[], &[]);
-                        let after = unsafe { nv_rm_wait(b.0, ctx, token, 1_000_000_000) } == 0;
-                        let _ = unsafe { nv_rm_wait(b.0, ctx, next, 1_000_000_000) };
+                        let next = submit(&b, ctx, &[], &[], &[]);
+                        let after = c::wait(&b, ctx, token, 1_000_000_000) == 0;
+                        let _ = c::wait(&b, ctx, next, 1_000_000_000);
                         failures.lock().unwrap().push(format!(
                             "thread {t} batch {n}: acquire not re-polled within 100 ms of the CPU release; \
                              STRANDED: not retired within 2.1 s without doorbell (late={late}); after a doorbell: {after}"
@@ -1335,10 +1251,10 @@ fn cpu_released_acquire_runs_without_a_doorbell_after_idle() {
                         stop.store(true, Ordering::SeqCst);
                     }
                 }
-                let last = queue_ref(&unsafe { &*b.0 }.lock().0, ctx).unwrap().last_token();
-                assert_eq!(unsafe { nv_rm_wait(b.0, ctx, last, 10_000_000_000) }, 0);
-                assert_eq!(unsafe { nv_rm_sync_destroy(b.0, gate) }, 0);
-                assert_eq!(unsafe { nv_rm_context_destroy(b.0, ctx) }, 0);
+                let last = queue_ref(&b.lock().0, ctx).unwrap().last_token();
+                assert_eq!(c::wait(&b, ctx, last, 10_000_000_000), 0);
+                assert_eq!(c::sync_destroy(&b, gate), 0);
+                assert_eq!(c::context_destroy(&b, ctx), 0);
                 n
             })
         })

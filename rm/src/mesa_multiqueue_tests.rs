@@ -5,6 +5,7 @@
 //! Run alone (host NAK bridge built by native/compiler):
 //!   NV_NATIVE_COMPILER_PATH=.../libnv_native_nak.so cargo test --offline
 //!   --lib mesa::multiqueue_tests -- --ignored --test-threads=1 --nocapture
+use super::hardware_tests::test_ffi as c;
 use super::*;
 use crate::{compute::ComputeJob, gpu::GpuMapping, rm::Mapping};
 
@@ -33,11 +34,11 @@ fn open() -> Box<Bridge> {
     ];
     Box::new(Bridge::new(pci).unwrap().0)
 }
-fn context(b: &mut Bridge, engines: u32, share: Option<u64>) -> u64 {
+fn context(b: &Bridge, engines: u32, share: Option<u64>) -> u64 {
     let mut id = 0;
     let status = match share {
-        None => unsafe { nv_rm_context_create(b, engines, &mut id) },
-        Some(share) => unsafe { nv_rm_context_create_shared(b, 16, share, &mut id) },
+        None => c::context_create(b, engines, &mut id),
+        Some(share) => c::context_create_shared(b, 16, share, &mut id),
     };
     assert_eq!(status, 0);
     id
@@ -161,7 +162,7 @@ impl Work {
 
 /// Submit every (context, work) at once, wait for all; wall time from the
 /// first submission to the last completion. Results are checked afterwards.
-fn run(b: &mut Bridge, set: &mut [(u64, &mut Work)]) -> Duration {
+fn run(b: &Bridge, set: &mut [(u64, &mut Work)]) -> Duration {
     for (_, w) in set.iter_mut() {
         w.clear();
     }
@@ -169,19 +170,7 @@ fn run(b: &mut Bridge, set: &mut [(u64, &mut Work)]) -> Duration {
     let mut tokens = Vec::new();
     for (ctx, w) in set.iter() {
         let mut token = 0;
-        let status = unsafe {
-            nv_rm_submit_batch(
-                b,
-                *ctx,
-                &w.push,
-                1,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                &mut token,
-            )
-        };
+        let status = c::submit_batch(b, *ctx, std::slice::from_ref(&w.push), &[], &[], &mut token);
         assert_eq!(status, 0);
         tokens.push((*ctx, token));
     }
@@ -213,8 +202,8 @@ fn shared_tsg_contexts_run_concurrently() {
         .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
         .collect();
     let program = crate::compiler::compile(&words, c"main").unwrap();
-    let mut bridge = open();
-    let b = &mut *bridge;
+    let bridge = open();
+    let b: &Bridge = &bridge;
     // The owner is a graphics queue's context (copy + 3D + compute, ZCULL
     // bound), as for the stock graphics queue whose TSG the compute queue
     // joins; the other two are compute-only.
@@ -238,10 +227,7 @@ fn shared_tsg_contexts_run_concurrently() {
     // Non-compute engines on a shared context are refused with a reason,
     // and the refusal leaves the device usable.
     let mut refused = 0;
-    assert_ne!(
-        unsafe { nv_rm_context_create_shared(b, 4 | 16, owner, &mut refused) },
-        0
-    );
+    assert_ne!(c::context_create_shared(b, 4 | 16, owner, &mut refused), 0);
     assert!(!b.core.is_lost());
 
     // Calibrate the iteration count for TARGET on the owner context alone.
@@ -297,13 +283,13 @@ fn shared_tsg_contexts_run_concurrently() {
     // The owner goes first; its TSG, VEID 0 share and ZCULL buffer stay alive
     // for the shared context, which keeps working; VEID 0 is not handed out
     // again, the next context gets VEID 2.
-    assert_eq!(unsafe { nv_rm_context_destroy(b, owner) }, 0);
+    assert_eq!(c::context_destroy(b, owner), 0);
     run(b, &mut [(shared, &mut wb)]);
     let again = context(b, 16, Some(shared));
     assert_eq!(subcontext(b, again), (2, tsg_shared));
     run(b, &mut [(again, &mut wa), (shared, &mut wb)]);
     for ctx in [again, shared, separate] {
-        assert_eq!(unsafe { nv_rm_context_destroy(b, ctx) }, 0);
+        assert_eq!(c::context_destroy(b, ctx), 0);
     }
     assert!(!b.core.is_lost());
     drop((wa, wb, wc));
