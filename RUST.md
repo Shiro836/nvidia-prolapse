@@ -294,7 +294,8 @@ touches that contains `unsafe` (accessors, the FFI guard, slot and sync-memory a
 buffers; tests that need a real device are `#[cfg_attr(miri, ignore = "…")]`). A `forbid(unsafe_code)`
 crate cannot cause UB itself, so its full Miri run (all tests, incl. whole-stream decodes) is part of the
 weekly and pre-release checks and of any change that adds or bumps a dependency containing `unsafe`, not
-of every change. An empty per-change Miri line is correct only when the change touches no module with
+of every change. Miri runs through `cargo +nightly-… miri nextest run -j <cores>`: one interpreter per test
+instead of one for the whole suite. An empty per-change Miri line is correct only when the change touches no module with
 `unsafe`.
 
 ## Existing code
