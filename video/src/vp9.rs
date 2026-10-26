@@ -201,21 +201,24 @@ impl Vp9Decoder {
             p.ref_frame_sign_bias = h.sign_bias;
             let s = h.sign_bias;
             if s[2] != s[1] || s[3] != s[1] {
-                p.comp_fixed_ref = h.comp_fixed_ref as i8;
-                p.comp_var_ref = [h.comp_var_ref[0] as i8, h.comp_var_ref[1] as i8];
+                p.comp_fixed_ref = h.comp_fixed_ref.cast_signed();
+                p.comp_var_ref = [
+                    h.comp_var_ref[0].cast_signed(),
+                    h.comp_var_ref[1].cast_signed(),
+                ];
             }
         }
-        p.loop_filter_level = h.filter_level as i8;
-        p.loop_filter_sharpness = h.sharpness as i8;
+        p.loop_filter_level = h.filter_level.cast_signed();
+        p.loop_filter_sharpness = h.sharpness.cast_signed();
         p.qp_y_ac = h.base_q_idx;
         p.qp_y_dc = h.delta_q_y_dc;
         p.qp_ch_ac = h.delta_q_uv_ac;
         p.qp_ch_dc = h.delta_q_uv_dc;
         p.lossless = i8::from(h.lossless);
-        p.transform_mode = h.tx_mode as i8;
+        p.transform_mode = h.tx_mode.cast_signed();
         p.allow_high_precision_mv = i8::from(h.allow_high_precision_mv);
         p.mcomp_filter_type = engine_interp_filter(h);
-        p.comp_pred_mode = h.reference_mode as i8;
+        p.comp_pred_mode = h.reference_mode.cast_signed();
         p.log2_tile_columns = h.log2_tile_cols as i8;
         p.log2_tile_rows = h.log2_tile_rows as i8;
         let seg = &self.st.seg;
@@ -253,7 +256,7 @@ fn engine_interp_filter(h: &FrameHeader) -> i8 {
         return 0;
     }
     let f = h.interp_filter;
-    (if f < 2 { f ^ 1 } else { f }) as i8
+    (if f < 2 { f ^ 1 } else { f }).cast_signed()
 }
 
 /// stock `gptimer` (uncapped): max(mbs, 0x1fa4) * 10000.
@@ -588,7 +591,7 @@ mod tests {
         };
         for lit in 0..4u8 {
             h.interp_filter = crate::nvdec_vp9::LITERAL_TO_FILTER[usize::from(lit)];
-            assert_eq!(engine_interp_filter(&h), lit as i8, "literal {lit}");
+            assert_eq!(engine_interp_filter(&h), lit.cast_signed(), "literal {lit}");
         }
         h.interp_filter = crate::nvdec_vp9::SWITCHABLE;
         assert_eq!(engine_interp_filter(&h), 4);

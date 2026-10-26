@@ -7,7 +7,7 @@
 //! independently. Buffer offsets inside our own filter buffer and surface geometry are inputs
 //! ([`SessionInputs`]), never stock's numbers.
 use super::ps::{Pps, ScalingList, Sps, diag_scan};
-use crate::{VResult, bitstream, unsupported};
+use crate::{VResult, bitstream, fit, unsupported};
 
 /// Size of the descriptor area (struct + tail, zero padded).
 pub const DESC_SIZE: usize = 0x200;
@@ -243,8 +243,8 @@ pub fn build(
         "num_ref_idx_l1_default_active",
     )?;
     // init_qp = 26 + init_qp_minus26 + QpBdOffsetY (hevc10 capture: 38 for init_qp_minus26 0, 10-bit).
-    let init_qp = 26 + pps.init_qp_minus26 + 6 * (sps.bit_depth_luma as i32 - 8);
-    b.set(15, 7, init_qp as u32, "init_qp")?;
+    let init_qp = 26 + pps.init_qp_minus26 + 6 * (sps.bit_depth_luma.cast_signed() - 8);
+    b.set(15, 7, init_qp.cast_unsigned(), "init_qp")?;
     b.set(
         22,
         1,
@@ -265,10 +265,11 @@ pub fn build(
     )?;
     b.set(25, 2, pps.diff_cu_qp_delta_depth, "diff_cu_qp_delta_depth")?;
     put32(&mut d, 0x64, b.0);
-    d[0x68] = pps.cb_qp_offset as i8 as u8;
-    d[0x69] = pps.cr_qp_offset as i8 as u8;
-    d[0x6a] = pps.beta_offset_div2 as i8 as u8;
-    d[0x6b] = pps.tc_offset_div2 as i8 as u8;
+    // pps_cb/cr_qp_offset are in -12..=12, beta/tc_offset_div2 in -6..=6 (7.4.3.3): i8 bytes.
+    d[0x68] = fit::<i8, _>(pps.cb_qp_offset, "pps_cb_qp_offset")?.cast_unsigned();
+    d[0x69] = fit::<i8, _>(pps.cr_qp_offset, "pps_cr_qp_offset")?.cast_unsigned();
+    d[0x6a] = fit::<i8, _>(pps.beta_offset_div2, "pps_beta_offset_div2")?.cast_unsigned();
+    d[0x6b] = fit::<i8, _>(pps.tc_offset_div2, "pps_tc_offset_div2")?.cast_unsigned();
     let mut b = Bits(0);
     b.set(
         0,
@@ -359,7 +360,7 @@ pub fn build(
     d[0x74..0x84].copy_from_slice(&st.list0);
     d[0x84..0x94].copy_from_slice(&st.list1);
     for (i, v) in st.diff.iter().enumerate() {
-        put16(&mut d, 0x94 + 2 * i, *v as u16);
+        put16(&mut d, 0x94 + 2 * i, v.cast_unsigned());
     }
     d[0xb4] = u8::from(st.idr);
     d[0xb5] = u8::from(st.irap);
@@ -412,7 +413,7 @@ pub fn build(
         put32(
             &mut d,
             0x11c,
-            ((((sps.width as i32) * 2 + 0x7e) & 0x3ff80) + 0x13f) as u32 >> 8,
+            ((((sps.width.cast_signed()) * 2 + 0x7e) & 0x3ff80) + 0x13f) as u32 >> 8,
         );
         put16(&mut d, 0x120, 0xffff);
     }

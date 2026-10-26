@@ -257,7 +257,7 @@ impl Decoder {
         self.first_in_cvs = false;
         // 8.3.1 picture order count.
         let max_lsb = 1i32 << sps.log2_max_poc_lsb;
-        let lsb = h0.poc_lsb as i32;
+        let lsb = h0.poc_lsb.cast_signed();
         let msb = if irap && no_rasl_output {
             0
         } else {

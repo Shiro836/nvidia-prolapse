@@ -103,7 +103,7 @@ pub fn build(
     put32(&mut d, 0x98, lay.luma_bot_offset);
     put32(&mut d, 0xa4, lay.chroma_bot_offset);
     put32(&mut d, 0xac, lay.hist_size);
-    let s5 = |v: i32| (v as u32) & 0x1f;
+    let s5 = |v: i32| (v.cast_unsigned()) & 0x1f;
     let w = u32::from(mbaff_frame)
         | u32::from(sps.direct_8x8_inference) << 1
         | u32::from(pps.weighted_pred) << 2
@@ -115,7 +115,7 @@ pub fn build(
         | (sps.log2_max_frame_num_minus4 & 0xf) << 8
         | (sps.chroma_format_idc & 3) << 12
         | (sps.pic_order_cnt_type & 3) << 14
-        | ((pps.pic_init_qp_minus26 as u32) & 0x3f) << 16
+        | ((pps.pic_init_qp_minus26.cast_unsigned()) & 0x3f) << 16
         | s5(pps.chroma_qp_index_offset) << 22
         | s5(pps.second_chroma_qp_index_offset) << 27;
     put32(&mut d, 0xb0, w);
@@ -125,8 +125,8 @@ pub fn build(
         | (inp.frame_num & 0xffff) << 14
         | u32::from(ep.output_layout) << 31;
     put32(&mut d, 0xb4, w);
-    put32(&mut d, 0xb8, inp.poc[0] as u32);
-    put32(&mut d, 0xbc, inp.poc[1] as u32);
+    put32(&mut d, 0xb8, inp.poc[0].cast_unsigned());
+    put32(&mut d, 0xbc, inp.poc[1].cast_unsigned());
     // DPB entries: same 16-byte nvdec_dpb_entry_s encoding as the NEW_H264 setup at +0x40.
     let new = super::desc::build(inp, ep);
     d[0xc0..0x1c0].copy_from_slice(&new[0x40..0x140]);

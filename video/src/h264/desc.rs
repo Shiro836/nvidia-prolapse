@@ -139,8 +139,8 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
             w |= mark << 21;
         }
         put32(&mut d, o, w | layout_bit);
-        put32(&mut d, o + 4, e.poc[0] as u32);
-        put32(&mut d, o + 8, e.poc[1] as u32);
+        put32(&mut d, o + 4, e.poc[0].cast_unsigned());
+        put32(&mut d, o + 8, e.poc[1].cast_unsigned());
         put32(&mut d, o + 12, e.frame_idx);
     }
     for (k, l) in inp.lists.iter().enumerate() {
@@ -176,14 +176,14 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
             | (sps.chroma_format_idc & 3) << 28,
     );
     let b = |v: bool| u64::from(v);
-    let m = |v: i32, mask: u64| u64::from(v as u32) & mask;
-    let fl = m(sps.log2_max_frame_num_minus4 as i32, 0xf)
-        | m(sps.log2_max_poc_lsb_minus4 as i32, 0xf) << 4
-        | m(sps.pic_order_cnt_type as i32, 3) << 8
+    let m = |v: i32, mask: u64| u64::from(v.cast_unsigned()) & mask;
+    let fl = m(sps.log2_max_frame_num_minus4.cast_signed(), 0xf)
+        | m(sps.log2_max_poc_lsb_minus4.cast_signed(), 0xf) << 4
+        | m(sps.pic_order_cnt_type.cast_signed(), 3) << 8
         | b(sps.delta_pic_order_always_zero) << 10
-        | m(sps.max_num_ref_frames as i32, 0x1f) << 11
-        | m(pps.num_ref_idx_l0_default_active_minus1 as i32, 0x1f) << 16
-        | m(pps.num_ref_idx_l1_default_active_minus1 as i32, 0x1f) << 21
+        | m(sps.max_num_ref_frames.cast_signed(), 0x1f) << 11
+        | m(pps.num_ref_idx_l0_default_active_minus1.cast_signed(), 0x1f) << 16
+        | m(pps.num_ref_idx_l1_default_active_minus1.cast_signed(), 0x1f) << 21
         | m(pps.chroma_qp_index_offset, 0x1f) << 26
         | m(pps.second_chroma_qp_index_offset, 0x1f) << 31
         | m(pps.pic_init_qp_minus26, 0x7f) << 36
@@ -194,7 +194,7 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
         | b(pps.constrained_intra_pred) << 47
         | b(pps.entropy_coding_mode) << 48
         | b(pps.weighted_pred) << 49
-        | m(pps.weighted_bipred_idc as i32, 3) << 50
+        | m(pps.weighted_bipred_idc.cast_signed(), 3) << 50
         | b(sps.direct_8x8_inference) << 62
         | b(sps.frame_mbs_only) << 63;
     d[0x1de..0x1e6].copy_from_slice(&fl.to_le_bytes());
@@ -212,12 +212,12 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
         | u8::from(inp.ref_pic) << 3
         | u8::from(inp.intra_pic) << 4;
     if inp.field_pic {
-        let p = inp.poc[usize::from(inp.bottom_field)] as u32;
+        let p = inp.poc[usize::from(inp.bottom_field)].cast_unsigned();
         put32(&mut d, 0x1ec, p);
         put32(&mut d, 0x1f0, p);
     } else {
-        put32(&mut d, 0x1ec, inp.poc[0] as u32);
-        put32(&mut d, 0x1f0, inp.poc[1] as u32);
+        put32(&mut d, 0x1ec, inp.poc[0].cast_unsigned());
+        put32(&mut d, 0x1f0, inp.poc[1].cast_unsigned());
     }
     if ep.ext_fields {
         let w = (sps.pic_width_in_mbs & 0x3ff) << 4;

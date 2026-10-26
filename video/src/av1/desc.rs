@@ -260,19 +260,35 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
             u64::from(g.grain_scaling_minus_8) + 8,
         );
         put(p, f::FG_SEED, u64::from(g.grain_seed));
-        put(p, f::FG_CB_OFFSET, (i64::from(g.cb_offset) - 256) as u64);
-        put(p, f::FG_CR_OFFSET, (i64::from(g.cr_offset) - 256) as u64);
-        put(p, f::FG_CB_MULT, (i64::from(g.cb_mult) - 128) as u64);
+        put(
+            p,
+            f::FG_CB_OFFSET,
+            (i64::from(g.cb_offset) - 256).cast_unsigned(),
+        );
+        put(
+            p,
+            f::FG_CR_OFFSET,
+            (i64::from(g.cr_offset) - 256).cast_unsigned(),
+        );
+        put(
+            p,
+            f::FG_CB_MULT,
+            (i64::from(g.cb_mult) - 128).cast_unsigned(),
+        );
         put(
             p,
             f::FG_CB_LUMA_MULT,
-            (i64::from(g.cb_luma_mult) - 128) as u64,
+            (i64::from(g.cb_luma_mult) - 128).cast_unsigned(),
         );
-        put(p, f::FG_CR_MULT, (i64::from(g.cr_mult) - 128) as u64);
+        put(
+            p,
+            f::FG_CR_MULT,
+            (i64::from(g.cr_mult) - 128).cast_unsigned(),
+        );
         put(
             p,
             f::FG_CR_LUMA_MULT,
-            (i64::from(g.cr_luma_mult) - 128) as u64,
+            (i64::from(g.cr_luma_mult) - 128).cast_unsigned(),
         );
     }
     put(p, f::GPTIMER, gptimer(h.upscaled_width, h.frame_height));
@@ -365,20 +381,20 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
         let (luma_step, luma_x) = superres_step(h.frame_width, h.upscaled_width, 0);
         let (chroma_step, chroma_x) =
             superres_step(h.frame_width, h.upscaled_width, u32::from(s.subsampling_x));
-        put(p, f::LUMA_STEP, luma_step as u64);
-        put(p, f::CHROMA_STEP, chroma_step as u64);
-        put(p, f::LUMA_SUBPEL_X, luma_x as u64);
-        put(p, f::CHROMA_SUBPEL_X, chroma_x as u64);
+        put(p, f::LUMA_STEP, luma_step.cast_unsigned());
+        put(p, f::CHROMA_STEP, chroma_step.cast_unsigned());
+        put(p, f::LUMA_SUBPEL_X, luma_x.cast_unsigned());
+        put(p, f::CHROMA_SUBPEL_X, chroma_x.cast_unsigned());
     } else {
         put(p, f::LUMA_STEP, 14);
         put(p, f::CHROMA_STEP, 14);
     }
     put(p, f::BASE_Q, u64::from(h.base_q_idx));
-    put(p, f::DQ_Y_DC, u64::from(h.delta_q_y_dc as u8));
-    put(p, f::DQ_U_DC, u64::from(h.delta_q_u_dc as u8));
-    put(p, f::DQ_V_DC, u64::from(h.delta_q_v_dc as u8));
-    put(p, f::DQ_U_AC, u64::from(h.delta_q_u_ac as u8));
-    put(p, f::DQ_V_AC, u64::from(h.delta_q_v_ac as u8));
+    put(p, f::DQ_Y_DC, u64::from(h.delta_q_y_dc.cast_unsigned()));
+    put(p, f::DQ_U_DC, u64::from(h.delta_q_u_dc.cast_unsigned()));
+    put(p, f::DQ_V_DC, u64::from(h.delta_q_v_dc.cast_unsigned()));
+    put(p, f::DQ_U_AC, u64::from(h.delta_q_u_ac.cast_unsigned()));
+    put(p, f::DQ_V_AC, u64::from(h.delta_q_v_ac.cast_unsigned()));
     let (qy, qu, qv) = if h.using_qmatrix {
         (h.qm_y, h.qm_u, h.qm_v)
     } else {
@@ -422,7 +438,7 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
                 put(
                     p,
                     (f::SEG_DATA + 16 * (seg * 8 + feat), 16),
-                    u64::from(v as u16),
+                    u64::from(v.cast_unsigned()),
                 );
             }
             if h.feature_enabled[seg][0] && h.feature_data[seg][0] < 0 {
@@ -445,14 +461,14 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
             put(
                 p,
                 (f::LF_REF_DELTAS + 8 * k, 8),
-                u64::from(h.loop_filter_ref_deltas[k] as u8),
+                u64::from(h.loop_filter_ref_deltas[k].cast_unsigned()),
             );
         }
         for k in 0..2 {
             put(
                 p,
                 (f::LF_MODE_DELTAS + 8 * k, 8),
-                u64::from(h.loop_filter_mode_deltas[k] as u8),
+                u64::from(h.loop_filter_mode_deltas[k].cast_unsigned()),
             );
         }
     }
@@ -493,8 +509,10 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
         put(p, (base + 128, 1), u64::from(h.ref_frame_sign_bias[k]));
         put(p, (base + 129, 2), u64::from(h.gm_type[k + 1]));
         let off = get_relative_dist(i.seq, h.order_hint, r.order_hint);
-        put(p, (base + 144, 16), u64::from(off as i16 as u16));
-        put(p, (base + 160, 16), u64::from((-off) as i16 as u16));
+        // get_relative_dist is within -2^7..2^7 (order_hint_bits <= 8): fits the 16-bit fields.
+        let off = i16::try_from(off).expect("relative distance within -128..=127");
+        put(p, (base + 144, 16), u64::from(off.cast_unsigned()));
+        put(p, (base + 160, 16), u64::from((-off).cast_unsigned()));
     }
     for j in 0..3 {
         put(
@@ -507,12 +525,12 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
             put(
                 p,
                 (f::MFMV_OFFSET + 16 * (j * 7 + k), 16),
-                u64::from(i.mf.mfmv_offset[j][k] as u16),
+                u64::from(i.mf.mfmv_offset[j][k].cast_unsigned()),
             );
             put(
                 p,
                 (f::MFMV_SIDE + 8 * (j * 7 + k), 8),
-                u64::from(i.mf.mfmv_side[j][k] as u8),
+                u64::from(i.mf.mfmv_side[j][k].cast_unsigned()),
             );
         }
     }

@@ -1037,10 +1037,10 @@ impl Parser {
         let width = u64::from(sps.pic_width_in_luma_samples);
         let height = u64::from(sps.pic_height_in_luma_samples);
         ctx.col_mv_buffersize = fit(
-            (round_up(width, 64) * round_up(height, 64) / 16 / 256) as i64,
+            (round_up(width, 64) * round_up(height, 64) / 16 / 256).cast_signed(),
             "colMvBuffersize",
         )?;
-        let stride: u32 = fit(round_up(width, 64) as i64, "framestride")?;
+        let stride: u32 = fit(round_up(width, 64).cast_signed(), "framestride")?;
         ctx.framestride = [stride, stride];
         ctx.sw_hdr_skip_length = fit(
             (hdr.sw_skip_end - hdr.sw_skip_start) as i64,
@@ -1122,8 +1122,8 @@ impl Parser {
         desc.resize(TILE_SIZES_OFFSET, 0);
 
         let ctb = 1u64 << sps.log2_max_luma_coding_block_size;
-        let width_ctbs = width.div_ceil(ctb) as i64;
-        let height_ctbs = height.div_ceil(ctb) as i64;
+        let width_ctbs = width.div_ceil(ctb).cast_signed();
+        let height_ctbs = height.div_ceil(ctb).cast_signed();
         let mut push_tile = |c: i64, r: i64| -> Result<()> {
             desc.extend_from_slice(&fit::<u16>(c, "tile column width")?.to_le_bytes());
             desc.extend_from_slice(&fit::<u16>(r, "tile row height")?.to_le_bytes());
