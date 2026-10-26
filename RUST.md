@@ -22,6 +22,11 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
   instead of opening unsafe in the logic crate.
 - One crate per component (`nvkmd-rm`, `hal`, `gralloc`, `codec2`, …). Shared code goes into a shared
   crate, not copies.
+- This split is what makes the rest enforceable: `forbid(unsafe_code)` proves §3 for logic code, and only
+  logic crates can run under Miri. A crate that mixes the three roles gets none of that, so splitting it
+  comes before any other cleanup (see "Existing code").
+- No code behind a feature nothing ships enables. An experiment that is not on the way to shipping is
+  deleted, not kept behind a flag.
 
 ## 2. Unsafe
 
@@ -40,8 +45,10 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
 - No `static mut`. Globals are `OnceLock`/`LazyLock`/atomics, and only when the interface forces global
   state (a C entry point with no context argument).
 - `unsafe` added for speed needs a measurement in the commit message (before/after, idle GPU, workload).
-- Unsafe code is exercised by Miri (logic without real syscalls) and by host tests under AddressSanitizer
-  (FFI and syscall paths). A boundary module without such a test is not done.
+- Unsafe code is exercised by Miri (logic without real syscalls) and by host tests. A boundary module
+  without a host test that drives its unsafe paths is not done. AddressSanitizer runs over those host
+  tests are a CI job on the dated nightly, not a per-change gate: they need a rebuilt std and are only
+  conclusive with the C side instrumented too.
 
 ## 3. Memory the GPU or another process can see
 
@@ -50,6 +57,11 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
   mappings). That is UB regardless of what the hardware does. Wrap each mapping in an owning type
   (`Mapping`, `Userd`, …) whose accessors use `ptr::read_volatile`/`write_volatile` or atomics, check
   the offset against the mapping length, and take the offset as a typed value.
+- The rule is about *concurrent* writers. Memory that only this thread touches until a handoff (a push
+  buffer or QMD being built, a staging buffer before upload) is ordinary memory: build it through plain
+  slices, and make the handoff explicit in the type (a `Building` value that turns into a `Submitted` one,
+  or a method that takes `self`). After the handoff no reference into it exists. Per-word volatile stores
+  into write-combined memory are slower than a plain copy and are not what this rule asks for.
 - Memory ordering against the device is explicit: every fence (`atomic::fence`, `compiler_fence`, an
   arch store fence before a doorbell write to write-combined memory) carries a comment citing the
   contract it implements (public header/manual section, or the measured driver behaviour it matches).
@@ -75,7 +87,9 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
   for null; the matching `Box::from_raw` exists exactly once, in the destroy entry point.
 - `#[repr(C)]` types come from `bindgen`. Where Rust defines a type C also reads, compile-time asserts pin
   size, alignment and every field offset (`const _: () = assert!(…)`) against the C header values, and an
-  ABI test compiles the real header and compares.
+  ABI test compiles the real header and compares. Both run for every target that ships
+  (`x86_64-linux-android` and `i686-linux-android`), because `uintptr_t`/`usize` fields change the layout
+  between them; a layout checked on one target is unchecked.
 - Strings from C are `&CStr`; never assume UTF-8, never `from_utf8_unchecked`.
 - C++ interfaces (Codec2, HIDL mapper) go through `cxx`. The C++ side is the minimum the interface
   forces: no logic, no ownership decisions, no error policy.
@@ -106,20 +120,33 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
 - No lossy `as`. Widening uses `From`/`u64::from`; narrowing uses `try_from` and handles the error.
   Enforced by `as_conversions` and the cast lints; a remaining `as` needs `#[expect(…, reason = …)]`
   saying why it cannot lose information or why truncation is the specified behaviour.
+- Conversions that are lossless on every shipped target but have no `From` impl (`u32 -> usize`,
+  `usize -> u64`) live once, in a shared `conv` module: one named function each, a compile-time assert on
+  the pointer width it relies on, and the one `#[expect(clippy::as_conversions)]` for the whole workspace.
+  Call sites use those functions; they never carry their own `#[expect]` for a cast.
 - Sizes, offsets, counts and addresses that come from outside use `checked_*` and return an error on
   overflow. `wrapping_*` only where the hardware or protocol wraps (fence counters, ring indices), with
   a comment saying so.
 - `overflow-checks = true` in every profile, release included: a silent wrap in a size computation is a
-  memory-safety bug in the GPU's address space even when Rust's own memory stays safe.
+  memory-safety bug in the GPU's address space even when Rust's own memory stays safe. The release setting
+  is kept on a measurement, not on principle: CPU time per frame on the shipped workloads, idle GPU, with
+  and without the checks, recorded in the commit that keeps or drops it and re-measured when a hot path
+  changes shape. If it costs more than noise, the checks stay in the dev and test profiles and the
+  release build keeps explicit `checked_*` on every size and offset computation instead.
 - Indices derived from external input use `.get()` and return an error. Indexing with `[]` is for
   indices the code itself proved in range.
 
 ## 7. Errors, panics, logging
 
-- Libraries return `Result<T, Error>` with one error enum per crate (`thiserror` derive). Each variant
-  names the operation and carries its context (ioctl, class, handle, raw status, size). Where the user
-  can fix it (missing device node, driver version mismatch, unsupported GPU), the message names the
-  remedy. No `anyhow`/`Box<dyn Error>` in library APIs; fine in test and tool binaries.
+- Libraries return `Result<T, Error>` (`thiserror` derive). One error enum per module or subsystem
+  (channel, memory, sync, each codec), with `From` conversions upward, and one error type at the crate's
+  public API that wraps them; not one crate-wide enum with hundreds of variants. Each variant names the
+  operation and carries its context (ioctl, class, handle, raw status, size). Where the user can fix it
+  (missing device node, driver version mismatch, unsupported GPU), the message names the remedy. No
+  `anyhow`/`Box<dyn Error>` in library APIs; fine in test and tool binaries.
+- Every wait on the GPU, the kernel or another process is bounded: a timeout, or a comment saying why it
+  cannot be (a Vulkan `UINT64_MAX` wait the app asked for). A wait that runs out returns a named error
+  with the object and the elapsed time; it never spins on, and never retries silently.
 - **No silent fallbacks.** No `unwrap_or_default()`, `.ok()`, `let _ =` or `if let Ok` that throws away a
   failure the caller should know about. If degrading is intended, it is an explicit, logged decision in
   one place with the reason.
@@ -139,7 +166,8 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
   `into_inner()`-and-continue.
 - Every atomic `Ordering` has a comment saying what it synchronises with. `Relaxed` only for counters
   and statistics that order nothing.
-- Lock-free structures and custom synchronisation get `loom` tests.
+- Where a lock-free structure or hand-written synchronisation exists (a slot ring, a Dekker-style
+  waiter), it gets `loom` tests. Code that only uses `Mutex` and channels does not need them.
 - Races are fixed by construction. A fix that only makes a window smaller (sleep, retry, poll loop) is not
   a fix.
 
@@ -166,6 +194,10 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
   model. Every public item has a doc comment. Comments explain *why* and cite public sources (Mesa
   file:line, open-gpu-kernel-modules, NVIDIA class headers, Android source); they do not narrate history
   or describe what the next line does.
+- Public means reachable from outside the crate. A cdylib exposes its C entry points and little else, so
+  `unreachable_pub` is fixed by making items `pub(crate)`, not by documenting them. A doc comment that
+  only restates the name ("Returns the size") is worse than the lint; write what the item owns, what it
+  assumes, or what it cites, or leave the lint firing until there is something to say.
 - Names follow the Rust API guidelines. Short functions are a consequence of clear structure, not a
   line-count rule; split when a function mixes levels (validation, encoding, submission).
 - Macros only for tables and repetitive declarations, never to hide control flow or unsafe.
@@ -195,10 +227,51 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
   layouts, returned values). Improvements and bug fixes go into separate later commits, each with its
   own test and stated reason. A C bug found while porting is reported and fixed in its own commit, not
   silently carried over or silently fixed.
+- **Identical bytes are not the whole gate.** The port's CPU time on the component's hot paths (per
+  submit, per frame, per decoded frame) is measured against the C version on an idle GPU and is not
+  worse. Safety that costs time (an extra copy, a per-element check in a loop the C did once) is moved
+  to the boundary or hoisted, not accepted as the price of Rust.
 - Until the Rust version passes the component's gate, both builds stay selectable at build time so A/B
   is one switch. When it passes, the C code is deleted in the same series. No dead copies.
 - Port module by module with the boundary tests first: a port whose FFI shim has no ABI test is not
   started correctly.
+
+## 13. Process model: a library inside someone else's process
+
+The driver is loaded by `dlopen` into app processes, the compositor and HAL services, some of them
+forked from a zygote that may have loaded it first. The library does not own the process.
+
+- Every file descriptor the library opens (`/dev/nvidia*`, dma-bufs, sync files, eventfds) is
+  `O_CLOEXEC`, and descriptors handed to another process are duplicated for it explicitly. A descriptor
+  that leaks across `exec` into an app is a bug.
+- Nothing assumes a thread the library started is still running. After `fork` only the calling thread
+  exists: per-process state (device handle, reactor/watcher threads, mapping caches) records the pid
+  that created it, and a call from a different pid re-initialises it or fails with a named error. It
+  never uses the parent's channels, mappings or threads.
+- No work at load time beyond what the ABI requires (no constructors, no threads started by `dlopen`).
+  State is created on the first call that needs it and is torn down by the destroy entry point. Unload
+  behaviour is explicit: the library either supports `dlclose` (every thread joined, every mapping and fd
+  released, no thread-local destructors left behind) or is linked `RTLD_NODELETE`-safe and says so.
+- Global state is one `OnceLock`/`LazyLock` per concern, only where the C interface has no context
+  argument (§2). Anything per device, per queue or per decoder hangs off the handle the caller holds.
+- Signals, `setuid` and the app's own threads are not ours: the library never installs signal handlers,
+  never changes process-wide state (umask, cwd, environment, locale, `SIGPIPE`), and never blocks in a
+  way that depends on another of the app's threads making progress.
+
+## 14. Hot paths
+
+Performance against NVIDIA's own driver is the project's measure. The hot paths are command recording,
+submit, fence signal/wait, memory map/unmap and the per-frame decoder path. On them:
+
+- No heap allocation per call: buffers, descriptors and bookkeeping are preallocated or pooled and sized
+  from the measured workload, not grown per submit.
+- No lock held across a syscall or a wait; no lock shared between unrelated queues. Contention on a
+  per-device lock is measured before it is accepted.
+- No syscall that is not the one the operation is (no `getpid`/`gettid`/`clock_gettime` per call for
+  bookkeeping; cache them where the process model (§13) allows).
+- No logging, formatting or string building unless the error path is taken (§7).
+- Changes to these paths carry their measurement in the commit (idle GPU, named workload, before and
+  after), the same way an `unsafe` added for speed does (§2).
 
 ## Gate (every change)
 
@@ -210,7 +283,9 @@ cargo deny check
 cargo +nightly-2026-10-24 miri test -p <crates without syscalls>
 ```
 
-plus the component's own checks (ABI/symbol tests, fuzz smoke, differential tests for ports).
+plus the component's own checks (ABI/symbol tests on both Android targets, fuzz smoke, differential and
+hot-path timing tests for ports). The Miri line is empty until a workspace has `forbid(unsafe_code)`
+logic crates; an empty Miri line means §1 is not done, not that the gate passed.
 
 ## Existing code
 
@@ -223,5 +298,17 @@ for new code, and gets no exemption for being old. When such a crate joins the w
   lint stops firing, so a cleanup has to delete the entry.
 - A change that touches an item brings that item up to the standard. Dedicated cleanup passes shrink the
   ledger lint by lint.
-- Unsafe in such a crate gets its SAFETY comments and one-operation blocks before anything else, because
-  those are the soundness arguments the rest of the review depends on.
+- Cleanup runs in this order, each step behaviour-identical (same exported symbols, same ioctl and
+  push-buffer captures on the component's tests):
+  1. **Split into the §1 layout as a pure move**: pure parsers and encoders into `forbid(unsafe_code)`
+     logic crates, raw bindings into a `-sys` crate, the rest stays the boundary crate. No code changes
+     in the move. This is first because it decides which `unsafe` the next step documents and which it
+     deletes, and it is what puts crates on the Miri line.
+  2. **Soundness in the boundary crate**: SAFETY comments and one-operation blocks (the arguments the
+     rest of the review depends on), references into GPU-visible memory replaced by the owning mapping
+     type's accessors, the FFI guard on every entry point, process-model rules (§13).
+  3. **Errors and integers**: `unwrap`/`expect`, swallowed results and lossy casts become errors and
+     `conv` calls; waits become bounded.
+  4. **Surface and docs**: `pub` shrinks to what is reachable, then module and item docs for what is left;
+     cross-cutting newtypes and error enums.
+  Dead experiments and their dependencies are deleted in step 1, not carried through the ledger.

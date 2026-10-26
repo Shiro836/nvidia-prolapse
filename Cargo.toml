@@ -71,7 +71,8 @@ overflow-checks = true
 [profile.release]
 # The FFI panic guard needs unwinding (RUST.md §4).
 panic = "unwind"
-# A silent wrap in a size computation is a GPU address-space bug (RUST.md §6).
+# A silent wrap in a size computation is a GPU address-space bug (RUST.md §6). Kept on
+# measurement: CPU time per frame with and without, idle GPU; see §6 for the alternative.
 overflow-checks = true
 debug = 1
 lto = "thin"

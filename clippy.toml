@@ -6,6 +6,7 @@ allow-panic-in-tests = true
 allow-print-in-tests = true
 allow-dbg-in-tests = true
 allow-indexing-slicing-in-tests = true
-# SAFETY comments must sit directly on the block they justify.
-accept-comment-above-statement = false
-accept-comment-above-attributes = false
+# A SAFETY comment may sit on the statement (or above its attributes) that holds
+# the unsafe block; this is the common convention and the one rustfmt keeps readable.
+accept-comment-above-statement = true
+accept-comment-above-attributes = true
