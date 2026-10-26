@@ -63,11 +63,19 @@ pub fn parse_unit(codec: u32, unit: &[u8]) -> VResult<HdrStaticMetadata> {
     match codec {
         CODEC_H264 | CODEC_HEVC => {
             for nal in annexb_nals(unit) {
-                let (is_sei, escaped) = if codec == CODEC_HEVC {
-                    let t = (nal[0] >> 1) & 0x3f;
-                    (nal.len() > 2 && (t == 39 || t == 40), &nal[2..])
+                // SEI payload after the NAL unit header (H.264 7.3.1: 1 byte, H.265 7.3.1.2: 2 bytes);
+                // a NAL without payload carries no SEI.
+                let Some(&first) = nal.first() else {
+                    continue;
+                };
+                let (is_sei, header_len) = if codec == CODEC_HEVC {
+                    let t = (first >> 1) & 0x3f;
+                    (t == 39 || t == 40, 2)
                 } else {
-                    (nal.len() > 1 && nal[0] & 0x1f == 6, &nal[1..])
+                    (first & 0x1f == 6, 1)
+                };
+                let Some(escaped) = nal.get(header_len..).filter(|p| !p.is_empty()) else {
+                    continue;
                 };
                 if !is_sei {
                     continue;

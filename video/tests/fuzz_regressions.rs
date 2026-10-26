@@ -26,3 +26,11 @@ fn hevc_nal_shorter_than_its_header() {
         "hevc_headers-slice_without_nal_header",
     );
 }
+
+/// H.264/HEVC NALs without an SEI payload (shorter than or equal to the NAL unit header, or empty
+/// between two start codes): the HDR scan sliced past the header before checking the length.
+#[test]
+fn hdr_nal_without_payload() {
+    replay(drivers::hdr_metadata, "hdr_metadata-nal_without_payload");
+    replay(drivers::hdr_metadata, "hdr_metadata-empty_nal");
+}
