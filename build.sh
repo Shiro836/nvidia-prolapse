@@ -7,6 +7,16 @@
 #   ./build.sh                  everything
 #   ANDROID_IMAGES=<dir>        system.img/vendor.img to read link stubs from (default: android/provision.sh's choice)
 #   JOBS=<n>                    ninja -j (default: CPU count)
+#
+# Host requirements (not provisioned; install them from the distribution):
+#   programs   git python3 make cc c++ meson ninja pkg-config rustup (cargo; rust-toolchain.toml selects
+#              the pinned toolchain and Android targets) debugfs (e2fsprogs) readelf nm (binutils) unzip
+#              bison flex glslangValidator llvm-config
+#   libraries  for the host NVK build: LLVM + clang (libclang-cpp), SPIRV-LLVM-Translator, SPIRV-Tools,
+#              libdrm, libelf, zlib, zstd, expat, libudev, libdisplay-info (meson names any
+#              missing one)
+#   python     mako, packaging, PyYAML (Mesa's meson checks them)
+#   tests      spirv-val (tests/vulkan/build.py), strace (tests/vulkan/capture.py)
 set -euo pipefail
 REPO=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 cd "$REPO"
@@ -14,6 +24,10 @@ PY=${PYTHON:-python3}
 JOBS=${JOBS:-$(nproc)}
 say() { printf '\n== %s\n' "$*"; }
 die() { echo "build: $*" >&2; exit 1; }
+for tool in git "$PY" make cc c++ meson ninja pkg-config rustup cargo debugfs readelf nm unzip bison flex \
+        glslangValidator llvm-config; do
+    command -v "$tool" >/dev/null || die "host program $tool is missing (see the host requirements at the top of build.sh)"
+done
 
 say "Android inputs (NDK r29, AOSP headers, image link stubs)"
 android/provision.sh
