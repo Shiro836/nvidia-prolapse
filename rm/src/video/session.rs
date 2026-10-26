@@ -28,7 +28,6 @@ use crate::{
 };
 use std::{
     collections::{HashMap, VecDeque},
-    mem::ManuallyDrop,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     rc::Rc,
     sync::Arc,
@@ -137,12 +136,13 @@ type Import = (Rc<Memory>, GpuMapping);
 /// Teardown order is explicit (Drop): the channel first, then the slot pool,
 /// then its page (memory reference, CPU mapping, GPU mapping), then the RM
 /// event source, then the command buffers and pending imports.
+/// The Option fields are Some from `new` until Drop takes them.
 struct CopyEngine {
-    queue: ManuallyDrop<Queue>,
+    queue: Option<Queue>,
     copy_class: u32,
-    pool: ManuallyDrop<Arc<SlotPool>>,
-    page: ManuallyDrop<(Rc<Memory>, Mapping, GpuMapping)>,
-    events: ManuallyDrop<RmEvents>,
+    pool: Option<Arc<SlotPool>>,
+    page: Option<(Rc<Memory>, Mapping, GpuMapping)>,
+    events: Option<RmEvents>,
     commands: Vec<(VramBuffer, u64)>,
     /// Imported targets kept alive until their copy retired.
     pending: VecDeque<(u64, Vec<Import>)>,
@@ -150,20 +150,26 @@ struct CopyEngine {
 
 impl Drop for CopyEngine {
     fn drop(&mut self) {
-        // SAFETY: each ManuallyDrop field is dropped exactly once, here, and
-        // nothing uses it afterwards (this is the owner's destructor).
-        unsafe { ManuallyDrop::drop(&mut self.queue) };
-        // SAFETY: as above.
-        unsafe { ManuallyDrop::drop(&mut self.pool) };
-        // SAFETY: as above.
-        unsafe { ManuallyDrop::drop(&mut self.page) };
-        // SAFETY: as above.
-        unsafe { ManuallyDrop::drop(&mut self.events) };
+        drop(self.queue.take());
+        drop(self.pool.take());
+        drop(self.page.take());
+        drop(self.events.take());
         // `commands` and `pending` drop after this body, in that order.
     }
 }
 
 impl CopyEngine {
+    /// The copy channel (Some until Drop).
+    fn queue(&self) -> &Queue {
+        self.queue
+            .as_ref()
+            .expect("CopyEngine::queue is Some until Drop")
+    }
+    fn queue_mut(&mut self) -> &mut Queue {
+        self.queue
+            .as_mut()
+            .expect("CopyEngine::queue is Some until Drop")
+    }
     fn new(device: &Rc<Device>, space: &AddressSpace) -> VResult<Self> {
         let caps = crate::capabilities::query(device)?;
         let view = if crate::gpu::modern_host(caps.channel)? {
@@ -185,17 +191,17 @@ impl CopyEngine {
         let events = RmEvents::new(device)?;
         let queue = Queue::new_with_events(device, space, 1, &events, &pool, retire)?;
         Ok(Self {
-            queue: ManuallyDrop::new(queue),
+            queue: Some(queue),
             copy_class: caps.copy,
-            pool: ManuallyDrop::new(pool),
-            page: ManuallyDrop::new((page_mem, page_cpu, page_gpu)),
-            events: ManuallyDrop::new(events),
+            pool: Some(pool),
+            page: Some((page_mem, page_cpu, page_gpu)),
+            events: Some(events),
             commands: Vec::new(),
             pending: VecDeque::new(),
         })
     }
     fn retired(&self, token: u64) -> VResult<bool> {
-        Ok(token == 0 || self.queue.shared().retired(token)?)
+        Ok(token == 0 || self.queue().shared().retired(token)?)
     }
     fn reap(&mut self) -> VResult<()> {
         while let Some((t, _)) = self.pending.front() {
@@ -649,7 +655,7 @@ impl Session {
         if self.surface_copy[current] != 0 && !self.copy.retired(self.surface_copy[current])? {
             // SAFETY: the session's own DRM file, open while `self` lives.
             let fd = unsafe {
-                self.copy.queue.context_fence(
+                self.copy.queue().context_fence(
                     std::os::fd::AsRawFd::as_raw_fd(&self.drm),
                     self.surface_copy[current],
                 )
@@ -972,7 +978,7 @@ impl Session {
         }
         // Command buffer: reuse one whose copy retired.
         let ci = match self.copy.commands.iter().position(|(_, tok)| {
-            *tok == 0 || self.copy.queue.shared().retired(*tok).unwrap_or(false)
+            *tok == 0 || self.copy.queue().shared().retired(*tok).unwrap_or(false)
         }) {
             Some(i) => i,
             None => {
@@ -1004,11 +1010,14 @@ impl Session {
                 self.nvdec.wait(&self.drm, decoded_at)?;
             }
         }
-        let token = match self
-            .copy
-            .queue
-            .submit(&[push], &self.space, &waits, &[], &[], |_| Ok(()))?
-        {
+        let token = match self.copy.queue_mut().submit(
+            &[push],
+            &self.space,
+            &waits,
+            &[],
+            &[],
+            |_| Ok(()),
+        )? {
             SubmitStatus::Submitted(t) => t,
             SubmitStatus::Full(_) => {
                 return Err(VideoError::Again("copy queue full".into()));
@@ -1023,7 +1032,7 @@ impl Session {
         // SAFETY: the session's own DRM file, open while `self` lives.
         let fd = unsafe {
             self.copy
-                .queue
+                .queue()
                 .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), token)
         }?;
         Ok(Some(fd))
@@ -1041,12 +1050,12 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Let in-flight work finish before memory goes away (bounded).
         let _ = self.nvdec.wait(&self.drm, self.nvdec.submitted);
-        let last = self.copy.queue.last_token();
+        let last = self.copy.queue().last_token();
         if last != 0 {
             // SAFETY: the session's own DRM file, open while `self` lives.
             let fence = unsafe {
                 self.copy
-                    .queue
+                    .queue()
                     .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), last)
             };
             if let Ok(fd) = fence {
