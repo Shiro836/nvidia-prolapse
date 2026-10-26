@@ -406,3 +406,101 @@ fn ring_full_leaves_payloads_untouched() {
         "PASS: ring full after {accepted_count} gated batches, NOT_READY transactional, all signals completed"
     );
 }
+
+unsafe extern "C" {
+    fn fork() -> i32;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn kill(pid: i32, signal: i32) -> i32;
+    fn _exit(status: i32) -> !;
+}
+/// Runs `child` in a forked child, which exits with its return value, and
+/// returns that exit code; `None` if the child did not exit normally within
+/// `timeout` (it is then killed).
+fn in_forked_child(child: impl FnOnce() -> i32, timeout: Duration) -> Option<i32> {
+    // SAFETY: fork has no memory-safety precondition. The child runs only
+    // `child` and then _exit: it never unwinds or returns into the test
+    // harness and runs no destructors of the parent's state.
+    let pid = unsafe { fork() };
+    assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+    if pid == 0 {
+        let code = child();
+        // SAFETY: async-signal-safe process exit; nothing runs after it.
+        unsafe { _exit(code) };
+    }
+    let start = Instant::now();
+    let mut status = 0;
+    loop {
+        // SAFETY: waits for our own child; `status` is a live local.
+        // WNOHANG (1): the wait is bounded by `timeout`.
+        let got = unsafe { waitpid(pid, &mut status, 1) };
+        if got == pid {
+            break;
+        }
+        assert!(got == 0, "waitpid: {}", std::io::Error::last_os_error());
+        if start.elapsed() > timeout {
+            // SAFETY: signals our own child (SIGKILL), then reaps it.
+            unsafe { kill(pid, 9) };
+            // SAFETY: as above; blocking reap of the killed child.
+            unsafe { waitpid(pid, &mut status, 0) };
+            return None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    // WIFEXITED: the low 7 bits (terminating signal) are zero; WEXITSTATUS:
+    // bits 8..15 (sys/wait.h).
+    (status.trailing_zeros() >= 7).then_some((status >> 8) & 0xff)
+}
+
+/// A device inherited across fork fails in the child instead of acting on
+/// the parent's RM objects (rm/src/process.rs): a submit returns
+/// VK_ERROR_DEVICE_LOST (-4), nv_rm_is_lost reads 1, and close keeps every
+/// object and descriptor. The parent's device is untouched.
+#[test]
+#[ignore = "local NVIDIA GPU: device inherited across fork fails in the child, parent keeps working"]
+fn forked_child_cannot_use_or_tear_down_the_parents_device() {
+    let before = fd_count();
+    let (status, opened) = c::OpenedBridge::open(selected_pci());
+    assert_eq!(status, 0);
+    let opened = opened.expect("nv_rm_open returned a device");
+    let ctx = context(opened.bridge());
+    let mut token = 0;
+    assert_eq!(c::submit(opened.bridge(), ctx, &[], &mut token), 0);
+    assert_eq!(c::wait(opened.bridge(), ctx, token, 10_000_000_000), 0);
+    let code = in_forked_child(
+        || {
+            // SAFETY: this is the forked child, which ends in _exit and never
+            // returns into the code holding `opened`.
+            let child = unsafe { opened.alias_in_forked_child() };
+            let fds = fd_count();
+            let mut t = 0;
+            let mut failed = 0;
+            if c::submit(child.bridge(), ctx, &[], &mut t) != -4 {
+                failed |= 1;
+            }
+            if c::is_lost(child.bridge()) != 1 {
+                failed |= 2;
+            }
+            child.close();
+            if fd_count() != fds {
+                failed |= 4;
+            }
+            failed
+        },
+        Duration::from_secs(10),
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "child: 1 = submit not -4, 2 = is_lost not 1, 4 = close released descriptors"
+    );
+    assert_eq!(c::is_lost(opened.bridge()), 0);
+    let mut token = 0;
+    assert_eq!(c::submit(opened.bridge(), ctx, &[], &mut token), 0);
+    assert_eq!(c::wait(opened.bridge(), ctx, token, 10_000_000_000), 0);
+    assert_eq!(c::context_destroy(opened.bridge(), ctx), 0);
+    opened.close();
+    assert_eq!(fd_count(), before, "fd leak");
+    println!(
+        "PASS: forked child got -4, read lost, close kept its descriptors; parent submits after the child exited"
+    );
+}

@@ -120,6 +120,51 @@ pub(in crate::mesa) fn context_destroy(b: &Bridge, ctx: u64) -> i32 {
     // SAFETY: live bridge; context ids are map keys.
     unsafe { nv_rm_context_destroy(raw(b), ctx) }
 }
+/// A device made by `nv_rm_open` (the path Mesa takes), given back only by
+/// [`OpenedBridge::close`]. Not Send: one thread opens, uses and closes it.
+pub(in crate::mesa) struct OpenedBridge {
+    raw: ptr::NonNull<Bridge>,
+}
+impl OpenedBridge {
+    /// The C status and, on success, the device.
+    pub(in crate::mesa) fn open(pci: [u32; 4]) -> (i32, Option<Self>) {
+        let mut raw = ptr::null_mut();
+        let mut info = std::mem::MaybeUninit::<Info>::uninit();
+        // SAFETY: both outputs are exclusive and writable for the call; the
+        // call writes `info` only on success, and it is never read here.
+        let status =
+            unsafe { nv_rm_open(pci[0], pci[1], pci[2], pci[3], &mut raw, info.as_mut_ptr()) };
+        let opened = (status == 0)
+            .then(|| ptr::NonNull::new(raw))
+            .flatten()
+            .map(|raw| Self { raw });
+        (status, opened)
+    }
+    pub(in crate::mesa) fn bridge(&self) -> &Bridge {
+        // SAFETY: `raw` is the Box nv_rm_open made; only `close` (which
+        // consumes self) gives it back, so it is live for the borrow, and the
+        // entry points only ever form shared references to it.
+        unsafe { self.raw.as_ref() }
+    }
+    /// A second owner of the same device, for the child side of a `fork`.
+    ///
+    /// # Safety
+    /// Call only in a forked child that never returns into the code holding
+    /// `self` (it ends in `_exit`): the child's copy of the address space then
+    /// has exactly one owner, the returned value.
+    pub(in crate::mesa) unsafe fn alias_in_forked_child(&self) -> Self {
+        Self { raw: self.raw }
+    }
+    pub(in crate::mesa) fn close(self) {
+        // SAFETY: `raw` came from nv_rm_open and is given back exactly once
+        // (self is consumed); no borrow from `bridge()` outlives self.
+        unsafe { nv_rm_close(self.raw.as_ptr()) };
+    }
+}
+pub(in crate::mesa) fn is_lost(b: &Bridge) -> i32 {
+    // SAFETY: live bridge; no other argument.
+    unsafe { nv_rm_is_lost(ptr::from_ref(b)) }
+}
 pub(in crate::mesa) fn check_status(b: &Bridge) -> i32 {
     // SAFETY: live bridge; no other argument.
     unsafe { nv_rm_check_status(raw(b)) }
