@@ -71,7 +71,8 @@ impl VideoError {
             | Self::Av1(
                 crate::av1::obu::Av1Error::Truncated(_)
                 | crate::av1::obu::Av1Error::Invalid(_)
-                | crate::av1::obu::Av1Error::NoSequenceHeader,
+                | crate::av1::obu::Av1Error::NoSequenceHeader
+                | crate::av1::obu::Av1Error::Range(_),
             ) => -3,
             Self::NoMemory(_) => -4,
             Self::DeviceLost(_) => -5,

@@ -31,7 +31,7 @@ pub mod slice;
 #[cfg(test)]
 mod tests;
 
-use super::{VResult, bits, bitstream, unsupported};
+use super::{VResult, bits, bitstream, fit, unsupported};
 use desc::{DescInput, DescRef, EngineParams};
 use ps::{Pps, Sps};
 use slice::{Mmco, SliceHeader, SliceType};
@@ -85,12 +85,19 @@ struct RefPic {
     poc: [i32; 2],
     non_existing: bool,
 }
+/// A syntax value of at most 2^16 as `i32`: frame_num and pic_order_cnt_lsb are read with
+/// u(log2_max_frame_num) / u(log2_max_pic_order_cnt_lsb) bits and MaxFrameNum is
+/// 2^log2_max_frame_num, with both log2 values at most 16 (7.4.2.1.1, enforced by `parse_sps`).
+fn syntax_i32(v: u32) -> i32 {
+    i32::try_from(v).expect("frame_num, pic_order_cnt_lsb and MaxFrameNum are <= 2^16")
+}
+
 impl RefPic {
     fn frame_num_wrap(&self, cur_frame_num: u32, max: u32) -> i32 {
         if self.frame_num > cur_frame_num {
-            self.frame_num as i32 - max as i32
+            syntax_i32(self.frame_num) - syntax_i32(max)
         } else {
-            self.frame_num as i32
+            syntax_i32(self.frame_num)
         }
     }
     fn frame_poc(&self) -> i32 {
@@ -266,7 +273,8 @@ impl Decoder {
                         return unsupported("more than one H.264 picture in one access unit");
                     }
                     p.intra &= intra;
-                    p.slice_offsets.push(p.bitstream.len() as u32);
+                    p.slice_offsets
+                        .push(fit(p.bitstream.len(), "slice offset")?);
                     p.bitstream.extend_from_slice(&[0, 0, 1]);
                     p.bitstream.extend_from_slice(n.nal);
                 }
@@ -277,7 +285,7 @@ impl Decoder {
 
     /// 8.2.1: TopFieldOrderCnt / BottomFieldOrderCnt of a frame (unbiased) and PicOrderCntMsb.
     fn compute_poc(&self, h: &SliceHeader, sps: &Sps) -> ([i32; 2], i32) {
-        let max_frame_num = sps.max_frame_num() as i32;
+        let max_frame_num = syntax_i32(sps.max_frame_num());
         let st = &self.poc;
         match sps.pic_order_cnt_type {
             0 => {
@@ -287,7 +295,7 @@ impl Decoder {
                     (st.prev_msb, st.prev_lsb)
                 };
                 let max_lsb = 1i32 << (sps.log2_max_poc_lsb_minus4 + 4);
-                let lsb = h.pic_order_cnt_lsb as i32;
+                let lsb = syntax_i32(h.pic_order_cnt_lsb);
                 let msb = if lsb < prev_lsb && prev_lsb - lsb >= max_lsb / 2 {
                     prev_msb + max_lsb
                 } else if lsb > prev_lsb && lsb - prev_lsb > max_lsb / 2 {
@@ -300,9 +308,11 @@ impl Decoder {
             }
             1 => {
                 let fno = self.frame_num_offset(h, max_frame_num);
-                let cycle = sps.offset_for_ref_frame.len() as i32;
+                // num_ref_frames_in_pic_order_cnt_cycle <= 255 (parse_sps).
+                let cycle = i32::try_from(sps.offset_for_ref_frame.len())
+                    .expect("num_ref_frames_in_pic_order_cnt_cycle <= 255");
                 let mut abs = if cycle != 0 {
-                    fno + h.frame_num as i32
+                    fno + syntax_i32(h.frame_num)
                 } else {
                     0
                 };
@@ -314,10 +324,10 @@ impl Decoder {
                     let delta: i32 = sps.offset_for_ref_frame.iter().sum();
                     let cnt = (abs - 1) / cycle;
                     let in_cycle = (abs - 1) % cycle;
-                    expected = cnt * delta
-                        + sps.offset_for_ref_frame[..=in_cycle as usize]
-                            .iter()
-                            .sum::<i32>();
+                    // abs >= 1 and cycle >= 1 here, so in_cycle is in 0..cycle.
+                    let in_cycle = usize::try_from(in_cycle).expect("(abs - 1) % cycle >= 0");
+                    expected =
+                        cnt * delta + sps.offset_for_ref_frame[..=in_cycle].iter().sum::<i32>();
                 }
                 if h.nal_ref_idc == 0 {
                     expected += sps.offset_for_non_ref_pic;
@@ -336,9 +346,9 @@ impl Decoder {
                 let t = if h.idr() {
                     0
                 } else if h.nal_ref_idc == 0 {
-                    2 * (fno + h.frame_num as i32) - 1
+                    2 * (fno + syntax_i32(h.frame_num)) - 1
                 } else {
-                    2 * (fno + h.frame_num as i32)
+                    2 * (fno + syntax_i32(h.frame_num))
                 };
                 ([t, t], 0)
             }
@@ -373,7 +383,7 @@ impl Decoder {
 
     /// 8.2.5.3 sliding window (frames).
     fn sliding_window(&mut self, sps: &Sps, cur_frame_num: u32) -> VResult<()> {
-        let n = self.dpb.iter().flatten().count() as u32;
+        let n = u32::try_from(self.dpb.iter().flatten().count()).expect("the DPB has 16 entries");
         if n >= sps.max_num_ref_frames.max(1) {
             let max = sps.max_frame_num();
             let victim = self
@@ -420,7 +430,7 @@ impl Decoder {
             self.poc.prev_ref_frame_num = f;
             // 8.2.1: the inferred frames update prevFrameNum / prevFrameNumOffset as well.
             let fno = if self.poc.prev_frame_num > f {
-                self.poc.prev_frame_num_offset + max as i32
+                self.poc.prev_frame_num_offset + syntax_i32(max)
             } else {
                 self.poc.prev_frame_num_offset
             };
@@ -438,7 +448,7 @@ impl Decoder {
             .dpb
             .iter()
             .enumerate()
-            .filter_map(|(i, e)| e.map(|r| (i as u8, r)))
+            .filter_map(|(i, e)| e.map(|r| (u8::try_from(i).expect("the DPB has 16 entries"), r)))
             .collect();
         let mut st: Vec<(u8, RefPic)> = refs
             .iter()
@@ -616,7 +626,7 @@ impl Decoder {
             lists: [&lists[0], &lists[1], &lists[2]],
             cur_slot: slot,
             surface_id: surface,
-            bitstream_len: bs.len() as u32,
+            bitstream_len: fit(bs.len(), "bitstream_len")?,
             frame_num: h.frame_num,
             field_pic: false,
             bottom_field: false,
@@ -717,7 +727,7 @@ impl Decoder {
                     self.max_lt_idx = None;
                 }
             } else if let Some(ops) = &h.mmco {
-                let cur_pic_num = h.frame_num as i32;
+                let cur_pic_num = syntax_i32(h.frame_num);
                 for op in ops {
                     match *op {
                         Mmco::ShortUnused(d) => {
@@ -797,7 +807,8 @@ impl Decoder {
                 let t = poc[0].min(poc[1]);
                 poc = [poc[0] - t, poc[1] - t];
             }
-            let n = self.dpb.iter().flatten().count() as u32;
+            let n =
+                u32::try_from(self.dpb.iter().flatten().count()).expect("the DPB has 16 entries");
             if n >= sps.max_num_ref_frames.max(1) {
                 return bitstream(format!(
                     "reference marking leaves {} frames with max_num_ref_frames {}",
@@ -818,7 +829,7 @@ impl Decoder {
         let fno = if sps.pic_order_cnt_type == 0 {
             0
         } else {
-            self.frame_num_offset(h, max as i32)
+            self.frame_num_offset(h, syntax_i32(max))
         };
         let st = &mut self.poc;
         if h.nal_ref_idc != 0 {
@@ -827,7 +838,7 @@ impl Decoder {
                 st.prev_lsb = poc[0];
             } else {
                 st.prev_msb = msb;
-                st.prev_lsb = h.pic_order_cnt_lsb as i32;
+                st.prev_lsb = syntax_i32(h.pic_order_cnt_lsb);
             }
             st.prev_ref_frame_num = if mmco5 { 0 } else { h.frame_num };
         }
@@ -843,18 +854,20 @@ impl Decoder {
     /// longer a reference (this rule never moves a live reference, which is the engine
     /// contract).
     fn colocated_slot(&mut self, surface: u32) -> u8 {
+        // MAX_SLOTS (17) colocated slots: every slot index fits u8.
+        let slot = |s: usize| u8::try_from(s).expect("slot index < MAX_SLOTS = 17");
         if let Some(s) = self.slot_surface.iter().position(|&e| e == Some(surface)) {
-            return s as u8;
+            return slot(s);
         }
         let refs: Vec<u8> = self.dpb.iter().flatten().filter_map(|r| r.slot).collect();
         let s = match self.slot_surface.iter().position(|e| e.is_none()) {
             Some(s) => s,
             None => (0..MAX_SLOTS)
-                .find(|s| !refs.contains(&(*s as u8)))
+                .find(|&s| !refs.contains(&slot(s)))
                 .expect("17 slots for at most 16 references"),
         };
         self.slot_surface[s] = Some(surface);
-        s as u8
+        slot(s)
     }
 
     fn find_short(&self, pic_num: i32, cur_frame_num: u32, max: u32) -> Option<usize> {

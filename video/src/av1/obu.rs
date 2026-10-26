@@ -18,6 +18,9 @@ pub enum Av1Error {
     /// A frame header before any sequence header.
     #[error("AV1 frame before any sequence header")]
     NoSequenceHeader,
+    /// A syntax-derived value does not fit the field it is stored in.
+    #[error("AV1 bitstream invalid: {0}")]
+    Range(#[from] crate::OutOfRange),
 }
 
 /// `Result` of the AV1 parser.

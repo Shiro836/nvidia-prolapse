@@ -84,6 +84,9 @@ pub enum Vp9Error {
     /// Backward adaptation (8.4.2) of a frame that needs it, without the engine's counts.
     #[error("VP9: adaptation needs the engine counts")]
     MissingCounts,
+    /// A syntax-derived value does not fit the field it is stored in.
+    #[error("VP9: {0}")]
+    Range(#[from] crate::OutOfRange),
 }
 
 /// The RM-backend callers of the VP9 front end report its errors as broken input contracts.
@@ -174,8 +177,12 @@ impl BitReader<'_> {
     }
     /// su(n): magnitude then sign.
     fn s(&mut self, n: u32) -> Result<i32> {
-        let v = self.f(n)? as i32;
+        let v = crate::fit::<i32, _>(self.f(n)?, "su(n) magnitude")?;
         Ok(if self.bit()? != 0 { -v } else { v })
+    }
+    /// su(n) for n <= 7 (delta_q 4 bits, loop filter deltas 6 bits, 6.2.9-6.2.10): fits `i8`.
+    fn s_i8(&mut self, n: u32) -> Result<i8> {
+        Ok(crate::fit(self.s(n)?, "su(n)")?)
     }
 }
 
@@ -251,7 +258,8 @@ impl<'a> BoolDecoder<'a> {
     }
     fn mv_update(&mut self, p: &mut u8) {
         if self.read(252) != 0 {
-            *p = (self.literal(7) << 1 | 1) as u8;
+            // literal(7) < 2^7: the update is a 7-bit value shifted, odd (6.3.17).
+            *p = low_u8(self.literal(7) << 1 | 1);
         }
     }
 }
@@ -269,11 +277,14 @@ fn inv_recenter_nonneg(v: i32, m: i32) -> i32 {
 fn inv_remap_prob(delta: usize, prob: u8) -> u8 {
     let v = i32::from(t::INV_MAP_TABLE[delta.min(254)]);
     let m = i32::from(prob) - 1;
-    if (m << 1) <= 255 {
-        (1 + inv_recenter_nonneg(v, m)) as u8
+    let p = if (m << 1) <= 255 {
+        1 + inv_recenter_nonneg(v, m)
     } else {
-        (255 - inv_recenter_nonneg(v, 254 - m)) as u8
-    }
+        255 - inv_recenter_nonneg(v, 254 - m)
+    };
+    // INV_MAP_TABLE values are <= 253 and prob is a u8, so both branches stay in 0..=255
+    // (spec 6.3.5 inv_remap_prob).
+    u8::try_from(p).expect("inv_remap_prob result in 0..=255 for every table entry and u8 prob")
 }
 
 /// Model coefficient probabilities of one transform size: [plane][ref][band][ctx][node].
@@ -601,7 +612,7 @@ impl Vp9State {
                 h.refresh_frame_flags = low_u8(r.f(8)?);
                 for i in 0..3 {
                     h.ref_frame_idx[i] = usize_from_u32(r.f(3)?);
-                    h.sign_bias[1 + i] = r.bit()? as u8;
+                    h.sign_bias[1 + i] = low_u8(r.bit()?);
                 }
                 let mut found = false;
                 for i in 0..3 {
@@ -651,18 +662,18 @@ impl Vp9State {
         if h.mode_ref_delta_enabled && r.bit()? != 0 {
             for d in self.ref_deltas.iter_mut() {
                 if r.bit()? != 0 {
-                    *d = r.s(6)? as i8;
+                    *d = r.s_i8(6)?;
                 }
             }
             for d in self.mode_deltas.iter_mut() {
                 if r.bit()? != 0 {
-                    *d = r.s(6)? as i8;
+                    *d = r.s_i8(6)?;
                 }
             }
         }
         // quantization_params
         h.base_q_idx = low_u8(r.f(8)?);
-        let mut dq = || -> Result<i8> { Ok(if r.bit()? != 0 { r.s(4)? as i8 } else { 0 }) };
+        let mut dq = || -> Result<i8> { Ok(if r.bit()? != 0 { r.s_i8(4)? } else { 0 }) };
         h.delta_q_y_dc = dq()?;
         h.delta_q_uv_dc = dq()?;
         h.delta_q_uv_ac = dq()?;
@@ -699,7 +710,7 @@ impl Vp9State {
                         let enabled = r.bit()? != 0;
                         let mut value = 0i16;
                         if enabled {
-                            value = r.f(BITS[j])? as i16;
+                            value = crate::fit(r.f(BITS[j])?, "feature_value")?;
                             if SIGNED[j] && r.bit()? != 0 {
                                 value = -value;
                             }
@@ -762,9 +773,9 @@ impl Vp9State {
         h.tx_mode = if h.lossless {
             0
         } else {
-            let mut m = d.literal(2) as u8;
+            let mut m = low_u8(d.literal(2));
             if m == 3 {
-                m += d.literal(1) as u8;
+                m += low_u8(d.literal(1));
             }
             m
         };
@@ -989,8 +1000,9 @@ impl Vp9State {
 }
 
 fn get_prob(num: u32, den: u32) -> u8 {
-    let p = ((u64::from(num) * 256 + (u64::from(den) >> 1)) / u64::from(den)) as u32;
-    p.clamp(1, 255) as u8
+    // num <= den (callers pass ct[0] of den = ct[0] + ct[1]), so p <= 256 before the clamp.
+    let p = (u64::from(num) * 256 + (u64::from(den) >> 1)) / u64::from(den);
+    u8::try_from(p.clamp(1, 255)).expect("clamped to 1..=255")
 }
 
 fn merge_probs(pre: u8, ct: [u32; 2], count_sat: u32, max_update: u32) -> u8 {
@@ -998,7 +1010,8 @@ fn merge_probs(pre: u8, ct: [u32; 2], count_sat: u32, max_update: u32) -> u8 {
     let prob = if den == 0 { 128 } else { get_prob(ct[0], den) };
     let count = den.min(count_sat);
     let factor = max_update * count / count_sat;
-    ((u32::from(pre) * (256 - factor) + u32::from(prob) * factor + 128) >> 8) as u8
+    // Weighted average of two u8 probabilities with factor <= 256: at most 255.
+    low_u8((u32::from(pre) * (256 - factor) + u32::from(prob) * factor + 128) >> 8)
 }
 
 const COUNT_TO_UPDATE_FACTOR: [u32; 21] = [
@@ -1012,17 +1025,20 @@ fn mode_mv_merge(pre: u8, ct: [u32; 2]) -> u8 {
     }
     let factor = COUNT_TO_UPDATE_FACTOR[usize_from_u32(den.min(20))];
     let prob = get_prob(ct[0], den);
-    ((u32::from(pre) * (256 - factor) + u32::from(prob) * factor + 128) >> 8) as u8
+    // Weighted average of two u8 probabilities with factor <= 256: at most 255.
+    low_u8((u32::from(pre) * (256 - factor) + u32::from(prob) * factor + 128) >> 8)
 }
 
 /// libvpx vpx_tree_merge_probs over a tree in libvpx index form.
 fn tree_merge(tree: &[i8], pre: &[u8], counts: &[u32], out: &mut [u8]) {
     fn walk(i: usize, tree: &[i8], pre: &[u8], counts: &[u32], out: &mut [u8]) -> u32 {
         let side = |n: i8, out: &mut [u8]| {
+            // libvpx tree form: n <= 0 is leaf -n, n > 0 the node at index n.
+            let index = usize::from(n.unsigned_abs());
             if n <= 0 {
-                counts[(-n) as usize]
+                counts[index]
             } else {
-                walk(n as usize, tree, pre, counts, out)
+                walk(index, tree, pre, counts, out)
             }
         };
         let l = side(tree[i], out);
@@ -1208,7 +1224,11 @@ pub fn tile_sizes(h: &FrameHeader) -> Vec<(u16, u16)> {
         for col in 0..1u32 << h.log2_tile_cols {
             let w =
                 start(col + 1, sb_cols, h.log2_tile_cols) - start(col, sb_cols, h.log2_tile_cols);
-            out.push((w as u16, hgt as u16));
+            // frame_width/height_minus_1 are f(16): at most 65536 / 64 = 1024 SB64 per tile.
+            out.push((
+                u16::try_from(w).expect("tile width <= 1024 SB64"),
+                u16::try_from(hgt).expect("tile height <= 1024 SB64"),
+            ));
         }
     }
     out

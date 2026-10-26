@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! AV1 sequence header, uncompressed frame header and tile group parsing, plus the reference state the
 //! frame header depends on (spec 5.5, 5.9, 5.11.1, 7.20, 7.21). Written from the AV1 specification.
+use crate::fit;
 use nv_rm_core::conv::{low_u8, low_u16, usize_from_u32};
 
 use super::obu::{Av1Error, BitReader, Result};
@@ -444,9 +445,12 @@ pub fn get_relative_dist(seq: &SequenceHeader, a: u32, b: u32) -> i32 {
         return 0;
     }
     let bits = seq.order_hint_bits;
-    let diff = a as i32 - b as i32;
-    let m = 1i32 << (bits - 1);
-    (diff & (m - 1)) - (diff & m)
+    // diff = a - b, then (diff & (m - 1)) - (diff & m): only the low order_hint_bits of the
+    // two's complement difference matter, so the u32 wrapping difference has the same bits.
+    let diff = a.wrapping_sub(b);
+    let m = 1u32 << (bits - 1);
+    // order_hint_bits <= 8 (order_hint_bits_minus_1 is f(3), spec 5.5.1): both parts are < 2^8.
+    i32::from(low_u16(diff & (m - 1))) - i32::from(low_u16(diff & m))
 }
 
 fn tile_log2(blk: u32, target: u32) -> u32 {
@@ -473,13 +477,16 @@ fn decode_subexp(r: &mut BitReader, num_syms: i32) -> Result<i32> {
         let b2 = if i != 0 { k + i - 1 } else { k };
         let a = 1i32 << b2;
         if num_syms <= mk + 3 * a {
-            return Ok(r.ns((num_syms - mk) as u32)? as i32 + mk);
+            // num_syms > mk here: the previous iteration had num_syms > mk + 3a.
+            let v = r.ns(fit(num_syms - mk, "subexp numSyms - mk")?)?;
+            return Ok(fit::<i32, _>(v, "subexp ns")? + mk);
         }
         if r.flag()? {
             i += 1;
             mk += a;
         } else {
-            return Ok(r.f(b2 as u32)? as i32 + mk);
+            let v = r.f(fit(b2, "subexp b2")?)?;
+            return Ok(fit::<i32, _>(v, "subexp_bits")? + mk);
         }
     }
 }
@@ -535,74 +542,72 @@ impl ParserState {
         let mut latest = shifted[usize::from(last_frame_idx)];
         let mut earliest = shifted[usize::from(gold_frame_idx)];
 
+        // Slot indices as stored in `idx`: NUM_REF_FRAMES (8) slots, numbered as u8.
+        let slots = || (0u8..).zip(shifted.iter().copied());
         // ALTREF
-        let mut r: i8 = -1;
-        for i in 0..NUM_REF_FRAMES {
-            let hint = shifted[i];
-            if !used[i] && hint >= cur && (r < 0 || hint >= latest) {
-                r = i as i8;
+        let mut r: Option<u8> = None;
+        for (i, hint) in slots() {
+            if !used[usize::from(i)] && hint >= cur && (r.is_none() || hint >= latest) {
+                r = Some(i);
                 latest = hint;
             }
         }
-        if r >= 0 {
-            idx[6] = r as u8;
-            used[r as usize] = true;
+        if let Some(r) = r {
+            idx[6] = r;
+            used[usize::from(r)] = true;
         }
         // BWDREF
-        let mut r: i8 = -1;
-        for i in 0..NUM_REF_FRAMES {
-            let hint = shifted[i];
-            if !used[i] && hint >= cur && (r < 0 || hint < earliest) {
-                r = i as i8;
+        let mut r: Option<u8> = None;
+        for (i, hint) in slots() {
+            if !used[usize::from(i)] && hint >= cur && (r.is_none() || hint < earliest) {
+                r = Some(i);
                 earliest = hint;
             }
         }
-        if r >= 0 {
-            idx[4] = r as u8;
-            used[r as usize] = true;
+        if let Some(r) = r {
+            idx[4] = r;
+            used[usize::from(r)] = true;
         }
         // ALTREF2
-        let mut r: i8 = -1;
-        for i in 0..NUM_REF_FRAMES {
-            let hint = shifted[i];
-            if !used[i] && hint >= cur && (r < 0 || hint < earliest) {
-                r = i as i8;
+        let mut r: Option<u8> = None;
+        for (i, hint) in slots() {
+            if !used[usize::from(i)] && hint >= cur && (r.is_none() || hint < earliest) {
+                r = Some(i);
                 earliest = hint;
             }
         }
-        if r >= 0 {
-            idx[5] = r as u8;
-            used[r as usize] = true;
+        if let Some(r) = r {
+            idx[5] = r;
+            used[usize::from(r)] = true;
         }
         // LAST2, LAST3
         for k in [1usize, 2] {
             if idx[k] == 0xff {
-                let mut r: i8 = -1;
-                for j in 0..NUM_REF_FRAMES {
-                    let hint = shifted[j];
-                    if !used[j] && hint < cur && (r < 0 || hint >= latest) {
-                        r = j as i8;
+                let mut r: Option<u8> = None;
+                for (j, hint) in slots() {
+                    if !used[usize::from(j)] && hint < cur && (r.is_none() || hint >= latest) {
+                        r = Some(j);
                         latest = hint;
                     }
                 }
-                if r >= 0 {
-                    idx[k] = r as u8;
-                    used[r as usize] = true;
+                if let Some(r) = r {
+                    idx[k] = r;
+                    used[usize::from(r)] = true;
                 }
             }
         }
         // Anything still unset: the earliest slot overall (may be reused).
-        let mut r: i8 = -1;
-        for i in 0..NUM_REF_FRAMES {
-            let hint = shifted[i];
-            if r < 0 || hint < earliest {
-                r = i as i8;
+        let mut r: Option<u8> = None;
+        for (i, hint) in slots() {
+            if r.is_none() || hint < earliest {
+                r = Some(i);
                 earliest = hint;
             }
         }
+        let r = r.expect("NUM_REF_FRAMES > 0: the loop above picks a slot");
         for k in idx.iter_mut() {
             if *k == 0xff {
-                *k = r as u8;
+                *k = r;
             }
         }
         Ok(idx)
@@ -819,7 +824,7 @@ impl ParserState {
                     [[0i16; 8]; 8],
                 )
             } else {
-                let s = &self.refs[usize::from(h.ref_frame_idx[h.primary_ref_frame as usize])];
+                let s = &self.refs[usize::from(h.ref_frame_idx[usize::from(h.primary_ref_frame)])];
                 (
                     s.gm_params,
                     s.lf_ref_deltas,
@@ -893,10 +898,10 @@ impl ParserState {
                             v = if SEG_FEATURE_SIGNED[j] {
                                 r.su(1 + bits)?.clamp(-lim, lim)
                             } else {
-                                (r.f(bits)? as i32).clamp(0, lim)
+                                fit::<i32, _>(r.f(bits)?, "feature_value")?.clamp(0, lim)
                             };
                         }
-                        h.feature_data[i][j] = v as i16;
+                        h.feature_data[i][j] = fit(v, "FeatureData")?;
                     }
                 }
             }
@@ -904,10 +909,10 @@ impl ParserState {
             h.feature_enabled = [[false; 8]; 8];
             h.feature_data = [[0; 8]; 8];
         }
-        for i in 0..8 {
-            for j in 0..8 {
-                if h.feature_enabled[i][j] {
-                    h.last_active_seg_id = i as u8;
+        for (i, enabled) in (0u8..).zip(h.feature_enabled.iter()) {
+            for (j, &en) in enabled.iter().enumerate() {
+                if en {
+                    h.last_active_seg_id = i;
                     if j >= 5 {
                         h.seg_id_pre_skip = true;
                     }
@@ -1168,7 +1173,7 @@ impl ParserState {
                 s += size;
             }
             t.col_start_sb.push(sb_cols);
-            t.tile_cols_log2 = tile_log2(1, (t.col_start_sb.len() - 1) as u32);
+            t.tile_cols_log2 = tile_log2(1, fit(t.col_start_sb.len() - 1, "TileCols")?);
             max_tile_area_sb = if min_log2_tiles > 0 {
                 (sb_rows * sb_cols) >> (min_log2_tiles + 1)
             } else {
@@ -1182,10 +1187,10 @@ impl ParserState {
                 s += r.ns(mh)? + 1;
             }
             t.row_start_sb.push(sb_rows);
-            t.tile_rows_log2 = tile_log2(1, (t.row_start_sb.len() - 1) as u32);
+            t.tile_rows_log2 = tile_log2(1, fit(t.row_start_sb.len() - 1, "TileRows")?);
         }
-        t.tile_cols = (t.col_start_sb.len() - 1) as u32;
-        t.tile_rows = (t.row_start_sb.len() - 1) as u32;
+        t.tile_cols = fit(t.col_start_sb.len() - 1, "TileCols")?;
+        t.tile_rows = fit(t.row_start_sb.len() - 1, "TileRows")?;
         if t.tile_cols_log2 > 0 || t.tile_rows_log2 > 0 {
             t.context_update_tile_id = r.f(t.tile_rows_log2 + t.tile_cols_log2)?;
             t.tile_size_bytes = r.f(2)? + 1;
@@ -1200,43 +1205,45 @@ impl ParserState {
         if h.frame_is_intra || !h.reference_select || !seq.enable_order_hint {
             return false;
         }
-        let (mut fwd, mut bwd) = (-1i32, -1i32);
+        // Reference indices i (0..REFS_PER_FRAME = 7) as u8, as skip_mode_frame stores them.
+        let refs = (0u8..).zip(h.ref_frame_idx.iter().take(REFS_PER_FRAME).copied());
+        let (mut fwd, mut bwd) = (None::<u8>, None::<u8>);
         let (mut fwd_hint, mut bwd_hint) = (0, 0);
-        for i in 0..REFS_PER_FRAME {
-            let rh = self.refs[usize::from(h.ref_frame_idx[i])].order_hint;
+        for (i, slot) in refs.clone() {
+            let rh = self.refs[usize::from(slot)].order_hint;
             if get_relative_dist(seq, rh, h.order_hint) < 0 {
-                if fwd < 0 || get_relative_dist(seq, rh, fwd_hint) > 0 {
-                    fwd = i as i32;
+                if fwd.is_none() || get_relative_dist(seq, rh, fwd_hint) > 0 {
+                    fwd = Some(i);
                     fwd_hint = rh;
                 }
             } else if get_relative_dist(seq, rh, h.order_hint) > 0
-                && (bwd < 0 || get_relative_dist(seq, rh, bwd_hint) < 0)
+                && (bwd.is_none() || get_relative_dist(seq, rh, bwd_hint) < 0)
             {
-                bwd = i as i32;
+                bwd = Some(i);
                 bwd_hint = rh;
             }
         }
-        if fwd < 0 {
+        let Some(fwd) = fwd else {
             return false;
-        }
-        if bwd >= 0 {
-            h.skip_mode_frame = [1 + fwd.min(bwd) as u8, 1 + fwd.max(bwd) as u8];
+        };
+        if let Some(bwd) = bwd {
+            h.skip_mode_frame = [1 + fwd.min(bwd), 1 + fwd.max(bwd)];
             return true;
         }
-        let (mut sfwd, mut sfwd_hint) = (-1i32, 0);
-        for i in 0..REFS_PER_FRAME {
-            let rh = self.refs[usize::from(h.ref_frame_idx[i])].order_hint;
+        let (mut sfwd, mut sfwd_hint) = (None::<u8>, 0);
+        for (i, slot) in refs {
+            let rh = self.refs[usize::from(slot)].order_hint;
             if get_relative_dist(seq, rh, fwd_hint) < 0
-                && (sfwd < 0 || get_relative_dist(seq, rh, sfwd_hint) > 0)
+                && (sfwd.is_none() || get_relative_dist(seq, rh, sfwd_hint) > 0)
             {
-                sfwd = i as i32;
+                sfwd = Some(i);
                 sfwd_hint = rh;
             }
         }
-        if sfwd < 0 {
+        let Some(sfwd) = sfwd else {
             return false;
-        }
-        h.skip_mode_frame = [1 + fwd.min(sfwd) as u8, 1 + fwd.max(sfwd) as u8];
+        };
+        h.skip_mode_frame = [1 + fwd.min(sfwd), 1 + fwd.max(sfwd)];
         true
     }
 
@@ -1272,7 +1279,7 @@ impl ParserState {
         if g.num_y_points > 14 {
             return Err(Av1Error::Invalid("num_y_points"));
         }
-        for i in 0..g.num_y_points as usize {
+        for i in 0..usize::from(g.num_y_points) {
             g.point_y_value[i] = low_u8(r.f(8)?);
             g.point_y_scaling[i] = low_u8(r.f(8)?);
         }
@@ -1285,7 +1292,7 @@ impl ParserState {
             if g.num_cb_points > 10 {
                 return Err(Av1Error::Invalid("num_cb_points"));
             }
-            for i in 0..g.num_cb_points as usize {
+            for i in 0..usize::from(g.num_cb_points) {
                 g.point_cb_value[i] = low_u8(r.f(8)?);
                 g.point_cb_scaling[i] = low_u8(r.f(8)?);
             }
@@ -1293,7 +1300,7 @@ impl ParserState {
             if g.num_cr_points > 10 {
                 return Err(Av1Error::Invalid("num_cr_points"));
             }
-            for i in 0..g.num_cr_points as usize {
+            for i in 0..usize::from(g.num_cr_points) {
                 g.point_cr_value[i] = low_u8(r.f(8)?);
                 g.point_cr_scaling[i] = low_u8(r.f(8)?);
             }
@@ -1467,32 +1474,35 @@ pub fn parse_tile_group(
     r.byte_alignment();
     let hdr = r.bit_pos() / 8;
     let payload = data.get(hdr..).ok_or(Av1Error::Truncated("tile group"))?;
-    let base = bitstream.len() as u32;
+    // Offsets into `bitstream` after the copy: base + p <= bitstream.len() never overflows.
+    let base = bitstream.len();
     bitstream.extend_from_slice(payload);
+    let offset = |p: usize| fit::<u32, _>(base + p, "tile data offset");
     let mut pos = 0usize;
     for n in start..=end {
         if n == end {
             tiles.push(TileRange {
-                start: base + pos as u32,
-                end: base + payload.len() as u32,
+                start: offset(pos)?,
+                end: offset(payload.len())?,
             });
         } else {
             let tsb = usize_from_u32(t.tile_size_bytes);
             let b = payload
                 .get(pos..pos + tsb)
                 .ok_or(Av1Error::Truncated("tile_size_minus_1"))?;
+            // le(TileSizeBytes) with TileSizeBytes <= 4 (tile_size_bytes_minus_1 is f(2)).
             let mut sz = 0usize;
             for (i, v) in b.iter().enumerate() {
-                sz |= (*v as usize) << (8 * i);
+                sz |= usize::from(*v) << (8 * i);
             }
-            sz += 1;
+            let sz = sz.checked_add(1).ok_or(Av1Error::Truncated("tile data"))?;
             pos += tsb;
-            if pos + sz > payload.len() {
+            if pos.checked_add(sz).is_none_or(|e| e > payload.len()) {
                 return Err(Av1Error::Truncated("tile data"));
             }
             tiles.push(TileRange {
-                start: base + pos as u32,
-                end: base + (pos + sz) as u32,
+                start: offset(pos)?,
+                end: offset(pos + sz)?,
             });
             pos += sz;
         }
