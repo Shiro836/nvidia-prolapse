@@ -11,7 +11,8 @@
 //! RPS keeps; `curr_pic_idx`, the init lists and `RefDiffPicOrderCnts` use these slots (the
 //! stock allocation observed in an 8-bit capture). The session binds each slot
 //! to a surface (LUMA/CHROMA_OFFSET pairs) and colocated-MV area.
-use nv_rm_core::conv::usize_from_u32;
+use crate::fit;
+use nv_rm_core::conv::{low_u32, usize_from_u32};
 pub mod codec;
 pub mod desc;
 pub mod ps;
@@ -119,6 +120,12 @@ enum PicErr {
     /// A RASL picture after a random access point: not decoded, not output (8.1.3).
     SkipRasl,
     V(VideoError),
+}
+
+impl From<crate::OutOfRange> for PicErr {
+    fn from(e: crate::OutOfRange) -> Self {
+        Self::V(e.into())
+    }
 }
 
 impl Decoder {
@@ -337,15 +344,15 @@ impl Decoder {
             bs.extend_from_slice(s.nal);
         }
         let st = PicState {
-            stream_len: bs.len() as u32,
+            stream_len: fit(bs.len(), "stream_len")?,
             idr,
             irap,
             curr_slot: slot,
-            num_poc_total_curr: total as u32,
+            num_poc_total_curr: fit(total, "NumPocTotalCurr")?,
             list0,
             list1,
             diff,
-            sw_hdr_skip_length: h0.rps_syntax_bits as u16,
+            sw_hdr_skip_length: fit(h0.rps_syntax_bits, "sw_hdr_skip_length")?,
             num_bits_st_rps: h0.st_rps_bits,
             num_delta_pocs_ref: h0.num_delta_pocs_ref,
         };
@@ -368,11 +375,12 @@ impl Decoder {
             methods: Methods {
                 app_id: APP_ID_HEVC,
                 control_params: CONTROL_PARAMS_BASE | (err_idx & 0x1f) << 7,
-                picture_index: id as u32,
+                // The descriptor's 32-bit picture index counts the session's pictures modulo 2^32.
+                picture_index: low_u32(id),
                 scaling_list_offset: sps
                     .scaling_list_enabled
-                    .then_some(desc::SCALING_LIST_OFFSET as u32),
-                tile_sizes_offset: desc::TILE_SIZES_OFFSET as u32,
+                    .then_some(fit(desc::SCALING_LIST_OFFSET, "scaling list offset")?),
+                tile_sizes_offset: fit(desc::TILE_SIZES_OFFSET, "tile sizes offset")?,
             },
             keyframe: irap,
             output: h0.pic_output,

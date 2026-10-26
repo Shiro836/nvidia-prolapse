@@ -52,6 +52,7 @@
 use nv_rm_core::conv::usize_from_u32;
 
 use nv_rm_core::Error;
+use nv_rm_core::conv::low_u32;
 pub use nv_rm_sys::nvdec_drv::{NVDEC_HEVC_PIC_S_SIZE, NvdecHevcPicS};
 use std::mem::size_of;
 
@@ -140,7 +141,8 @@ impl<'a> BitReader<'a> {
             v = v << 1 | u64::from(self.data[bit / 8] >> (7 - bit % 8) & 1);
         }
         self.pos = end;
-        Ok(v as u32)
+        // n <= 32 bits were read.
+        Ok(low_u32(v))
     }
 
     fn flag(&mut self) -> Result<bool> {
@@ -167,7 +169,8 @@ impl<'a> BitReader<'a> {
             }
         }
         let rest = u64::from(self.u(leading_zero_bits)?);
-        Ok(((1u64 << leading_zero_bits) - 1 + rest) as u32)
+        // leading_zero_bits <= 31: at most 2^32 - 2.
+        Ok(low_u32((1u64 << leading_zero_bits) - 1 + rest))
     }
 
     /// `se(v)`, 9.2.2: k -> (-1)^(k+1) * Ceil(k / 2).
@@ -707,13 +710,14 @@ fn set_bits(unit: &mut u32, field: BitField, value: i64, name: &str) -> Result<(
             field.width
         ));
     }
-    let mask = ((1u64 << field.width) - 1) as u32;
-    *unit = (*unit & !(mask << field.shift)) | ((value as u32) << field.shift);
+    // Fields are at most 32 bits wide and 0 <= value < 2^width was checked above.
+    let mask = low_u32((1u64 << field.width) - 1);
+    *unit = (*unit & !(mask << field.shift)) | (low_u32(value.cast_unsigned()) << field.shift);
     Ok(())
 }
 
-fn fit<T: TryFrom<i64>>(value: i64, name: &str) -> Result<T> {
-    T::try_from(value).or_else(|_| {
+fn fit<T: TryFrom<S>, S: Copy + std::fmt::Display>(value: S, name: &str) -> Result<T> {
+    T::try_from(value).or_else(|_unrepresentable| {
         contract(format!(
             "{name} = {value} does not fit its {}-byte descriptor field",
             size_of::<T>()
@@ -747,14 +751,10 @@ impl PicSetup for NvdecHevcPicS {
     /// `fill_sps_into_dev_context` plus the SPS fields hevc.py leaves unset.
     fn fill_sps(&mut self, sps: &Sps) -> Result<()> {
         use fields::*;
-        self.pic_width_in_luma_samples = fit(
-            sps.pic_width_in_luma_samples.into(),
-            "pic_width_in_luma_samples",
-        )?;
-        self.pic_height_in_luma_samples = fit(
-            sps.pic_height_in_luma_samples.into(),
-            "pic_height_in_luma_samples",
-        )?;
+        self.pic_width_in_luma_samples =
+            fit(sps.pic_width_in_luma_samples, "pic_width_in_luma_samples")?;
+        self.pic_height_in_luma_samples =
+            fit(sps.pic_height_in_luma_samples, "pic_height_in_luma_samples")?;
         let s0: [(BitField, u32, &str); 7] = [
             (
                 CHROMA_FORMAT_IDC,
@@ -1029,7 +1029,7 @@ impl Parser {
         if is_idr(nal_type) {
             self.history.clear();
         }
-        ctx.num_ref_frames = fit(self.history.len() as i64, "num_ref_frames")?;
+        ctx.num_ref_frames = fit(self.history.len(), "num_ref_frames")?;
         ctx.idr_picture_flag = u8::from(is_idr(nal_type));
         ctx.rap_picture_flag = u8::from(is_irap(nal_type));
         ctx.ref_diff_pic_order_cnts = [0; 16];
@@ -1037,19 +1037,16 @@ impl Parser {
         let width = u64::from(sps.pic_width_in_luma_samples);
         let height = u64::from(sps.pic_height_in_luma_samples);
         ctx.col_mv_buffersize = fit(
-            (round_up(width, 64) * round_up(height, 64) / 16 / 256).cast_signed(),
+            round_up(width, 64) * round_up(height, 64) / 16 / 256,
             "colMvBuffersize",
         )?;
-        let stride: u32 = fit(round_up(width, 64).cast_signed(), "framestride")?;
+        let stride: u32 = fit(round_up(width, 64), "framestride")?;
         ctx.framestride = [stride, stride];
-        ctx.sw_hdr_skip_length = fit(
-            (hdr.sw_skip_end - hdr.sw_skip_start) as i64,
-            "sw_hdr_skip_length",
-        )?;
+        ctx.sw_hdr_skip_length = fit(hdr.sw_skip_end - hdr.sw_skip_start, "sw_hdr_skip_length")?;
         ctx.num_bits_short_term_ref_pics_in_slice =
             u32::from(ctx.sw_hdr_skip_length.saturating_sub(9));
         let stream_len: usize = nals.iter().map(|n| n.len).sum();
-        ctx.stream_len = fit(stream_len as i64, "stream_len")?;
+        ctx.stream_len = fit(stream_len, "stream_len")?;
         if let Some(t) = &pps.tiles {
             set_bits(
                 &mut ctx.pps_bits1,
@@ -1074,7 +1071,7 @@ impl Parser {
         let luma_h_rounded = round_up(height, 64);
         let offset_256 = |prev: u32, bytes_per_row: u64, name: &str| -> Result<u32> {
             fit(
-                (((u64::from(prev) << 8) + bytes_per_row * luma_h_rounded) >> 8) as i64,
+                ((u64::from(prev) << 8) + bytes_per_row * luma_h_rounded) >> 8,
                 name,
             )
         };
@@ -1125,8 +1122,8 @@ impl Parser {
         let width_ctbs = width.div_ceil(ctb).cast_signed();
         let height_ctbs = height.div_ceil(ctb).cast_signed();
         let mut push_tile = |c: i64, r: i64| -> Result<()> {
-            desc.extend_from_slice(&fit::<u16>(c, "tile column width")?.to_le_bytes());
-            desc.extend_from_slice(&fit::<u16>(r, "tile row height")?.to_le_bytes());
+            desc.extend_from_slice(&fit::<u16, _>(c, "tile column width")?.to_le_bytes());
+            desc.extend_from_slice(&fit::<u16, _>(r, "tile row height")?.to_le_bytes());
             Ok(())
         };
         match &pps.tiles {
@@ -1270,7 +1267,7 @@ pub fn parse_hevc(bitstream: &[u8]) -> Result<HevcParsed> {
         if v <= 0 {
             return contract(format!("conformance window leaves {name} = {v}"));
         }
-        Ok(v as usize)
+        fit(v, name)
     };
     p.out.width = crop(s.pic_width_in_luma_samples, left, right, "width")?;
     p.out.height = crop(s.pic_height_in_luma_samples, top, bottom, "height")?;
@@ -1316,7 +1313,7 @@ mod tests {
         assert_eq!(nal_to_rbsp(&[5, 0, 0, 3]), [5, 0, 0]);
         assert_eq!(nal_to_rbsp(&[0, 0, 0, 3, 7]), [0, 0, 0, 7]);
         assert_eq!(nal_to_rbsp(&[0, 3, 0, 0]), [0, 3, 0, 0]);
-        assert_eq!(nal_to_rbsp(&[]), [] as [u8; 0]);
+        assert_eq!(nal_to_rbsp(&[]), Vec::<u8>::new());
     }
 
     #[test]

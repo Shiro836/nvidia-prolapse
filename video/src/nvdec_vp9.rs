@@ -1254,7 +1254,7 @@ mod tests {
         // large m takes the mirrored branch
         assert_eq!(
             inv_remap_prob(0, 250),
-            255 - inv_recenter_nonneg(7, 5) as u8
+            255 - u8::try_from(inv_recenter_nonneg(7, 5)).unwrap()
         );
     }
 

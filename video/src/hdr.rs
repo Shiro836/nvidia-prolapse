@@ -359,8 +359,8 @@ mod tests {
     fn hevc_sei(payloads: &[(u32, Vec<u8>)]) -> Vec<u8> {
         let mut nal = vec![39 << 1, 1]; // nal_unit_type 39, nuh_layer_id 0, temporal_id_plus1 1
         for (kind, body) in payloads {
-            nal.push(*kind as u8);
-            nal.push(body.len() as u8);
+            nal.push(u8::try_from(*kind).unwrap());
+            nal.push(u8::try_from(body.len()).unwrap());
             nal.extend_from_slice(&escape(body));
         }
         nal.push(0x80); // rbsp_trailing_bits
@@ -440,10 +440,10 @@ mod tests {
     }
 
     fn obu(kind: u32, payload: &[u8]) -> Vec<u8> {
-        let mut out = vec![(kind as u8) << 3 | 0x02]; // has_size_field
+        let mut out = vec![u8::try_from(kind).unwrap() << 3 | 0x02]; // has_size_field
         let mut n = payload.len();
         loop {
-            let b = (n & 0x7f) as u8;
+            let b = u8::try_from(n & 0x7f).unwrap();
             n >>= 7;
             out.push(if n > 0 { b | 0x80 } else { b });
             if n == 0 {

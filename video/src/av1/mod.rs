@@ -410,7 +410,7 @@ impl PictureJob {
         let pi = desc::PicInputs {
             seq: &self.seq,
             hdr: &self.hdr,
-            stream_len: self.bitstream.len() as u32,
+            stream_len: crate::fit(self.bitstream.len(), "stream_len")?,
             refs,
             mf: self.mf,
             prev_segment_ids: self.seg_read.is_some(),

@@ -65,7 +65,12 @@ pub fn build(
     d[0x34..0x44].copy_from_slice(&[0, 0, 1, 0x0b, 0, 0, 0, 0, 0, 0, 1, 0x0b, 0, 0, 0, 0]);
     d[0x44] = 1;
     put32(&mut d, 0x48, inp.bitstream_len);
-    put32(&mut d, 0x4c, slice_offsets.len() as u32);
+    // One offset per slice NAL of a bitstream whose length fits u32 (bitstream_len).
+    put32(
+        &mut d,
+        0x4c,
+        u32::try_from(slice_offsets.len()).expect("fewer slices than bitstream bytes"),
+    );
     put32(&mut d, 0x50, lay.mbhist_size);
     let mbs = (sps.pic_width_in_mbs * sps.frame_height_in_mbs()).max(8100);
     put32(

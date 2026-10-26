@@ -90,7 +90,7 @@ fn compare_with_stock(stream: &str, frames: &str) -> usize {
         };
         k += 1;
         assert_eq!(
-            job.bitstream.len() as u32,
+            u32::try_from(job.bitstream.len()).unwrap(),
             rd32(pp, 0x18),
             "{stream} frame {}: nBitstreamDataLen",
             k - 1
@@ -104,7 +104,7 @@ fn compare_with_stock(stream: &str, frames: &str) -> usize {
         let hits: Vec<&StockFrame> = blocks
             .iter()
             .filter(|b| {
-                rd32(&b.desc, len_off) == job.bitstream.len() as u32
+                rd32(&b.desc, len_off) == u32::try_from(job.bitstream.len()).unwrap()
                     && rd32(&b.desc, poc_off) == rd32(pp, 0x118)
             })
             .collect();
@@ -215,9 +215,9 @@ impl Bw {
     }
     fn se(&mut self, v: i32) {
         self.ue(if v <= 0 {
-            (-2 * v) as u32
+            u32::try_from(-2 * v).unwrap()
         } else {
-            (2 * v - 1) as u32
+            u32::try_from(2 * v - 1).unwrap()
         });
     }
     /// rbsp_trailing_bits: a stop bit, then zero to the byte boundary.

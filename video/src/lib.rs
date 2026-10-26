@@ -15,10 +15,6 @@
 #![expect(
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
     clippy::collapsible_if,
     clippy::default_trait_access,
     clippy::doc_markdown,
@@ -68,7 +64,7 @@
         reason = "pre-standard code; cleanup tracked"
     )
 )]
-use nv_rm_core::conv::usize_from_u32;
+use nv_rm_core::conv::{low_u32, usize_from_u32};
 
 pub mod av1;
 pub mod bits;
@@ -195,9 +191,10 @@ pub fn untested_classes_allowed() -> bool {
 pub fn reloc(w: &mut Vec<u32>, host_class: u32, m: u32, va: u64) {
     if host_class > 0xc86f || va >> 40 != 0 {
         w.push(3 << 29 | 2 << 16 | 4 << 13 | m >> 2);
-        w.extend_from_slice(&[(va >> 8) as u32, (va >> 40) as u32]);
+        // The address dword is bits 39:8 of `va`, the second dword bits 63:40.
+        w.extend_from_slice(&[low_u32(va >> 8), low_u32(va >> 40)]);
     } else {
-        nv_rm_core::push::method(w, 4, m, &[(va >> 8) as u32]);
+        nv_rm_core::push::method(w, 4, m, &[low_u32(va >> 8)]);
     }
 }
 
@@ -285,13 +282,18 @@ pub struct SurfaceLayout {
 }
 
 impl SurfaceLayout {
+    /// # Panics
+    /// If the layout does not fit the address space: callers size sessions within [`caps`]
+    /// (at most 8192x8192 with 16-bit samples, below 2^29 bytes).
     pub fn new(max_width: u32, max_height: u32, bytes_per_sample: u32) -> Self {
         let pitch = (max_width * bytes_per_sample).next_multiple_of(64);
         let luma_rows = max_height.next_multiple_of(64);
         let chroma_rows = max_height.div_ceil(2).next_multiple_of(64);
         let chroma_offset = u64::from(pitch) * u64::from(luma_rows);
-        let size = (chroma_offset as usize + pitch as usize * usize_from_u32(chroma_rows))
-            .next_multiple_of(1 << 16);
+        let size = (usize::try_from(chroma_offset)
+            .expect("session sizes are capped by caps() (8192x8192, 16-bit samples)")
+            + usize_from_u32(pitch) * usize_from_u32(chroma_rows))
+        .next_multiple_of(1 << 16);
         Self {
             pitch,
             luma_rows,

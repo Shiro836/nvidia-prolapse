@@ -179,14 +179,14 @@ fn compare_with_stock_stream(name: &str, stream_name: &str, by_index: bool) -> V
             let next_vcl = nals[i + 1..].iter().any(|m| (m.nal[0] >> 1) & 0x3f < 32);
             if vcl && next_vcl {
                 let next = &nals[i + 1];
-                let payload = next.nal.as_ptr() as usize - au.as_ptr() as usize;
+                let payload = next.nal.as_ptr().addr() - au.as_ptr().addr();
                 extra += u32::from(payload - next.start == 4);
             }
         }
         if extra > 0 {
             framing += 1;
         }
-        let len = job.bitstream.len() as u32 + extra;
+        let len = u32::try_from(job.bitstream.len()).unwrap() + extra;
         let mut job = job;
         job.setup[0x30..0x34].copy_from_slice(&len.max(16).to_le_bytes());
         let di = if by_index {
@@ -236,7 +236,7 @@ fn compare_with_stock_stream(name: &str, stream_name: &str, by_index: bool) -> V
             "{name} AU {k} NumDeltaPocsOfRefRpsIdx"
         );
         assert_eq!(
-            rd32(p, 432) as i32,
+            rd32(p, 432).cast_signed(),
             job.poc,
             "{name} AU {k} CurrPicOrderCntVal"
         );

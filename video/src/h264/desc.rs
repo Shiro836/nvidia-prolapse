@@ -23,6 +23,7 @@
 //! | 0x1e6 | b0-9 colocated-MV row size (256 B units), 0x1e7 b2 !(direct_8x8 && frame_mbs_only), b3 qpprime bypass |
 //! | 0x1e8 | frame_num ; 0x1ea picture flags ; 0x1ec / 0x1f0 POCs ; 0x1fc width term |
 use super::ps::{Pps, Sps};
+use nv_rm_core::conv::low_u16;
 
 pub const SETUP_SIZE: usize = 0x200;
 pub const SCALING_OFFSET: usize = 0x200;
@@ -162,7 +163,7 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
         | u32::from(ep.output_layout) << 15
         | 1 << 18;
     put32(&mut d, 0x1cc, w1cc);
-    let pitch16 = (((ep.pitch(sps) + 15) >> 4) & 0xfff) as u16;
+    let pitch16 = low_u16(((ep.pitch(sps) + 15) >> 4) & 0xfff);
     put16(&mut d, 0x1d0, pitch16);
     put16(&mut d, 0x1d4, pitch16);
     let luma = (sps.bit_depth_luma_minus8 + 8) & 0xf;
@@ -201,11 +202,15 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
     let coarse = sps.direct_8x8_inference && sps.frame_mbs_only;
     let per_mb: u32 = if coarse { 4 } else { 16 };
     let row = (sps.pic_width_in_mbs * per_mb * 8).div_ceil(256) & 0x3ff;
-    let w1e6 = row as u16
+    let w1e6 = low_u16(row)
         | u16::from(!coarse) << 10
         | u16::from(sps.qpprime_y_zero_transform_bypass) << 11;
     put16(&mut d, 0x1e6, w1e6);
-    put16(&mut d, 0x1e8, inp.frame_num as u16);
+    put16(
+        &mut d,
+        0x1e8,
+        u16::try_from(inp.frame_num).expect("frame_num < MaxFrameNum <= 2^16"),
+    );
     d[0x1ea] = u8::from(inp.field_pic)
         | u8::from(inp.bottom_field) << 1
         | u8::from(inp.second_field) << 2

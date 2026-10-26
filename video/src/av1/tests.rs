@@ -178,7 +178,7 @@ fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
     dec.allocate(&mut Mock(1 << 32), w, h).unwrap();
     let layout = dec.surface_layout(w, h);
     let total = dec.dpb_size() + 2 + extra;
-    let surfaces: Vec<SurfaceRef> = (0..total as u64)
+    let surfaces: Vec<SurfaceRef> = (0..u64::try_from(total).unwrap())
         .map(|i| SurfaceRef {
             luma: (2 << 32) + i * u64_from_usize(layout.size),
             chroma: (2 << 32) + i * u64_from_usize(layout.size) + layout.chroma_offset,
@@ -224,7 +224,7 @@ fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
                         descriptor: 3 << 32,
                         bitstream: 4 << 32,
                         bitstream_len: job.bitstream.len(),
-                        picture_index: run.decoded as u32,
+                        picture_index: u32::try_from(run.decoded).unwrap(),
                         current: cur,
                         surfaces: &surfaces,
                         layout,

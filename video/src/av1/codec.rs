@@ -7,6 +7,7 @@
 //! creation, so the four default q-context tables live in four constant buffers and an LRU index that
 //! stock would have filled with defaults is aliased to the constant buffer (the engine never writes a
 //! read buffer, so saving that index as a context stays valid).
+use crate::fit;
 use nv_rm_core::conv::{u64_from_usize, usize_from_u32};
 
 use super::{Av1Codec, Av1Out, CDF_BUFFER_SIZE, CDF_BUFFERS, DPB_SLOTS, PictureJob, desc};
@@ -190,8 +191,14 @@ impl CodecDecoder for Av1Decoder {
         let (mv, seg) = mv_seg_sizes(max_width, max_height);
         self.mv_size = mv;
         self.slot_size = mv + seg;
-        self.pool = alloc.vram((self.slot_size * DPB_SLOTS as u64) as usize)?;
-        self.filter = alloc.vram(desc::filter_layout(max_width, max_height).total as usize)?;
+        self.pool = alloc.vram(fit(
+            self.slot_size * u64_from_usize(DPB_SLOTS),
+            "DPB pool size",
+        )?)?;
+        self.filter = alloc.vram(fit(
+            desc::filter_layout(max_width, max_height).total,
+            "filter size",
+        )?)?;
         if self.grain_capable {
             let l = self.surface_layout(max_width, max_height);
             self.chroma_offset = l.chroma_offset;
@@ -362,7 +369,10 @@ impl CodecDecoder for Av1Decoder {
         let err_idx = if j.hdr.frame_is_intra {
             0
         } else {
-            j.ref_slots[0].unwrap_or(0) as u32
+            fit(
+                j.ref_slots[0].unwrap_or(0),
+                "error-concealment reference slot",
+            )?
         };
         method(&mut w, 4, 0x200, &[APPLICATION_ID_AV1]);
         method(

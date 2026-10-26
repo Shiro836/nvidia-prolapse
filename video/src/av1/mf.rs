@@ -65,15 +65,18 @@ pub fn select(
         cands.push(LAST2);
     }
     for (j, &k) in cands.iter().take(3).enumerate() {
-        mf.mf_type[j] = (k + 1) as u8;
+        // k is a reference index below REFS_PER_FRAME (7).
+        mf.mf_type[j] = u8::try_from(k + 1).expect("reference index < 7");
         let r = recs[k].expect("a candidate passed usable(), which needs its record");
         let dist = get_relative_dist(seq, h.order_hint, r.order_hint);
         if h.use_ref_frame_mvs && dist.abs() <= MAX_OFFSET {
             mf.use_temporal[j] = true;
             out[j] = slots[k];
             for rr in 0..7 {
-                mf.mfmv_offset[j][rr] =
-                    get_relative_dist(seq, r.order_hint, r.ref_hints[rr]) as i16;
+                mf.mfmv_offset[j][rr] = i16::from(
+                    i8::try_from(get_relative_dist(seq, r.order_hint, r.ref_hints[rr]))
+                        .expect("relative distance within -128..=127"),
+                );
                 mf.mfmv_side[j][rr] =
                     i8::from(get_relative_dist(seq, r.ref_hints[rr], r.order_hint) > 0);
             }
