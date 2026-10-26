@@ -8,6 +8,8 @@
 //! sizes/offsets are checked against a gcc compile of the header (table in the
 //! tests; the C program printing them is in the test comment).
 
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
+
 /// `nvdec_vp9_pic_s` (256 bytes). Bitfield words:
 /// - `bits_14`: key_increment[0:6] encryption_mode[6:10] sw_hdr_skip_length[10:24]
 ///   key_slot_index[24:28] ssm_en[28] enable_histogram[29]
@@ -17,7 +19,7 @@
 /// - `v1_bits`: external_ref_mem_dis[0] bit_depth[1:5] error_recovery_start_pos[5:7]
 ///   error_external_mv_en[7]
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Vp9PicS {
     pub wrapped_session_key: [u32; 4],
     pub wrapped_content_key: [u32; 4],
@@ -69,7 +71,7 @@ pub struct Vp9PicS {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Vp9Dims {
     pub width: u16,
     pub height: u16,
@@ -78,7 +80,7 @@ pub struct Vp9Dims {
 
 /// `nvdec_nmv_context` (69 bytes).
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct NmvContext {
     pub joints: [u8; 3],
     pub sign: [u8; 2],
@@ -97,7 +99,7 @@ pub type CoefProbs = [[[[[u8; 4]; 6]; 6]; 2]; 2];
 /// split into an 8-byte part and a 1-byte `*_b` tail; 3-node trees are padded
 /// to 4.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Vp9AdaptiveProbs {
     pub inter_mode_prob: [[u8; 4]; 7],
     pub intra_inter_prob: [u8; 4],
@@ -126,7 +128,7 @@ pub struct Vp9AdaptiveProbs {
 
 /// `nvdec_vp9EntropyProbs_t` (3744 bytes), the VP9_SET_PROB_TAB_BUF target.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Vp9EntropyProbs {
     pub kf_bmode_prob: [[[u8; 8]; 10]; 10],
     pub kf_bmode_prob_b: [[[u8; 1]; 10]; 10],
@@ -144,7 +146,7 @@ pub struct Vp9EntropyProbs {
 
 /// `nvdec_nmv_context_counts` (424 bytes).
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct NmvCounts {
     pub joints: [u32; 4],
     pub sign: [[u32; 2]; 2],
@@ -163,7 +165,7 @@ pub type CoefCounts = [[[[[u32; 4]; 6]; 6]; 2]; 2];
 /// target written by the engine. Tree-coded symbols are counted per symbol
 /// except `inter_mode_counts`, which holds per-node [bit] counts.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Vp9EntropyCounts {
     pub inter_mode_counts: [[[u32; 2]; 3]; 7],
     pub sb_ymode_counts: [[u32; 10]; 4],
@@ -200,7 +202,9 @@ const _: () = assert!(std::mem::size_of::<Vp9EntropyCounts>() == 13264);
 /// Nested structs are flattened (`v1_*`, `v2_*`, `v3_*`); the never-written
 /// `nvdec_ecdma_config_s` and `nvdec_pass2_otf_ext_s` are opaque words.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
 pub struct NvdecHevcPicS {
     pub wrapped_session_key: [u32; 4],
     pub wrapped_content_key: [u32; 4],
@@ -273,47 +277,32 @@ pub const NVDEC_HEVC_PIC_S_SIZE: usize = 276;
 const _: () = assert!(size_of::<NvdecHevcPicS>() == NVDEC_HEVC_PIC_S_SIZE);
 
 impl NvdecHevcPicS {
+    /// The struct's bytes as the engine reads them (no padding: IntoBytes).
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: repr(C), only integer fields and arrays laid out without
-        // padding (size asserted equal to the C sizeof), so every byte is
-        // initialized; the borrow keeps `self` alive.
-        unsafe { std::slice::from_raw_parts((self as *const Self).cast::<u8>(), size_of::<Self>()) }
+        IntoBytes::as_bytes(self)
     }
 }
 
-/// Plain-old-data marker for the structs above (all-integer, no padding
-/// bytes other than explicit `pad`/`reserved` fields).
-///
-/// # Safety
-/// Implementors must be repr(C) structs of integer arrays without implicit
-/// padding, valid for every bit pattern.
-pub unsafe trait Pod: Copy + 'static {
+/// Byte access for the structs above: all-integer, no padding bytes other
+/// than explicit `pad`/`reserved` fields (checked by the zerocopy derives).
+pub trait Pod: FromBytes + IntoBytes + Immutable + KnownLayout + Copy + 'static {
+    /// The struct's bytes.
     fn as_bytes(&self) -> &[u8] {
-        // SAFETY: Pod guarantees no implicit padding and plain integer fields.
-        unsafe {
-            std::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                std::mem::size_of::<Self>(),
-            )
-        }
+        IntoBytes::as_bytes(self)
     }
+    /// The all-zero value.
     fn zeroed() -> Self {
-        // SAFETY: all-zero is a valid value of every Pod type.
-        unsafe { std::mem::zeroed() }
+        FromZeros::new_zeroed()
     }
+    /// The struct read from the start of `bytes` (unaligned), or None when
+    /// `bytes` is shorter than the struct.
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < std::mem::size_of::<Self>() {
-            return None;
-        }
-        // SAFETY: length checked; every bit pattern is valid; unaligned read.
-        Some(unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Self) })
+        Self::read_from_prefix(bytes).ok().map(|(value, _)| value)
     }
 }
-// SAFETY: integer-only repr(C) structs; sizes asserted above equal the sum of
-// their fields (no implicit padding) in the offset test.
-unsafe impl Pod for Vp9PicS {}
-unsafe impl Pod for Vp9EntropyProbs {}
-unsafe impl Pod for Vp9EntropyCounts {}
+impl Pod for Vp9PicS {}
+impl Pod for Vp9EntropyProbs {}
+impl Pod for Vp9EntropyCounts {}
 
 #[cfg(test)]
 mod tests {
