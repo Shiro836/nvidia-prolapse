@@ -132,8 +132,16 @@ impl OpenedBridge {
         let mut info = std::mem::MaybeUninit::<Info>::uninit();
         // SAFETY: both outputs are exclusive and writable for the call; the
         // call writes `info` only on success, and it is never read here.
-        let status =
-            unsafe { nv_rm_open(pci[0], pci[1], pci[2], pci[3], &mut raw, info.as_mut_ptr()) };
+        let status = unsafe {
+            nv_rm_open(
+                pci[0],
+                pci[1],
+                pci[2],
+                pci[3],
+                &raw mut raw,
+                info.as_mut_ptr(),
+            )
+        };
         let opened = (status == 0)
             .then(|| ptr::NonNull::new(raw))
             .flatten()
@@ -266,7 +274,7 @@ impl<'b> CpuMap<'b> {
     pub(in crate::mesa) fn new(b: &'b Bridge, memory: u64) -> Self {
         let mut address = 0usize;
         // SAFETY: live bridge; `address` is an exclusive usize the call writes.
-        let status = unsafe { nv_rm_map(raw(b), memory, &mut address) };
+        let status = unsafe { nv_rm_map(raw(b), memory, &raw mut address) };
         assert_eq!(status, 0, "nv_rm_map");
         // The mapping covers the whole allocation, rounded up to CPU pages
         // (rm.rs Memory::map_once), so the allocation size bounds it.
@@ -321,6 +329,10 @@ impl<'b> CpuMap<'b> {
     /// (one bounds check for the run; BAR1 write-traffic generator).
     pub(in crate::mesa) fn fill_u64_counting(&self, first: u64) -> u64 {
         let count = self.len / size_of::<u64>();
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "the base is a page-aligned mapping"
+        )]
         let words = self.base.cast::<u64>();
         let mut value = first;
         for i in 0..count {
@@ -354,7 +366,7 @@ pub(in crate::mesa) fn sync_create(
 ) -> std::result::Result<SyncHandle, i32> {
     let mut id = 0;
     // SAFETY: live bridge; `id` is an exclusive u64 the call writes.
-    let status = unsafe { nv_rm_sync_create(raw(b), flags, initial, &mut id) };
+    let status = unsafe { nv_rm_sync_create(raw(b), flags, initial, &raw mut id) };
     if status == 0 {
         Ok(SyncHandle { id })
     } else {

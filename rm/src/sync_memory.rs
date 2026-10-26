@@ -9,6 +9,7 @@ use crate::{
     platform,
     rm::{Error, Result},
 };
+use nv_rm_core::conv::u64_from_usize;
 use std::{
     fs::File,
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
@@ -23,7 +24,7 @@ const REQUIRED_SEALS: u32 = 1 | 2 | 4;
 const WRITE_SEALS: u32 = 8 | 16; // WRITE | FUTURE_WRITE forbid writable imports.
 
 fn validate_properties(regular: bool, size: u64, seals: u32) -> Result<()> {
-    if !regular || size != PAYLOAD_SIZE as u64 {
+    if !regular || size != u64_from_usize(PAYLOAD_SIZE) {
         return Err(Error::Contract(format!(
             "sync memfd must be a regular {PAYLOAD_SIZE}-byte file (size {size})"
         )));
@@ -54,7 +55,7 @@ impl SyncMemory {
         let file = File::from(
             platform::create_sealable_memfd().map_err(|e| Error::Io("create sync memfd", e))?,
         );
-        file.set_len(PAYLOAD_SIZE as u64)
+        file.set_len(u64_from_usize(PAYLOAD_SIZE))
             .map_err(|e| Error::Io("size sync memfd", e))?;
         platform::add_file_seals(file.as_raw_fd(), REQUIRED_SEALS)
             .map_err(|e| Error::Io("seal sync memfd extent", e))?;
@@ -96,7 +97,8 @@ impl SyncMemory {
                 0,
             )
         };
-        if raw as isize == -1 {
+        // MAP_FAILED is `(void *)-1` (sys/mman.h).
+        if raw.addr() == usize::MAX {
             return Err(Error::Io("map sync memfd", std::io::Error::last_os_error()));
         }
         let Some(pointer) = NonNull::new(raw.cast::<u8>()) else {
@@ -132,7 +134,13 @@ impl SyncMemory {
         // SAFETY: the page-aligned mapping plus an 8-aligned offset is
         // 8-aligned; AtomicU64 tolerates the other processes' concurrent
         // atomic writes.
-        unsafe { &*word.cast::<AtomicU64>() }
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "the offset is asserted 8-byte aligned above and the mapping is page aligned"
+        )]
+        let word = word.cast::<AtomicU64>();
+        // SAFETY: as above: in bounds, aligned, atomic-only access.
+        unsafe { &*word }
     }
 }
 impl Drop for SyncMemory {
@@ -248,7 +256,7 @@ mod tests {
         }
         let mut status = 0;
         loop {
-            let got = unsafe { waitpid(pid, &mut status, 0) };
+            let got = unsafe { waitpid(pid, &raw mut status, 0) };
             if got == pid {
                 break;
             }

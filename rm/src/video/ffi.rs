@@ -17,7 +17,9 @@ thread_local! {
 fn fail(e: VideoError) -> i32 {
     let msg = e.message().replace('\0', " ");
     crate::diag::diag!("nv-video: {msg}");
-    LAST_ERROR.with(|l| *l.borrow_mut() = CString::new(msg).unwrap_or_default());
+    LAST_ERROR.with(|l| {
+        *l.borrow_mut() = CString::new(msg).expect("interior NULs were replaced above");
+    });
     e.code()
 }
 
@@ -95,9 +97,9 @@ impl NvVideoSession {
     /// The session for one call; a second borrow means the caller broke the
     /// header's one-call-at-a-time rule.
     fn session(&self) -> Result<std::cell::RefMut<'_, Session>, VideoError> {
-        self.session
-            .try_borrow_mut()
-            .map_err(|_| VideoError::Invalid("session used by two calls at once".into()))
+        self.session.try_borrow_mut().map_err(|error| {
+            VideoError::Invalid(format!("session used by two calls at once: {error}"))
+        })
     }
 }
 
@@ -212,6 +214,7 @@ pub unsafe extern "C" fn nv_video_device_open(
     info: *mut NvVideoDeviceInfo,
 ) -> i32 {
     guard("nv_video_device_open", None, || {
+        crate::diag::install_logger();
         null(out, "out")?;
         let dev = VideoDevice::open()?;
         if !info.is_null() {
@@ -271,7 +274,7 @@ pub unsafe extern "C" fn nv_video_query_caps(
     let device = unsafe { dev.as_ref() };
     guard(
         "nv_video_query_caps",
-        device.map(|d| d as &dyn Failable),
+        device.map(|d| -> &dyn Failable { d }),
         || {
             null(dev, "dev")?;
             null(caps, "caps")?;
@@ -298,7 +301,7 @@ pub unsafe extern "C" fn nv_video_session_create(
     let device = unsafe { dev.as_ref() };
     guard(
         "nv_video_session_create",
-        device.map(|d| d as &dyn Failable),
+        device.map(|d| -> &dyn Failable { d }),
         || {
             null(dev, "dev")?;
             null(info, "info")?;
@@ -381,7 +384,7 @@ pub unsafe extern "C" fn nv_video_decode(
     let handle = unsafe { session_ref(s) };
     guard(
         "nv_video_decode",
-        handle.map(|h| h as &dyn Failable),
+        handle.map(|h| -> &dyn Failable { h }),
         || {
             null(s, "session")?;
             if data.is_null() && len != 0 {
@@ -395,8 +398,9 @@ pub unsafe extern "C" fn nv_video_decode(
             };
             let shown = present(handle)?.session()?.decode(d, timestamp, flags)?;
             // ABI v2: the displayable pictures this unit produced (callers test rc < 0).
-            i32::try_from(shown)
-                .map_err(|_| VideoError::Invalid("unit produced more than 2^31 pictures".into()))
+            i32::try_from(shown).map_err(|error| {
+                VideoError::Invalid(format!("unit produced more than 2^31 pictures: {error}"))
+            })
         },
     )
 }
@@ -412,7 +416,7 @@ pub unsafe extern "C" fn nv_video_next_picture(
     let handle = unsafe { session_ref(s) };
     guard(
         "nv_video_next_picture",
-        handle.map(|h| h as &dyn Failable),
+        handle.map(|h| -> &dyn Failable { h }),
         || {
             null(s, "session")?;
             null(pic, "pic")?;
@@ -455,7 +459,7 @@ pub unsafe extern "C" fn nv_video_picture_hdr(
     let handle = unsafe { session_ref(s) };
     guard(
         "nv_video_picture_hdr",
-        handle.map(|h| h as &dyn Failable),
+        handle.map(|h| -> &dyn Failable { h }),
         || {
             null(s, "session")?;
             null(metadata, "metadata")?;
@@ -479,7 +483,7 @@ pub unsafe extern "C" fn nv_video_required_size(
     let handle = unsafe { session_ref(s) };
     guard(
         "nv_video_required_size",
-        handle.map(|h| h as &dyn Failable),
+        handle.map(|h| -> &dyn Failable { h }),
         || {
             null(s, "session")?;
             null(width, "width")?;
@@ -502,11 +506,15 @@ pub unsafe extern "C" fn nv_video_required_size(
 pub unsafe extern "C" fn nv_video_flush(s: *mut NvVideoSession) -> i32 {
     // SAFETY: `s` is NULL or a live session for the call (# Safety).
     let handle = unsafe { session_ref(s) };
-    guard("nv_video_flush", handle.map(|h| h as &dyn Failable), || {
-        null(s, "session")?;
-        present(handle)?.session()?.flush()?;
-        Ok(0)
-    })
+    guard(
+        "nv_video_flush",
+        handle.map(|h| -> &dyn Failable { h }),
+        || {
+            null(s, "session")?;
+            present(handle)?.session()?.flush()?;
+            Ok(0)
+        },
+    )
 }
 
 /// # Safety
@@ -524,7 +532,7 @@ pub unsafe extern "C" fn nv_video_copy_out(
     let handle = unsafe { session_ref(s) };
     guard(
         "nv_video_copy_out",
-        handle.map(|h| h as &dyn Failable),
+        handle.map(|h| -> &dyn Failable { h }),
         || {
             null(s, "session")?;
             null(target, "target")?;
@@ -560,7 +568,7 @@ pub unsafe extern "C" fn nv_video_picture_release(s: *mut NvVideoSession, id: u6
     let handle = unsafe { session_ref(s) };
     guard(
         "nv_video_picture_release",
-        handle.map(|h| h as &dyn Failable),
+        handle.map(|h| -> &dyn Failable { h }),
         || {
             null(s, "session")?;
             present(handle)?.session()?.release(id)?;

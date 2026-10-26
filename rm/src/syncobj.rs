@@ -227,7 +227,11 @@ impl Shared {
     }
     /// Completed values stay completed; only unfinished points become errors.
     pub(crate) fn fail(&self) -> bool {
-        let _ = self.refresh();
+        // Record what did complete before failing the rest. A slot that cannot
+        // be read any more counts as unfinished: it becomes an error below.
+        if let Err(error) = self.refresh() {
+            crate::diag::diag!("RM sync payload: completion read before failing: {error}");
+        }
         self.store(ERROR, 1)
     }
     fn ready(&self, target: u64, pending: bool) -> Result<bool> {

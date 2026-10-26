@@ -201,7 +201,7 @@ impl CodecDecoder for Av1Decoder {
             "filter size",
         )?)?;
         if self.grain_capable {
-            let l = self.surface_layout(max_width, max_height);
+            let l = self.surface_layout(max_width, max_height)?;
             self.chroma_offset = l.chroma_offset;
             for p in self.private.iter_mut() {
                 *p = alloc.vram(l.size)?;

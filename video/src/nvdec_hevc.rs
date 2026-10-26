@@ -28,7 +28,7 @@
 //!   `constrained_intra_pred_flag`, `transform_skip_enabled_flag`,
 //!   `slice_segment_header_extension_present_flag`.
 //! - Streams hevc.py would silently mis-describe fail with
-//!   `Error::Contract`: SPS `scaling_list_enabled_flag` (hevc.py never sets
+//!   [`NvdecHevcError`]: SPS `scaling_list_enabled_flag` (hevc.py never sets
 //!   `scalingListEnable` nor uploads matrices), chroma formats other than 4:2:0
 //!   (the crop arithmetic assumes SubWidthC = SubHeightC = 2), VCL NAL types
 //!   other than TRAIL_N/TRAIL_R/IDR_W_RADL/IDR_N_LP (hevc.py drops CRA, BLA,
@@ -51,7 +51,6 @@
 //! descriptor immediately, so a picture still pending flush sees them.
 use nv_rm_core::conv::usize_from_u32;
 
-use nv_rm_core::Error;
 use nv_rm_core::conv::low_u32;
 pub use nv_rm_sys::nvdec_drv::{NVDEC_HEVC_PIC_S_SIZE, NvdecHevcPicS};
 use std::mem::size_of;
@@ -65,10 +64,33 @@ pub struct HevcFrame {
     pub is_hist: bool,
 }
 
-type Result<T> = std::result::Result<T, Error>;
+/// Why this parser rejected a stream (the cases listed in the module docs).
+#[derive(Debug, thiserror::Error)]
+pub enum NvdecHevcError {
+    /// Valid HEVC this parser does not describe (scaling lists, PCM, sub-layers, long-term
+    /// references, CRA/BLA/RASL/RADL pictures, chroma other than 4:2:0, ...).
+    #[error("HEVC: {0}")]
+    Unsupported(String),
+    /// A truncated or inconsistent bitstream, or a value that does not fit its descriptor field.
+    #[error("HEVC: {0}")]
+    Malformed(String),
+}
 
-fn contract<T>(message: String) -> Result<T> {
-    Err(Error::Contract(format!("HEVC: {message}")))
+/// rm's old NVDEC path reports a rejected stream as a broken contract of its input.
+impl From<NvdecHevcError> for nv_rm_core::Error {
+    fn from(error: NvdecHevcError) -> Self {
+        Self::Contract(error.to_string())
+    }
+}
+
+type Result<T> = std::result::Result<T, NvdecHevcError>;
+
+fn unsupported<T>(message: String) -> Result<T> {
+    Err(NvdecHevcError::Unsupported(message))
+}
+
+fn malformed<T>(message: String) -> Result<T> {
+    Err(NvdecHevcError::Malformed(message))
 }
 
 /// Bytes per frame descriptor (pic_s + Blackwell extension + tile sizes).
@@ -126,11 +148,11 @@ impl<'a> BitReader<'a> {
     /// `u(n)`, n <= 32.
     pub fn u(&mut self, n: u32) -> Result<u32> {
         if n > 32 {
-            return contract(format!("u({n}) wider than 32 bits"));
+            return malformed(format!("u({n}) wider than 32 bits"));
         }
         let end = self.pos + usize_from_u32(n);
         if end > self.data.len() * 8 {
-            return contract(format!(
+            return malformed(format!(
                 "bitstream truncated: need bits {}..{end}, have {}",
                 self.pos,
                 self.data.len() * 8
@@ -165,7 +187,7 @@ impl<'a> BitReader<'a> {
         while self.u(1)? == 0 {
             leading_zero_bits += 1;
             if leading_zero_bits > 31 {
-                return contract("ue(v) longer than 32 bits".into());
+                return malformed("ue(v) longer than 32 bits".into());
             }
         }
         let rest = u64::from(self.u(leading_zero_bits)?);
@@ -225,7 +247,7 @@ fn st_ref_pic_set(
         r.u(1)?; // delta_rps_sign
         r.ue()?; // abs_delta_rps_minus1
         let Some((neg, pos)) = last_sps_rps else {
-            return contract(
+            return unsupported(
                 "inter-predicted short-term RPS inside the SPS is not supported".into(),
             );
         };
@@ -279,7 +301,7 @@ fn parse_sps(r: &mut BitReader) -> Result<Sps> {
     r.u(1)?; // sps_temporal_id_nesting_flag
     // 7.3.3 profile_tier_level(1, 0)
     if sps_max_sub_layers_minus1 != 0 {
-        return contract(format!(
+        return unsupported(format!(
             "sps_max_sub_layers_minus1 = {sps_max_sub_layers_minus1}: sub-layers are not supported"
         ));
     }
@@ -313,7 +335,7 @@ fn parse_sps(r: &mut BitReader) -> Result<Sps> {
     let max_transform_hierarchy_depth_intra = r.ue()?;
     if r.flag()? {
         let data_present = r.u(1)?;
-        return contract(format!(
+        return unsupported(format!(
             "scaling_list_enabled_flag = 1 (sps_scaling_list_data_present_flag = {data_present}): \
              scaling lists are not supported"
         ));
@@ -322,7 +344,7 @@ fn parse_sps(r: &mut BitReader) -> Result<Sps> {
     let sample_adaptive_offset_enabled_flag = r.u(1)?;
     let pcm_enabled_flag = r.u(1)?;
     if pcm_enabled_flag != 0 {
-        return contract("pcm_enabled_flag = 1: PCM is not supported".into());
+        return unsupported("pcm_enabled_flag = 1: PCM is not supported".into());
     }
     let num_short_term_ref_pic_sets = r.ue()?;
     let mut last_rps = None;
@@ -330,22 +352,22 @@ fn parse_sps(r: &mut BitReader) -> Result<Sps> {
         last_rps = st_ref_pic_set(r, i, num_short_term_ref_pic_sets, None)?;
     }
     if r.flag()? {
-        return contract(
+        return unsupported(
             "long_term_ref_pics_present_flag = 1: long-term references are not supported".into(),
         );
     }
     let sps_temporal_mvp_enabled_flag = r.u(1)?;
     let strong_intra_smoothing_enabled_flag = r.u(1)?;
     if chroma_format_idc != 1 {
-        return contract(format!(
+        return unsupported(format!(
             "chroma_format_idc = {chroma_format_idc}: only 4:2:0 is supported"
         ));
     }
     if pic_width_in_luma_samples == 0 || pic_height_in_luma_samples == 0 {
-        return contract("SPS with a zero picture dimension".into());
+        return malformed("SPS with a zero picture dimension".into());
     }
     if log2_max_luma_coding_block_size > 6 {
-        return contract(format!(
+        return malformed(format!(
             "CtbLog2SizeY = {log2_max_luma_coding_block_size} is out of range"
         ));
     }
@@ -466,10 +488,10 @@ fn parse_pps(r: &mut BitReader) -> Result<Pps> {
     let loop_filter_across_slices_enabled_flag = r.u(1)?;
     let deblocking_filter_control_present_flag = r.u(1)?;
     if deblocking_filter_control_present_flag != 0 {
-        return contract("deblocking_filter_control_present_flag = 1 is not supported".into());
+        return unsupported("deblocking_filter_control_present_flag = 1 is not supported".into());
     }
     if r.flag()? {
-        return contract(
+        return unsupported(
             "pps_scaling_list_data_present_flag = 1: scaling lists are not supported".into(),
         );
     }
@@ -565,7 +587,7 @@ fn parse_slice_header(
                 sps.last_rps,
             )?;
         } else if sps.num_short_term_ref_pic_sets > 1 {
-            return contract(
+            return unsupported(
                 "short_term_ref_pic_set_idx is not supported (num_short_term_ref_pic_sets > 1)"
                     .into(),
             );
@@ -705,7 +727,7 @@ const _: () = assert!(
 
 fn set_bits(unit: &mut u32, field: BitField, value: i64, name: &str) -> Result<()> {
     if value < 0 || value >= 1i64 << field.width {
-        return contract(format!(
+        return malformed(format!(
             "{name} = {value} does not fit its {}-bit descriptor field",
             field.width
         ));
@@ -718,7 +740,7 @@ fn set_bits(unit: &mut u32, field: BitField, value: i64, name: &str) -> Result<(
 
 fn fit<T: TryFrom<S>, S: Copy + std::fmt::Display>(value: S, name: &str) -> Result<T> {
     T::try_from(value).or_else(|_unrepresentable| {
-        contract(format!(
+        malformed(format!(
             "{name} = {value} does not fit its {}-byte descriptor field",
             size_of::<T>()
         ))
@@ -1016,7 +1038,7 @@ impl Parser {
         let hdr = &nals[0].hdr;
         let nal_type = nals[0].nal_type;
         if nals.iter().any(|n| n.nal_type != nal_type) {
-            return contract(format!(
+            return malformed(format!(
                 "picture at offset {} mixes NAL unit types",
                 nals[0].offset
             ));
@@ -1024,7 +1046,7 @@ impl Parser {
         let ctx = &mut self.ctx;
         let curr_pic_idx = (0u8..16)
             .find(|i| self.history.iter().all(|&(idx, _)| idx != *i))
-            .ok_or_else(|| Error::Contract("HEVC: no free picture slot among 16".into()))?;
+            .ok_or_else(|| NvdecHevcError::Malformed("no free picture slot among 16".into()))?;
         ctx.curr_pic_idx = curr_pic_idx;
         if is_idr(nal_type) {
             self.history.clear();
@@ -1103,7 +1125,7 @@ impl Parser {
             let mut out = [0u8; 16];
             let all: Vec<u8> = first.iter().chain(second).map(|&(_, idx)| idx).collect();
             if all.len() > 16 {
-                return contract(format!("{} reference pictures exceed 16", all.len()));
+                return malformed(format!("{} reference pictures exceed 16", all.len()));
             }
             out[..all.len()].copy_from_slice(&all);
             Ok(out)
@@ -1129,7 +1151,7 @@ impl Parser {
         match &pps.tiles {
             Some(t) if t.uniform_spacing_flag => {
                 if ctx.num_tile_columns() != 1 || ctx.num_tile_rows() != 1 {
-                    return contract(
+                    return unsupported(
                         "uniform tile spacing with more than one tile is not supported".into(),
                     );
                 }
@@ -1159,7 +1181,7 @@ impl Parser {
             }
         }
         if desc.len() > DESCRIPTOR_STRIDE {
-            return contract(format!(
+            return malformed(format!(
                 "tile table needs {} bytes, descriptor holds {}",
                 desc.len() - TILE_SIZES_OFFSET,
                 DESCRIPTOR_STRIDE - TILE_SIZES_OFFSET
@@ -1209,12 +1231,12 @@ pub fn parse_hevc(bitstream: &[u8]) -> Result<HevcParsed> {
     let mut start = 1usize;
     while start < bitstream.len() {
         if bitstream.get(start..start + 3) != Some(&[0, 0, 1][..]) {
-            return contract(format!("NAL unit start code not found at offset {start}"));
+            return malformed(format!("NAL unit start code not found at offset {start}"));
         }
         let end = find_start_code(bitstream, start + 3).unwrap_or(bitstream.len());
         let len = end - start;
         let Some(&header) = bitstream.get(start + 3) else {
-            return contract(format!("NAL unit at offset {start} has no header"));
+            return malformed(format!("NAL unit at offset {start} has no header"));
         };
         let nal_type = header >> 1 & 0x3f;
         let payload = bitstream.get(start + 5..end).unwrap_or(&[]);
@@ -1231,7 +1253,7 @@ pub fn parse_hevc(bitstream: &[u8]) -> Result<HevcParsed> {
             }
             NAL_TRAIL_N | NAL_TRAIL_R | NAL_IDR_W_RADL | NAL_IDR_N_LP => {
                 let (Some(s), Some(q)) = (&sps, &pps) else {
-                    return contract(format!("slice at offset {start} before SPS/PPS"));
+                    return malformed(format!("slice at offset {start} before SPS/PPS"));
                 };
                 let hdr = parse_slice_header(&mut BitReader::new(payload), nal_type, s, q)?;
                 if hdr.first_slice_segment_in_pic_flag {
@@ -1245,7 +1267,7 @@ pub fn parse_hevc(bitstream: &[u8]) -> Result<HevcParsed> {
                 });
             }
             0..=31 => {
-                return contract(format!(
+                return unsupported(format!(
                     "VCL NAL unit type {nal_type} at offset {start} is not supported \
                      (only TRAIL_N, TRAIL_R, IDR_W_RADL, IDR_N_LP)"
                 ));
@@ -1255,17 +1277,17 @@ pub fn parse_hevc(bitstream: &[u8]) -> Result<HevcParsed> {
         start = end;
     }
     let (Some(s), Some(q)) = (&sps, &pps) else {
-        return contract("stream has no SPS/PPS".into());
+        return malformed("stream has no SPS/PPS".into());
     };
     p.flush(s, q)?;
     if p.out.frames.is_empty() {
-        return contract("stream has no pictures".into());
+        return malformed("stream has no pictures".into());
     }
     let [left, right, top, bottom] = s.conf_win_offsets.map(i64::from);
     let crop = |coded: u32, a: i64, b: i64, name: &str| -> Result<usize> {
         let v = i64::from(coded) - 2 * (a + b);
         if v <= 0 {
-            return contract(format!("conformance window leaves {name} = {v}"));
+            return malformed(format!("conformance window leaves {name} = {v}"));
         }
         fit(v, name)
     };

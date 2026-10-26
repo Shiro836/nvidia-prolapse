@@ -25,9 +25,9 @@ fn selected_pci() -> [u32; 4] {
         .expect("NVIDIA RM GPU");
     [
         card.pci.domain,
-        card.pci.bus as u32,
-        card.pci.slot as u32,
-        card.pci.function as u32,
+        u32::from(card.pci.bus),
+        u32::from(card.pci.slot),
+        u32::from(card.pci.function),
     ]
 }
 fn open() -> Arc<Bridge> {
@@ -432,7 +432,7 @@ fn in_forked_child(child: impl FnOnce() -> i32, timeout: Duration) -> Option<i32
     loop {
         // SAFETY: waits for our own child; `status` is a live local.
         // WNOHANG (1): the wait is bounded by `timeout`.
-        let got = unsafe { waitpid(pid, &mut status, 1) };
+        let got = unsafe { waitpid(pid, &raw mut status, 1) };
         if got == pid {
             break;
         }
@@ -441,7 +441,7 @@ fn in_forked_child(child: impl FnOnce() -> i32, timeout: Duration) -> Option<i32
             // SAFETY: signals our own child (SIGKILL), then reaps it.
             unsafe { kill(pid, 9) };
             // SAFETY: as above; blocking reap of the killed child.
-            unsafe { waitpid(pid, &mut status, 0) };
+            unsafe { waitpid(pid, &raw mut status, 0) };
             return None;
         }
         thread::sleep(Duration::from_millis(10));

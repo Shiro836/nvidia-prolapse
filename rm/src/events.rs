@@ -105,10 +105,10 @@ fn validate_compat(compat: Compat) -> Result<()> {
         ("NV_ESC_FREE_OS_EVENT", 207),
         ("NV01_EVENT", 5),
         ("NV01_EVENT_OS_EVENT", 0x79),
-        ("NV01_EVENT_WITHOUT_EVENT_DATA", DATALESS as u64),
-        ("NV01_EVENT_SUBDEVICE_SPECIFIC", SUBDEVICE as u64),
-        ("NV01_EVENT_NONSTALL_INTR", NONSTALL as u64),
-        ("NV2080_NOTIFIERS_FIFO_EVENT_MTHD", HOST as u64),
+        ("NV01_EVENT_WITHOUT_EVENT_DATA", u64::from(DATALESS)),
+        ("NV01_EVENT_SUBDEVICE_SPECIFIC", u64::from(SUBDEVICE)),
+        ("NV01_EVENT_NONSTALL_INTR", u64::from(NONSTALL)),
+        ("NV2080_NOTIFIERS_FIFO_EVENT_MTHD", u64::from(HOST)),
         ("NV2080_CTRL_CMD_EVENT_SET_NOTIFICATION", 0x20800301),
         ("NV2080_CTRL_CMD_EVENT_SET_TRIGGER_FIFO", 0x20800308),
         ("NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_DISABLE", 0),
@@ -154,7 +154,8 @@ fn os_event(device: &Device, fd: RawFd, allocate: bool) -> Result<()> {
     let mut params = abi::OsEvent {
         client: device.client.root,
         device: device.handle,
-        fd: u32::try_from(fd).map_err(|_| Error::Contract("negative RM event FD".into()))?,
+        fd: u32::try_from(fd)
+            .map_err(|error| Error::Contract(format!("negative RM event FD: {error}")))?,
         status: 0,
     };
     let operation = if allocate {
@@ -187,7 +188,9 @@ fn listener(device: &Device, parent: u32, fd: RawFd, index: u32) -> Result<u32> 
             source: 0,
             class: 0x79,
             notify_index: index,
-            data: fd as u64,
+            // NvP64 holding the descriptor, sign-extended as the C ABI does
+            // for an int stored in a 64-bit field (nv-unix-nvos-params-wrappers.h).
+            data: i64::from(fd).cast_unsigned(),
         },
     )
 }
@@ -215,7 +218,10 @@ impl RmEvents {
                 state: Lifecycle::default(),
             }),
         };
-        let r = source.resources.as_mut().unwrap();
+        let r = source
+            .resources
+            .as_mut()
+            .expect("constructed with resources above");
         os_event(device, r.fd.as_raw_fd(), true)?;
         r.state.os_event = true;
         r.listener = listener(device, device.subdevice, r.fd.as_raw_fd(), index)?;
@@ -234,7 +240,12 @@ impl RmEvents {
     /// Only channel RC listeners post to this FD. It shares the cached source
     /// lifetime with HOST; the worker is the sole consumer of both descriptors.
     pub(crate) fn error_fd(&self) -> RawFd {
-        self.source.resources.as_ref().unwrap().error_fd.as_raw_fd()
+        self.source
+            .resources
+            .as_ref()
+            .expect("an event source holds its resources until it is dropped")
+            .error_fd
+            .as_raw_fd()
     }
 
     pub(crate) fn attach_channel<T: 'static>(
@@ -243,7 +254,11 @@ impl RmEvents {
         channel_class: u32,
         owner: Rc<T>,
     ) -> Result<ChannelEvents> {
-        let r = self.source.resources.as_ref().unwrap();
+        let r = self
+            .source
+            .resources
+            .as_ref()
+            .expect("an event source holds its resources until it is dropped");
         let index = rc_index(r.device.client.compat, channel_class)?;
         let index = notify_index(r.device.subdevice_instance, index, false)?;
         let handle = listener(&r.device, channel, r.error_fd.as_raw_fd(), index)?;
@@ -259,7 +274,12 @@ impl RmEvents {
 }
 impl AsRawFd for RmEvents {
     fn as_raw_fd(&self) -> RawFd {
-        self.source.resources.as_ref().unwrap().fd.as_raw_fd()
+        self.source
+            .resources
+            .as_ref()
+            .expect("an event source holds its resources until it is dropped")
+            .fd
+            .as_raw_fd()
     }
 }
 
@@ -276,7 +296,11 @@ pub(crate) struct HostListener {
 }
 impl RmEvents {
     pub(crate) fn host_listener(&self) -> Result<HostListener> {
-        let r = self.source.resources.as_ref().unwrap();
+        let r = self
+            .source
+            .resources
+            .as_ref()
+            .expect("an event source holds its resources until it is dropped");
         let index = notify_index(r.device.subdevice_instance, HOST, true)?;
         let fd = r.device.client.gpu_fd(r.device.card.minor)?;
         let raw = fd.as_raw_fd();
@@ -293,7 +317,12 @@ impl RmEvents {
     }
     /// Thread-independent broadcast handle (see trigger()).
     pub(crate) fn trigger_port(&self) -> TriggerPort {
-        let device = &self.source.resources.as_ref().unwrap().device;
+        let device = &self
+            .source
+            .resources
+            .as_ref()
+            .expect("an event source holds its resources until it is dropped")
+            .device;
         TriggerPort {
             port: device.client.port(),
             subdevice: device.subdevice,
@@ -307,7 +336,12 @@ impl AsRawFd for HostListener {
 }
 impl Drop for HostListener {
     fn drop(&mut self) {
-        let device = &self.source.resources.as_ref().unwrap().device;
+        let device = &self
+            .source
+            .resources
+            .as_ref()
+            .expect("an event source holds its resources until it is dropped")
+            .device;
         let raw = self.as_raw_fd();
         if self.listener != 0 {
             if let Err(error) = device.client.free(device.subdevice, self.listener) {
@@ -367,7 +401,12 @@ impl Drop for ChannelEvents {
         let Some(r) = self.resources.take() else {
             return;
         };
-        let device = &r.source.resources.as_ref().unwrap().device;
+        let device = &r
+            .source
+            .resources
+            .as_ref()
+            .expect("an event source holds its resources until it is dropped")
+            .device;
         if let Err(error) = device.client.free(r.channel, r.listener) {
             diag!("RM channel event teardown failed; retaining channel and event source: {error}");
             std::mem::forget(r);

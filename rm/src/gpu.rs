@@ -6,9 +6,10 @@
 use crate::diag::diag;
 use crate::{
     abi,
-    rm::{self, Device, Error, Memory, Result},
+    rm::{self, Device, Error, Memory, Result, WaitError},
     slots::{Slot, SlotPool},
 };
+use nv_rm_core::conv::{const_u32_from_usize, high_u32, low_u32, u64_from_usize, usize_from_u32};
 use std::{
     collections::VecDeque,
     os::fd::OwnedFd,
@@ -92,17 +93,17 @@ impl Object {
                 if query.count == 0 || query.count > 65536 {
                     return Err(Error::Contract("invalid RM engine class count".into()));
                 }
-                let mut classes = vec![0u32; query.count as usize];
-                query.classes = classes.as_mut_ptr() as u64;
+                let mut classes = vec![0u32; usize_from_u32(query.count)];
+                query.classes = u64_from_usize(classes.as_mut_ptr().expose_provenance());
                 device
                     .client
                     .control(device.subdevice, 0x20800124, &mut query)?;
-                if query.count as usize > classes.len() {
+                if usize_from_u32(query.count) > classes.len() {
                     return Err(Error::Contract(
                         "RM engine class count grew during query".into(),
                     ));
                 }
-                Ok(classes[..query.count as usize].contains(&class))
+                Ok(classes[..usize_from_u32(query.count)].contains(&class))
             },
         )?;
         Self::new(
@@ -219,7 +220,7 @@ struct MappingPlan {
 /// Turing+ PTE kinds (public tu102/gb202 dev_mmu.h).
 const KIND_GENERIC: u32 = 0x06;
 const KIND_GENERIC_COMPRESSIBLE: u32 = 0x08;
-const BIG_PAGE: u64 = crate::rm::BIG_PAGE as u64;
+const BIG_PAGE: u64 = u64_from_usize(crate::rm::BIG_PAGE);
 
 /// The PTE kind a VA may carry for this memory. NVK asks for the generic
 /// compressible kind for images it decided to compress; only memory RM made
@@ -302,7 +303,7 @@ fn mapping_plan_paged(
     let s8_chooser = generic_kind != KIND_GENERIC && kind == Some(KIND_S8);
     let typed = kind.is_some() && (!compat.supports_kind_override() || s8_chooser);
     if pages == crate::rm::PhysicalPages::Huge2M {
-        let block = crate::rm::POOL_BLOCK_SIZE as u64;
+        let block = u64_from_usize(crate::rm::POOL_BLOCK_SIZE);
         if kind.is_some()
             || offset != 0
             || length != block
@@ -394,7 +395,7 @@ impl AddressSpace {
         })
     }
     pub fn map(&self, memory: &Rc<Memory>) -> Result<GpuMapping> {
-        self.map_internal(memory, 0, memory.size as u64, None, None)
+        self.map_internal(memory, 0, u64_from_usize(memory.size), None, None)
     }
     /// Map an allocation range at a caller-managed VA. NVOS46 fixed-offset and
     /// page-kind override are public RM contracts (nvos.h), not relocations.
@@ -445,7 +446,7 @@ impl AddressSpace {
             self.device.client.compat,
             offset,
             length,
-            memory.size as u64,
+            u64_from_usize(memory.size),
             address,
             kind,
             memory.pages,
@@ -569,6 +570,19 @@ impl Drop for GpuMapping {
 
 pub(crate) use nv_rm_core::push::{hi_lo, method};
 
+/// Bound of the diagnostic checks' completion waits: the work is a few
+/// microseconds of copy or compute; anything slower is a hung channel.
+const CHECK_WAIT: Duration = Duration::from_secs(2);
+/// A word index or byte count of the copy/compute check (16384 words at
+/// most) as the u32 the pattern and `LINE_LENGTH_IN` take.
+fn check_word(i: usize) -> u32 {
+    u32::try_from(i).expect("the check copies at most 16384 words")
+}
+/// `GP_PUT` as the 32-bit USERD/ring word: `put` is an index below the ring's
+/// entry count.
+fn gp_put(put: usize) -> u32 {
+    u32::try_from(put).expect("GP_PUT stays below the ring's entry count")
+}
 /// One isolated hardware-copy smoke operation. It owns every object and mapping
 /// through completion or channel teardown. No shader compiler or Vulkan API yet.
 pub fn copy_check(device: &Rc<Device>) -> Result<usize> {
@@ -608,7 +622,7 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
     let mut completion = completion_memory.map()?;
     let mut doorbell = device.map_usermode()?;
     for i in 0..count {
-        src.write_u32(i * 4, (i as u32).wrapping_mul(0x12345) ^ 0x5aa5f00d)?;
+        src.write_u32(i * 4, check_word(i).wrapping_mul(0x12345) ^ 0x5aa5f00d)?;
         dst.write_u32(i * 4, 0)?;
     }
     for i in 0..65536 / 4 {
@@ -654,12 +668,12 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
     )?;
     let mut channel_params = abi::Channel {
         fifo_address: queue_va.address(),
-        entries: ENTRIES as u32,
+        entries: const { const_u32_from_usize(ENTRIES) },
         context_share: context.handle,
         ..Default::default()
     };
     channel_params.userd_memory[0] = queue_memory.handle;
-    channel_params.userd_offsets[0] = (ENTRIES * 8) as u64;
+    channel_params.userd_offsets[0] = u64_from_usize(ENTRIES * 8);
     let channel = Object::new(
         device,
         group.handle,
@@ -681,7 +695,7 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
         method(&mut words, 1, 0, &[engine_class]);
         method(&mut words, 1, 0x7b0, &hi_lo(crate::compute::LOCAL_WINDOW));
         method(&mut words, 1, 0x2a0, &hi_lo(crate::compute::SHARED_WINDOW));
-        method(&mut words, 1, 0x2b4, &[(job.address >> 8) as u32]);
+        method(&mut words, 1, 0x2b4, &[low_u32(job.address >> 8)]);
         method(&mut words, 1, 0x2c0, &[9]); // PREFETCH_SCHEDULE
     } else {
         method(&mut words, 4, 0, &[0xcab5]); // SET_OBJECT (class binding)
@@ -698,7 +712,7 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
                 destination_addr[1],
             ],
         );
-        method(&mut words, 4, 0x418, &[(count * 4) as u32]);
+        method(&mut words, 4, 0x418, &[check_word(count * 4)]);
         method(&mut words, 4, 0x300, &[2 | (1 << 7) | (1 << 8)]); // non-pipelined, pitch layouts
         let completion_addr = hi_lo(completion_va.address());
         method(
@@ -712,27 +726,42 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
     for (i, word) in words.iter().enumerate() {
         command.write_u32(i * 4, *word)?;
     }
-    let entry = command_va.address() | ((words.len() as u64) << 42) | (1 << 41);
-    ring.write_u32(0, entry as u32)?;
-    ring.write_u32(4, (entry >> 32) as u32)?;
+    let entry = command_va.address() | (u64_from_usize(words.len()) << 42) | (1 << 41);
+    ring.write_u32(0, low_u32(entry))?;
+    ring.write_u32(4, high_u32(entry))?;
     crate::platform::device_full_barrier();
     ring.write_u32(ENTRIES * 8 + 0x8c, 1)?; // GPPut in BlackwellAControlGPFifo
     crate::platform::device_full_barrier();
     doorbell.write_u32(0x90, token)?;
     crate::platform::device_full_barrier();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while completion.read_u32(0)? != 1 {
-        if Instant::now() >= deadline {
-            return Err(Error::Contract("GPU work timed out after 2 seconds; channel will be torn down before memory is released".into()));
+    let (start, limit) = (Instant::now(), CHECK_WAIT);
+    loop {
+        let value = completion.read_u32(0)?;
+        if value == 1 {
+            break;
+        }
+        if start.elapsed() >= limit {
+            // The channel is torn down before its memory is released.
+            return Err(WaitError::Timeout {
+                operation: if compute {
+                    "compute check"
+                } else {
+                    "copy check"
+                },
+                object: format!("completion word of the check channel (reads {value:#x})"),
+                limit,
+                elapsed: start.elapsed(),
+            }
+            .into());
         }
         std::thread::sleep(Duration::from_micros(100));
     }
     crate::platform::device_full_barrier();
     for i in 0..count {
         let expected = if compute {
-            i as u32 * 17 + 123
+            check_word(i) * 17 + 123
         } else {
-            (i as u32).wrapping_mul(0x12345) ^ 0x5aa5f00d
+            check_word(i).wrapping_mul(0x12345) ^ 0x5aa5f00d
         };
         let actual = dst.read_u32(i * 4)?;
         if actual != expected {
@@ -820,12 +849,12 @@ pub(crate) fn submit_once(
     )?;
     let mut channel_params = abi::Channel {
         fifo_address: queue_va.address(),
-        entries: ENTRIES as u32,
+        entries: const { const_u32_from_usize(ENTRIES) },
         context_share: context.handle,
         ..Default::default()
     };
     channel_params.userd_memory[0] = queue_memory.handle;
-    channel_params.userd_offsets[0] = (ENTRIES * 8) as u64;
+    channel_params.userd_offsets[0] = u64_from_usize(ENTRIES * 8);
     let channel = Object::new(
         device,
         group.handle,
@@ -845,18 +874,29 @@ pub(crate) fn submit_once(
     for (i, word) in words.iter().enumerate() {
         command.write_u32(i * 4, *word)?;
     }
-    let entry = command_va.address() | ((words.len() as u64) << 42) | (1 << 41);
-    ring.write_u32(0, entry as u32)?;
-    ring.write_u32(4, (entry >> 32) as u32)?;
+    let entry = command_va.address() | (u64_from_usize(words.len()) << 42) | (1 << 41);
+    ring.write_u32(0, low_u32(entry))?;
+    ring.write_u32(4, high_u32(entry))?;
     crate::platform::device_full_barrier();
     ring.write_u32(ENTRIES * 8 + 0x8c, 1)?; // GPPut in BlackwellAControlGPFifo
     crate::platform::device_full_barrier();
     doorbell.write_u32(0x90, token)?;
     crate::platform::device_full_barrier();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while completion.read_u32(0)? != 1 {
-        if Instant::now() >= deadline {
-            return Err(Error::Contract("GPU work timed out after 2 seconds; channel will be torn down before memory is released".into()));
+    let (start, limit) = (Instant::now(), CHECK_WAIT);
+    loop {
+        let value = completion.read_u32(0)?;
+        if value == 1 {
+            break;
+        }
+        if start.elapsed() >= limit {
+            // The channel is torn down before its memory is released.
+            return Err(WaitError::Timeout {
+                operation: "one-shot submit",
+                object: format!("completion word of the check channel (reads {value:#x})"),
+                limit,
+                elapsed: start.elapsed(),
+            }
+            .into());
         }
         std::thread::sleep(Duration::from_micros(100));
     }
@@ -925,10 +965,10 @@ fn host_semaphore(
             0,
             0x5c,
             &[
-                address as u32,
-                (address >> 32) as u32,
-                value as u32,
-                if native64 { (value >> 32) as u32 } else { 0 },
+                low_u32(address),
+                high_u32(address),
+                low_u32(value),
+                if native64 { high_u32(value) } else { 0 },
                 operation | if native64 { 1 << 24 } else { 0 },
             ],
         );
@@ -949,9 +989,9 @@ fn host_semaphore(
             0,
             0x10,
             &[
-                (address >> 32) as u32,
-                address as u32,
-                value as u32,
+                high_u32(address),
+                low_u32(address),
+                low_u32(value),
                 operation,
             ],
         );
@@ -1075,9 +1115,10 @@ pub(crate) struct Queue {
     userd: Option<rm::Mapping>,
     channel_class: u32,
     completion: crate::fences::NativeFenceSurface,
-    engines: Vec<Rc<Object>>,
-    channel: Rc<Object>,
-    /// This channel's subcontext (VEID) in its TSG. Declared after `channel`:
+    /// Owned for their RM lifetime only (freed by drop, in field order).
+    _engines: Vec<Rc<Object>>,
+    _channel: Rc<Object>,
+    /// This channel's subcontext (VEID) in its TSG. Declared after `_channel`:
     /// the channel's RM free releases its context-share dependency first, so
     /// the VEID returns to the TSG only after RM freed the share, and the TSG
     /// reference drops last.
@@ -1165,7 +1206,10 @@ impl HeldSlots {
             .front()
             .is_some_and(|(token, _)| *token <= retired)
         {
-            let (_, slot) = self.slots.pop_front().unwrap();
+            let (_, slot) = self
+                .slots
+                .pop_front()
+                .expect("front() was Some in the loop condition");
             self.pool.release(slot);
         }
     }
@@ -1345,11 +1389,16 @@ impl SubmissionLedger {
         }
         // Leave one entry unused: PUT==GET must never describe a full ring.
         if self.used_entries + entries >= QUEUE_ENTRIES {
-            return Ok(Err(self.pending.front().unwrap().token));
+            // entries < QUEUE_ENTRIES (checked above), so entries are in use.
+            return Ok(Err(self
+                .pending
+                .front()
+                .expect("ring entries in use belong to pending batches")
+                .token));
         }
         let token = self
             .sequence
-            .checked_add(waits as u64)
+            .checked_add(u64_from_usize(waits))
             .and_then(|value| value.checked_add(1))
             .ok_or_else(|| Error::Contract("GPU completion sequence exhausted".into()))?;
         let slot = self
@@ -1372,7 +1421,11 @@ impl SubmissionLedger {
             let wraps = (token >> 32) != (self.sequence >> 32);
             let too_far = token - self.retired > 0x7fff_ffff;
             if (wraps || too_far) && !self.pending.is_empty() {
-                return Ok(Err(self.pending.front().unwrap().token));
+                return Ok(Err(self
+                    .pending
+                    .front()
+                    .expect("checked non-empty above")
+                    .token));
             }
             if too_far {
                 return Err(Error::Contract(
@@ -1399,7 +1452,10 @@ impl SubmissionLedger {
         }
         // Intermediate imported-wait values never retire a batch's storage.
         while self.pending.front().is_some_and(|p| p.token <= completed) {
-            let p = self.pending.pop_front().unwrap();
+            let p = self
+                .pending
+                .pop_front()
+                .expect("front() was Some in the loop condition");
             self.used_entries -= p.entries;
             self.retired = p.token;
         }
@@ -1450,7 +1506,7 @@ fn bind_zcull(device: &Rc<Device>, space: &AddressSpace, channel: u32) -> Result
             "RM reports no GRAPHICS_ZCULL context size; graphics channel cannot bind ZCULL".into(),
         ));
     }
-    let memory = device.allocate_vram(properties.size as usize)?;
+    let memory = device.allocate_vram(usize_from_u32(properties.size))?;
     let mapping = space.map(&memory)?;
     if mapping
         .address()
@@ -1650,7 +1706,7 @@ impl Queue {
         let mut params = abi::Channel {
             error: error_mem.handle,
             fifo_address: ring_gpu.address(),
-            entries: QUEUE_ENTRIES as u32,
+            entries: const { const_u32_from_usize(QUEUE_ENTRIES) },
             context_share: context.as_ref().map_or(0, |c| c.handle),
             // Every channel here is parented under our explicit TSG. Public
             // 535 kernel_channel.c rejects hVASpace on that parent regardless
@@ -1762,8 +1818,8 @@ impl Queue {
             _events: channel_events,
             userd,
             channel_class: caps.channel,
-            engines,
-            channel,
+            _engines: engines,
+            _channel: channel,
             subcontext,
             compute_only: mask & 16 != 0 && mask & 4 == 0,
             error_notifier,
@@ -1843,9 +1899,10 @@ impl Queue {
         Ok(())
     }
     /// Completed (token, start_ns, end_ns) records since the last call.
-    pub(crate) fn drain_timing(&mut self, out: &mut Vec<(u64, u64, u64)>) {
-        if let Some(t) = self.timing.as_mut() {
-            t.drain(out);
+    pub(crate) fn drain_timing(&mut self, out: &mut Vec<(u64, u64, u64)>) -> Result<()> {
+        match self.timing.as_mut() {
+            Some(t) => t.drain(out),
+            None => Ok(()),
         }
     }
     pub(crate) fn last_token(&self) -> u64 {
@@ -1952,7 +2009,7 @@ impl Queue {
         }
         if gpu
             .address()
-            .checked_add(bytes as u64)
+            .checked_add(u64_from_usize(bytes))
             .is_none_or(|end| end >= 1 << 34)
         {
             return Err(Error::Contract(
@@ -1964,11 +2021,12 @@ impl Queue {
     fn write_entry(&mut self, address: u64, bytes: usize, sync_wait: bool) -> Result<()> {
         // GP_ENTRY0/1 (public clc96f.h et al.): GET in [39:2], LEVEL bit 41,
         // LENGTH (words) in [62:42], SYNC_WAIT bit 63 — the existing encoding.
-        let entry =
-            address | ((bytes as u64 / 4) << 42) | (1 << 41) | if sync_wait { 1 << 63 } else { 0 };
-        self.ring.write_u32(self.put * 8, entry as u32)?;
-        self.ring
-            .write_u32(self.put * 8 + 4, (entry >> 32) as u32)?;
+        let entry = address
+            | ((u64_from_usize(bytes) / 4) << 42)
+            | (1 << 41)
+            | if sync_wait { 1 << 63 } else { 0 };
+        self.ring.write_u32(self.put * 8, low_u32(entry))?;
+        self.ring.write_u32(self.put * 8 + 4, high_u32(entry))?;
         self.put = (self.put + 1) % QUEUE_ENTRIES;
         Ok(())
     }
@@ -2083,8 +2141,8 @@ impl Queue {
                 0,
                 0x5c,
                 &[
-                    address as u32,
-                    (address >> 32) as u32,
+                    low_u32(address),
+                    high_u32(address),
                     t.next,
                     0,
                     1 | (1 << 25),
@@ -2162,18 +2220,18 @@ impl Queue {
         if !scratch.prefix.is_empty() {
             let address = match &prefix_segment {
                 Some((_, gpu)) => gpu.address(),
-                None => self.tail_gpu.address() + base as u64,
+                None => self.tail_gpu.address() + u64_from_usize(base),
             };
             self.write_entry(address, scratch.prefix.len() * 4, true)?;
         }
         for p in pushes {
-            self.write_entry(p.address, p.size as usize, p.flags & 1 != 0)?;
+            self.write_entry(p.address, usize_from_u32(p.size), p.flags & 1 != 0)?;
         }
         if let Some((_, gpu)) = &signal_segment {
             let address = gpu.address();
             self.write_entry(address, scratch.signals.len() * 4, true)?;
         }
-        let post = self.tail_gpu.address() + (base + tail_offset) as u64;
+        let post = self.tail_gpu.address() + u64_from_usize(base + tail_offset);
         self.write_entry(post, scratch.tail.len() * 4 + TAIL_IRQ_BYTES, true)?;
         for (cpu, gpu) in [prefix_segment, signal_segment].into_iter().flatten() {
             self.ledger.overflow.push_back((token, cpu, gpu));
@@ -2207,11 +2265,11 @@ impl Queue {
     fn kick(&mut self) -> Result<()> {
         crate::platform::device_full_barrier();
         if let Some(userd) = self.userd.as_mut() {
-            userd.write_u32(0x8c, self.put as u32)?;
+            userd.write_u32(0x8c, gp_put(self.put))?;
             crate::platform::device_full_barrier();
             let _posted_write_flush = userd.read_u32(0x8c)?;
         } else {
-            let put = self.put as u32;
+            let put = gp_put(self.put);
             self.ring.write_u32(8192 + 0x8c, put)?;
             crate::platform::device_full_barrier();
             if !self.bar1_doorbell {
@@ -2239,7 +2297,6 @@ impl Drop for Queue {
         // Field order closes the fence context/unbinds the semaphore while
         // the channel still exists, then frees engines/channel before buffers,
         // and finally releases held semaphore slots.
-        let _ = (&self.engines, &self.channel, &self.tail, &self.held);
     }
 }
 

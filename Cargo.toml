@@ -15,6 +15,8 @@ publish = false
 zerocopy = { version = "=0.8.62", features = ["derive"] }
 # Error enums with Display and source chains (RUST.md §7).
 thiserror = "=2.0.18"
+# Logging facade (RUST.md §7): logic crates log through it; the boundary crate installs the sink.
+log = "=0.4.34"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

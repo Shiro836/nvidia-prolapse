@@ -9,6 +9,7 @@ use crate::{
     gpu::{self, AddressSpace, GpuMapping},
     rm::{Client, Device, Error, Mapping, Memory, Result},
 };
+use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::{collections::HashMap, rc::Rc, sync::mpsc, thread};
 
 #[derive(Clone, Debug)]
@@ -56,7 +57,11 @@ impl Backend {
                 let mut context = match Context::new() {
                     Ok(context) => context,
                     Err(error) => {
-                        let _ = ready_tx.send(Err(error));
+                        // new() waits on ready_rx until this send or the
+                        // thread's exit, so the receiver is still there.
+                        if let Err(unsent) = ready_tx.send(Err(error)) {
+                            diag!("native RM worker: startup error not delivered: {unsent:?}");
+                        }
                         return;
                     }
                 };
@@ -76,7 +81,9 @@ impl Backend {
             }),
             result => {
                 drop(sender);
-                let _ = worker.join();
+                if worker.join().is_err() {
+                    diag!("native RM worker panicked during startup");
+                }
                 match result {
                     Ok(Err(error)) => Err(error),
                     _ => Err(Error::Contract(
@@ -98,11 +105,20 @@ impl Backend {
             .as_ref()
             .ok_or_else(|| Error::Contract("native backend stopped".into()))?
             .send(Box::new(move |context| {
-                let _ = tx.send(operation(context));
+                // The caller blocks in rx.recv() below until this send, so
+                // the receiver exists; a failed send is only logged.
+                if tx.send(operation(context)).is_err() {
+                    diag!("native RM worker: result not delivered");
+                }
             }))
-            .map_err(|_| Error::Contract("native GPU worker exited".into()))?;
-        rx.recv()
-            .map_err(|_| Error::Contract("native GPU worker failed during operation".into()))?
+            .map_err(|error| Error::Contract(format!("native GPU worker exited: {error}")))?;
+        // Not bounded here: the worker's own GPU waits are (gpu.rs CHECK_WAIT),
+        // so it answers or drops `tx` (exit, panic) in bounded time.
+        rx.recv().map_err(|error| {
+            Error::Contract(format!(
+                "native GPU worker failed during operation: {error}"
+            ))
+        })?
     }
     pub fn allocate(&self, size: usize) -> Result<Allocation> {
         self.call(move |context| context.allocate(size))
@@ -113,7 +129,7 @@ impl Backend {
                 .buffers
                 .remove(&id)
                 .ok_or_else(|| Error::Contract("free of unknown allocation".into()))?;
-            context.allocated -= buffer.memory.size as u64;
+            context.allocated -= u64_from_usize(buffer.memory.size);
             drop(buffer);
             Ok(())
         })
@@ -169,8 +185,8 @@ impl Context {
             ));
         }
         let info = Info {
-            vendor_id: card.pci.vendor as u32,
-            device_id: card.pci.device as u32,
+            vendor_id: u32::from(card.pci.vendor),
+            device_id: u32::from(card.pci.device),
             name: "Experimental Rust RM compute (sm_120)".into(),
             // A deliberately bounded prototype heap, not a claim to expose all VRAM.
             memory_size: card.framebuffer_size.min(512 * 1024 * 1024),
@@ -209,7 +225,7 @@ impl Context {
         if size == 0
             || self
                 .allocated
-                .checked_add(rounded as u64)
+                .checked_add(u64_from_usize(rounded))
                 .is_none_or(|n| n > self.info.memory_size)
         {
             return Err(Error::Contract(
@@ -230,7 +246,7 @@ impl Context {
             cpu_address: cpu.cpu_address(),
             size,
         };
-        self.allocated += memory.size as u64;
+        self.allocated += u64_from_usize(memory.size);
         self.buffers.insert(
             id,
             Buffer {
@@ -250,7 +266,7 @@ impl Context {
         if size == 0
             || offset
                 .checked_add(size)
-                .is_none_or(|end| end > buffer.requested_size as u64)
+                .is_none_or(|end| end > u64_from_usize(buffer.requested_size))
         {
             return Err(Error::Contract(
                 "buffer range exceeds allocated memory".into(),
@@ -279,7 +295,7 @@ impl Context {
         size: u64,
     ) -> Result<()> {
         self.live()?;
-        if size == 0 || size > u32::MAX as u64 {
+        if size == 0 || size > u64::from(u32::MAX) {
             return Err(Error::Contract("copy size outside supported range".into()));
         }
         let source = self.address(src, src_offset, size)?;
@@ -298,7 +314,7 @@ impl Context {
             0x400,
             &[source[0], source[1], destination[0], destination[1]],
         );
-        gpu::method(&mut words, 4, 0x418, &[size as u32]);
+        gpu::method(&mut words, 4, 0x418, &[low_u32(size)]);
         gpu::method(&mut words, 4, 0x300, &[2 | (1 << 7) | (1 << 8)]);
         let release = gpu::hi_lo(complete_gpu.address());
         gpu::method(&mut words, 4, 0x240, &[release[0], release[1], 1]);
@@ -328,16 +344,17 @@ impl Context {
         let mut constants = vec![0u8; 1152];
         let mut seen = 0u32;
         for &(binding, id, offset, range) in bindings {
-            if binding >= 8 || seen & (1 << binding) != 0 || range > u32::MAX as u64 {
+            if binding >= 8 || seen & (1 << binding) != 0 || range > u64::from(u32::MAX) {
                 return Err(Error::Contract(
                     "invalid/duplicate storage binding or range".into(),
                 ));
             }
             let address = self.address(id, offset, range)?;
             seen |= 1 << binding;
-            let slot = binding as usize * 16;
+            let slot = usize_from_u32(binding) * 16;
             constants[slot..slot + 8].copy_from_slice(&address.to_le_bytes());
-            constants[slot + 8..slot + 12].copy_from_slice(&(range as u32).to_le_bytes());
+            let range = u32::try_from(range).expect("range is checked against u32::MAX above");
+            constants[slot + 8..slot + 12].copy_from_slice(&range.to_le_bytes());
         }
         constants[1024..1024 + push.len()].copy_from_slice(push);
         let (complete_gpu, complete_cpu) = self.completion()?;
@@ -363,7 +380,7 @@ impl Context {
             0x2a0,
             &gpu::hi_lo(crate::compute::SHARED_WINDOW),
         );
-        gpu::method(&mut words, 1, 0x2b4, &[(job.address >> 8) as u32]);
+        gpu::method(&mut words, 1, 0x2b4, &[low_u32(job.address >> 8)]);
         gpu::method(&mut words, 1, 0x2c0, &[9]);
         let result = gpu::submit_once(&self.device, &self.space, 0xcec0, &complete_cpu, &words);
         if result.is_err() {

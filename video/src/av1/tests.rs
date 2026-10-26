@@ -176,7 +176,7 @@ fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
     );
     let mut dec = codec::Av1Decoder::new(w, h, 8, tus[0]).unwrap();
     dec.allocate(&mut Mock(1 << 32), w, h).unwrap();
-    let layout = dec.surface_layout(w, h);
+    let layout = dec.surface_layout(w, h).unwrap();
     let total = dec.dpb_size() + 2 + extra;
     let surfaces: Vec<SurfaceRef> = (0..u64::try_from(total).unwrap())
         .map(|i| SurfaceRef {

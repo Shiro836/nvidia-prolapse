@@ -69,7 +69,7 @@ fn run_vp9(args: &[String]) -> Result<(), Error> {
     let mut bad_frames = 0usize;
     let mut diff_total = 0usize;
     for (i, o) in report.outputs.iter().enumerate() {
-        let nv12 = nvdec::untile_nv12(&o.surface, o.width, o.height, o.stride, o.chroma_offset);
+        let nv12 = nvdec::untile_nv12(&o.surface, o.width, o.height, o.stride, o.chroma_offset)?;
         if i == 0 {
             let zeros = nv12.iter().filter(|b| **b == 0).count();
             println!("frame 0: {zeros} zero bytes of {}", nv12.len());
@@ -208,7 +208,7 @@ fn run() -> Result<(), Error> {
     let frame_bytes = w * h + w * h.div_ceil(2);
     let mut all_exact = reference.is_some();
     for (i, surface) in report.surfaces.iter().enumerate() {
-        let nv12 = nvdec::untile_nv12(surface, w, h, report.stride, report.chroma_offset);
+        let nv12 = nvdec::untile_nv12(surface, w, h, report.stride, report.chroma_offset)?;
         io(
             "write frame",
             std::fs::write(out.join(format!("frame{i:02}.nv12")), &nv12),

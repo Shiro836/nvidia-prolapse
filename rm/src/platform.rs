@@ -40,6 +40,17 @@ compile_error!("RM semaphore bookkeeping requires CPU AtomicU64 support on cache
 type IoctlRequest = c_int;
 #[cfg(not(target_os = "android"))]
 type IoctlRequest = std::ffi::c_ulong;
+/// The 32 request bits as the libc's `ioctl` request type: bionic declares
+/// `int request` (the bits reinterpreted, direction bits included), glibc
+/// `unsigned long request` (zero-extended).
+#[cfg(target_os = "android")]
+const fn ioctl_request(request: u32) -> IoctlRequest {
+    request.cast_signed()
+}
+#[cfg(not(target_os = "android"))]
+fn ioctl_request(request: u32) -> IoctlRequest {
+    IoctlRequest::from(request)
+}
 
 unsafe extern "C" {
     // NDK r29 sys/mman.h (API30+) and glibc: identical scalar arguments on
@@ -84,18 +95,20 @@ pub(crate) fn file_seals(fd: c_int) -> io::Result<u32> {
     // Linux UAPI linux/fcntl.h: F_GET_SEALS = F_LINUX_SPECIFIC_BASE + 10.
     // SAFETY: F_GET_SEALS takes no pointer; any fd value is a valid argument
     // (a bad one fails with EBADF).
-    let result = unsafe { fcntl(fd, 1034, 0 as c_int) };
+    let result = unsafe { fcntl(fd, 1034, c_int::from(0u8)) };
     if result < 0 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(result as u32)
+        // Non-negative: the F_SEAL_* bit set.
+        Ok(result.cast_unsigned())
     }
 }
 
 pub(crate) fn add_file_seals(fd: c_int, seals: u32) -> io::Result<()> {
     // F_ADD_SEALS = F_LINUX_SPECIFIC_BASE + 9; the third argument is an int.
     // SAFETY: F_ADD_SEALS takes an int, no pointer; a bad fd fails with EBADF.
-    let result = unsafe { fcntl(fd, 1033, seals as c_int) };
+    // fcntl's int argument carries the F_SEAL_* bits unchanged.
+    let result = unsafe { fcntl(fd, 1033, seals.cast_signed()) };
     if result < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -111,7 +124,7 @@ pub(crate) fn add_file_seals(fd: c_int, seals: u32) -> io::Result<()> {
 /// handles target calling conventions; never substitute a raw syscall here.
 pub(crate) unsafe fn ioctl(fd: c_int, request: u32, argument: *mut c_void) -> c_int {
     // SAFETY: the caller's contract (# Safety) covers the argument buffer.
-    unsafe { libc_ioctl(fd, request as IoctlRequest, argument) }
+    unsafe { libc_ioctl(fd, ioctl_request(request), argument) }
 }
 
 /// Map memory using an explicit signed 64-bit file offset on every ABI.
@@ -164,12 +177,12 @@ pub(crate) fn validate_page_size(bytes: usize) -> io::Result<usize> {
 pub(crate) fn validate_runtime() -> io::Result<usize> {
     // SAFETY: no arguments, no side effects and no device access.
     let bytes = unsafe { getpagesize() };
-    if bytes <= 0 {
-        return Err(io::Error::other(format!(
+    match usize::try_from(bytes) {
+        Ok(bytes) if bytes > 0 => validate_page_size(bytes),
+        _ => Err(io::Error::other(format!(
             "libc getpagesize returned {bytes}"
-        )));
+        ))),
     }
-    validate_page_size(bytes as usize)
 }
 
 /// Compute whole CPU-page backing without overflow or zero-length mappings.
@@ -210,7 +223,7 @@ pub(crate) fn device_full_barrier() {
         // the memory clobber orders every other access around it.
         unsafe {
             std::arch::asm!("lock add dword ptr [{word}], 0",
-            word = in(reg) &mut scratch, options(nostack));
+            word = in(reg) &raw mut scratch, options(nostack));
         }
     }
     #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]

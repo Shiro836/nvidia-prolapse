@@ -5,6 +5,7 @@
 //! CPU mapping is here; gpu.rs owns GPU VA and actual channel submission.
 use crate::diag::diag;
 use crate::{abi, compat::Compat, platform};
+use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::{
     cell::{Cell, RefCell},
     fs::{File, OpenOptions},
@@ -16,7 +17,7 @@ use std::{
 };
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-pub use nv_rm_core::error::{Error, Result};
+pub use nv_rm_core::error::{Error, Result, WaitError};
 pub(crate) fn status(operation: &'static str, value: u32) -> Result<()> {
     if value == 0 {
         Ok(())
@@ -48,7 +49,7 @@ pub(crate) fn exchange<T: FromBytes + IntoBytes + Immutable>(
     // size the request encodes, and any bytes the kernel writes are a valid T
     // (FromBytes). Embedded pointer targets (as u64 fields) are kept alive by
     // the caller for this synchronous call.
-    let result = unsafe { platform::ioctl(fd, request, (value as *mut T).cast()) };
+    let result = unsafe { platform::ioctl(fd, request, std::ptr::from_mut::<T>(value).cast()) };
     if result < 0 {
         Err(Error::Io(operation, io::Error::last_os_error()))
     } else {
@@ -210,10 +211,11 @@ impl Client {
         let mut parameters_wire = name
             .map(|name| self.compat.pack(name, parameters))
             .transpose()?;
-        let (address, size) = parameters_wire
-            .as_mut()
-            .map(|wire| (wire.address(), wire.len() as u32))
-            .unwrap_or((0, 0));
+        let (address, size) = match parameters_wire.as_mut() {
+            Some(wire) => (wire.address(), wire_size(wire.len())?),
+            // Classes without a parameter layout allocate with no parameters.
+            None => (0, 0),
+        };
         let mut call = abi::Alloc {
             root: self.root,
             parent,
@@ -251,8 +253,8 @@ impl Client {
             root: self.root,
             parent,
             class,
-            parameters: payload.as_mut_ptr() as u64,
-            size: payload.len() as u32,
+            parameters: u64_from_usize(payload.as_mut_ptr().expose_provenance()),
+            size: wire_size(payload.len())?,
             ..Default::default()
         };
         exchange_wire(
@@ -392,7 +394,7 @@ impl ControlPort {
             object,
             command,
             parameters: parameters_wire.address(),
-            size: parameters_wire.len() as u32,
+            size: wire_size(parameters_wire.len())?,
             ..Default::default()
         };
         exchange_wire(
@@ -440,7 +442,7 @@ impl Device {
         let mut entry = [0xcu32, 0]; // NV2080_CTRL_GR_INFO_INDEX_SM_VERSION
         let mut query = abi::GrInfo {
             count: 1,
-            entries: entry.as_mut_ptr() as u64,
+            entries: u64_from_usize(entry.as_mut_ptr().expose_provenance()),
             ..Default::default()
         };
         self.client
@@ -453,13 +455,13 @@ impl Device {
         if query.count > 65536 {
             return Err(Error::Contract("unreasonable RM class count".into()));
         }
-        let mut classes = vec![0; query.count as usize];
-        query.classes = classes.as_mut_ptr() as u64;
+        let mut classes = vec![0; usize_from_u32(query.count)];
+        query.classes = u64_from_usize(classes.as_mut_ptr().expose_provenance());
         self.client.control(self.handle, 0x800201, &mut query)?;
-        if query.count as usize > classes.len() {
+        if usize_from_u32(query.count) > classes.len() {
             return Err(Error::Contract("RM class count grew during query".into()));
         }
-        classes.truncate(query.count as usize);
+        classes.truncate(usize_from_u32(query.count));
         Ok(classes)
     }
     pub fn allocate_vram(self: &Rc<Self>, requested_size: usize) -> Result<Rc<Memory>> {
@@ -568,7 +570,7 @@ impl Device {
         self: &Rc<Self>,
     ) -> Result<(Rc<Memory>, PoolBlockGrant)> {
         let generic_kind = self.generic_kind()?;
-        let size = POOL_BLOCK_SIZE as u64;
+        let size = u64_from_usize(POOL_BLOCK_SIZE);
         let mut parameters = abi::MemoryAlloc {
             owner: self.client.root,
             memory_type: 0,
@@ -661,9 +663,9 @@ impl Device {
             attr,
             attr2,
             format,
-            size: size as u64,
-            alignment: alignment as u64,
-            limit: size as u64 - 1,
+            size: u64_from_usize(size),
+            alignment: u64_from_usize(alignment),
+            limit: u64_from_usize(size) - 1,
             ..Default::default()
         };
         let handle = self.client.allocate(
@@ -939,8 +941,10 @@ impl Memory {
         let reservation = BarReservation::reserve(
             &device.bar_budget,
             if self.charge_bar {
-                platform::round_to_cpu_pages(self.size, device.client.cpu_page_size)
-                    .map_err(|e| Error::Io("round BAR reservation", e))? as u64
+                u64_from_usize(
+                    platform::round_to_cpu_pages(self.size, device.client.cpu_page_size)
+                        .map_err(|e| Error::Io("round BAR reservation", e))?,
+                )
             } else {
                 0
             },
@@ -955,7 +959,7 @@ impl Memory {
                 client: device.client.root,
                 device: device.handle,
                 memory: self.handle,
-                length: self.size as u64,
+                length: u64_from_usize(self.size),
                 flags: if self.owned { 0 } else { 1 << 17 }, // NVOS33 FIFO_MAPPING_ENABLE
                 ..Default::default()
             },
@@ -1005,9 +1009,9 @@ impl Memory {
                 lease
                     .resources
                     .as_mut()
-                    .unwrap()
+                    .expect("a new lease holds its resources until it is released")
                     .bar
-                    .resize(mapping_size as u64)?;
+                    .resize(u64_from_usize(mapping_size))?;
             }
             // RM associated this fd with its map. VMA ownership and RM ownership
             // are independent: always munmap before releasing the BAR aperture.
@@ -1018,7 +1022,8 @@ impl Memory {
             let address = unsafe {
                 platform::mmap(std::ptr::null_mut(), mapping_size, 3, 1, fd.as_raw_fd(), 0)
             };
-            if address as isize == -1 {
+            // MAP_FAILED is `(void *)-1` (sys/mman.h).
+            if address.addr() == usize::MAX {
                 return Err(Error::Io(
                     "mmap NVIDIA allocation",
                     io::Error::last_os_error(),
@@ -1026,7 +1031,7 @@ impl Memory {
             }
             // Register even address zero before validating the public pointer:
             // rollback must also own that unusual but successful mmap result.
-            lease.vma = Some((address as usize, mapping_size));
+            lease.vma = Some((address.expose_provenance(), mapping_size));
             lease.state.vma = true;
             let base = NonNull::new(address.cast::<u8>())
                 .ok_or_else(|| Error::Contract("mmap returned address zero".into()))?;
@@ -1212,7 +1217,10 @@ impl CpuMappingLease {
                     // SAFETY: (base, size) is the VMA this lease mapped and still
                     // owns (state.vma); every Mapping borrow of it has ended,
                     // since the lease is only released by its owner.
-                    if unsafe { platform::munmap(base as *mut _, size) } != 0 {
+                    if unsafe {
+                        platform::munmap(std::ptr::with_exposed_provenance_mut(base), size)
+                    } != 0
+                    {
                         Err(Error::Io(
                             "munmap NVIDIA allocation",
                             io::Error::last_os_error(),
@@ -1253,6 +1261,17 @@ impl Drop for CpuMappingLease {
         }
     }
 }
+/// The CPU round-trip pattern of word `i` (a multiplicative hash of the
+/// index; the index's low 32 bits are the hash input by design).
+fn pattern_word(i: usize) -> u32 {
+    low_u32(u64_from_usize(i)).wrapping_mul(0x9e37_79b9) ^ 0xa5a5_5a5a
+}
+/// An RM parameter block's byte size as the u32 `paramsSize`/`size` field of
+/// NVOS21/NVOS54 (nvos.h) carries it.
+fn wire_size(len: usize) -> Result<u32> {
+    u32::try_from(len)
+        .map_err(|error| Error::Contract(format!("RM parameter block of {len} bytes: {error}")))
+}
 fn cpu_mapping_extent(
     size: usize,
     owned: bool,
@@ -1263,10 +1282,12 @@ fn cpu_mapping_extent(
     if page == 0 || !page.is_power_of_two() {
         return Err(Error::Contract("invalid CPU page size".into()));
     }
-    let within_page = (cookie & (page as u64 - 1)) as usize;
+    // The low bits of the cookie below the page size: less than `page`, so a usize.
+    let within_page = usize::try_from(cookie & (u64_from_usize(page) - 1))
+        .expect("an offset below a usize page size fits usize");
     // Owned allocations must also validate RM's returned length. USERD may
     // expose a larger range than the logical register window.
-    if returned_length < size as u64 {
+    if returned_length < u64_from_usize(size) {
         return Err(Error::Contract(
             "RM returned an undersized CPU mapping".into(),
         ));
@@ -1274,8 +1295,9 @@ fn cpu_mapping_extent(
     let exposed = if owned {
         size
     } else {
-        usize::try_from(returned_length)
-            .map_err(|_| Error::Contract("USERD size exceeds CPU address range".into()))?
+        usize::try_from(returned_length).map_err(|error| {
+            Error::Contract(format!("USERD size exceeds CPU address range: {error}"))
+        })?
     };
     if size == 0 || !within_page.is_multiple_of(4) {
         return Err(Error::Contract("empty or unaligned RM CPU mapping".into()));
@@ -1285,7 +1307,7 @@ fn cpu_mapping_extent(
         .ok_or_else(|| Error::Contract("CPU mapping extent overflow".into()))?;
     let rounded = platform::round_to_cpu_pages(extent, page)
         .map_err(|e| Error::Io("round mmap extent", e))?;
-    if rounded > isize::MAX as usize {
+    if isize::try_from(rounded).is_err() {
         return Err(Error::Contract(
             "CPU mapping exceeds Rust pointer offset range".into(),
         ));
@@ -1329,7 +1351,7 @@ impl Mapping {
     /// This integer conveys an address only; Rust references are never created.
     pub(crate) fn cpu_address(&self) -> usize {
         assert!(self.lease.state.vma, "CPU mapping is no longer live");
-        self.pointer.as_ptr() as usize
+        self.pointer.as_ptr().expose_provenance()
     }
 
     pub(crate) fn write_u32(&mut self, offset: usize, value: u32) -> Result<()> {
@@ -1359,7 +1381,7 @@ impl Mapping {
         }
         // SAFETY: offset + len <= size (checked above), inside the live
         // mapping.
-        let target = unsafe { (self.pointer.as_ptr() as *mut u8).add(offset) };
+        let target = unsafe { self.pointer.as_ptr().cast::<u8>().add(offset) };
         // SAFETY: both ranges are valid for `len` bytes and cannot overlap
         // (`data` is a Rust slice, the target device memory). Plain copy, as
         // every caller writes ranges no GPU work in flight touches.
@@ -1377,7 +1399,7 @@ impl Mapping {
         }
         // SAFETY: offset + len <= size (checked above), inside the live
         // mapping.
-        let source = unsafe { (self.pointer.as_ptr() as *const u8).add(offset) };
+        let source = unsafe { self.pointer.as_ptr().cast_const().cast::<u8>().add(offset) };
         // SAFETY: both ranges are valid for `len` bytes and cannot overlap.
         // Plain copy, as every caller reads ranges whose GPU writers have
         // completed.
@@ -1420,7 +1442,13 @@ impl Mapping {
         // stays mapped while `self` is borrowed (Drop unmaps). AtomicU64 has
         // interior mutability, so concurrent writers are allowed as long as
         // every access is atomic (this accessor's contract).
-        Ok(unsafe { &*word.cast::<std::sync::atomic::AtomicU64>() })
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "the offset is checked 8-byte aligned above and the mapping is page aligned"
+        )]
+        let word = word.cast::<std::sync::atomic::AtomicU64>();
+        // SAFETY: as above: in bounds, aligned, atomic-only access.
+        Ok(unsafe { &*word })
     }
 
     /// CPU-only allocation smoke check; deliberately does not claim GPU execution.
@@ -1432,7 +1460,7 @@ impl Mapping {
             let word = unsafe { self.pointer.as_ptr().add(i) };
             // SAFETY: in bounds, 4-byte aligned; no GPU command references
             // this smoke-test allocation.
-            unsafe { word.write_volatile((i as u32).wrapping_mul(0x9e3779b9) ^ 0xa5a55a5a) };
+            unsafe { word.write_volatile(pattern_word(i)) };
         }
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         for i in 0..count {
@@ -1440,7 +1468,7 @@ impl Mapping {
             let word = unsafe { self.pointer.as_ptr().add(i) };
             // SAFETY: in bounds, aligned; no GPU commands reference it.
             let actual = unsafe { word.read_volatile() };
-            let expected = (i as u32).wrapping_mul(0x9e3779b9) ^ 0xa5a55a5a;
+            let expected = pattern_word(i);
             if actual != expected {
                 return Err(Error::Contract(format!(
                     "VRAM CPU round trip failed at word {i}: {actual:#x} != {expected:#x}"
@@ -1757,7 +1785,8 @@ mod budget_tests {
         assert!(cpu_mapping_extent(0, true, 0, 0, 4096).is_err());
         assert!(cpu_mapping_extent(4, true, 4, 0, 3).is_err());
         assert!(cpu_mapping_extent(512, false, u64::MAX, 4, 4096).is_err());
-        assert!(cpu_mapping_extent(isize::MAX as usize, true, isize::MAX as u64, 4, 4096).is_err());
+        let max = isize::MAX.unsigned_abs();
+        assert!(cpu_mapping_extent(max, true, u64_from_usize(max), 4, 4096).is_err());
     }
     #[test]
     fn failed_cleanup_retains_memory_owner_and_bar_until_successful_retry() {
@@ -1949,12 +1978,12 @@ mod budget_tests {
         const SIZE: usize = 1 << 20;
         // Test-only local authority: no production override, no global-BAR
         // pressure claim, no modification to the physical device or RM policy.
-        assert!(device.card.framebuffer_size >= (2 * SIZE) as u64);
+        assert!(device.card.framebuffer_size >= u64_from_usize(2 * SIZE));
         Rc::get_mut(&mut device)
             .expect("new Device must have one owner")
             .bar_budget = Rc::new(BarBudget {
             used: Cell::new(0),
-            limit: (2 * SIZE) as u64,
+            limit: u64_from_usize(2 * SIZE),
         });
         let memories: Vec<_> = (0..4)
             .map(|_| device.allocate_vram(SIZE).unwrap())
@@ -1979,16 +2008,23 @@ mod budget_tests {
             // SAFETY: corresponding Slot has a live logical reference; both
             // words are within its checked 1MiB mapping, aligned and CPU-owned.
             unsafe {
-                (address as *mut u32).write_volatile(value);
-                ((address + SIZE - 4) as *mut u32).write_volatile(!value);
+                std::ptr::with_exposed_provenance_mut::<u32>(address).write_volatile(value);
+                std::ptr::with_exposed_provenance_mut::<u32>(address + SIZE - 4)
+                    .write_volatile(!value);
             }
             platform::device_full_barrier();
         };
         let check = |address: usize, value: u32| {
             platform::device_full_barrier();
             unsafe {
-                assert_eq!((address as *const u32).read_volatile(), value);
-                assert_eq!(((address + SIZE - 4) as *const u32).read_volatile(), !value);
+                assert_eq!(
+                    std::ptr::with_exposed_provenance::<u32>(address).read_volatile(),
+                    value
+                );
+                assert_eq!(
+                    std::ptr::with_exposed_provenance::<u32>(address + SIZE - 4).read_volatile(),
+                    !value
+                );
             }
         };
         let active = map(0);
@@ -2002,10 +2038,10 @@ mod budget_tests {
             if index == 1 {
                 check(address, 0x2468);
             } else {
-                write(address, index as u32);
+                write(address, u32::try_from(index).unwrap());
             }
             check(active, 0x1357);
-            assert_eq!(device.bar_budget.used.get(), (2 * SIZE) as u64);
+            assert_eq!(device.bar_budget.used.get(), u64_from_usize(2 * SIZE));
             assert_eq!(slots[0].refs(), 1);
             slots[index].release().unwrap();
         }
@@ -2102,7 +2138,7 @@ mod pool_block_tests {
         let card = client.cards().unwrap().into_iter().next().unwrap();
         let device = client.device(card).unwrap();
         let (memory, grant) = device.allocate_pool_block_granted().unwrap();
-        assert_eq!(grant.size, POOL_BLOCK_SIZE as u64);
+        assert_eq!(grant.size, u64_from_usize(POOL_BLOCK_SIZE));
         assert_eq!(
             field(grant.attr, 24, 23),
             3,
@@ -2158,7 +2194,7 @@ mod pool_block_tests {
         let space = crate::gpu::AddressSpace::new(&device).unwrap();
         let gpu = space.map(&memory).unwrap();
         assert_eq!(
-            gpu.address() % POOL_BLOCK_SIZE as u64,
+            gpu.address() % u64_from_usize(POOL_BLOCK_SIZE),
             0,
             "mapped at a 2 MiB VA"
         );

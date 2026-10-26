@@ -105,7 +105,7 @@ mod tests {
         let mut status = -1;
         loop {
             // SAFETY: waits for our own child; `status` is a live local.
-            let got = unsafe { waitpid(pid, &mut status, 0) };
+            let got = unsafe { waitpid(pid, &raw mut status, 0) };
             if got == pid {
                 break;
             }

@@ -10,6 +10,7 @@ use crate::{
     gpu::{AddressSpace, GpuMapping},
     rm::{Device, Error, Mapping, Result},
 };
+use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::{
     cell::RefCell,
     io,
@@ -103,8 +104,14 @@ struct SyncFenceInfo {
     timestamp_ns: u64,
 }
 
-const fn request(group: u8, number: u8, bytes: usize, direction: u32) -> u32 {
-    (direction << 30) | ((bytes as u32) << 16) | ((group as u32) << 8) | number as u32
+/// `_IOC(direction, group, number, bytes)` (asm-generic/ioctl.h); `bytes` is
+/// the argument struct's size, below the 14-bit `_IOC_SIZEBITS` limit.
+fn request(group: u8, number: u8, bytes: usize, direction: u32) -> u32 {
+    let bytes = u32::try_from(bytes)
+        .ok()
+        .filter(|&b| b < 1 << 14)
+        .expect("ioctl argument structs are below 16 KiB");
+    (direction << 30) | (bytes << 16) | (u32::from(group) << 8) | u32::from(number)
 }
 fn call<T: FromBytes + IntoBytes + Immutable>(
     fd: RawFd,
@@ -122,7 +129,7 @@ fn call<T: FromBytes + IntoBytes + Immutable>(
         crate::platform::ioctl(
             fd,
             request(group, number, size_of::<T>(), direction),
-            (value as *mut T).cast(),
+            std::ptr::from_mut::<T>(value).cast(),
         )
     };
     if ret < 0 {
@@ -153,11 +160,10 @@ fn sync_status_with(
     let count = info.count;
     // sync_file_ioctl_fence_info computes its allocation size in __u32.
     // Reject wire-size overflow rather than imposing an arbitrary fence limit.
-    let bytes = count.checked_mul(size_of::<SyncFenceInfo>() as u32);
-    if count == 0
-        || bytes
-            .is_none_or(|bytes| usize::try_from(bytes).map_or(true, |n| n > isize::MAX as usize))
-    {
+    let bytes = u32::try_from(size_of::<SyncFenceInfo>())
+        .ok()
+        .and_then(|size| count.checked_mul(size));
+    if count == 0 || bytes.is_none_or(|bytes| isize::try_from(usize_from_u32(bytes)).is_err()) {
         return Err(Error::Contract(format!(
             "sync_file fence count {count} is empty or exceeds kernel/Rust allocation byte limits"
         )));
@@ -166,7 +172,7 @@ fn sync_status_with(
         // Reset all input/reserved fields, retaining only the advertised bound.
         let mut details = SyncFileInfo {
             count,
-            entries: entries.as_mut_ptr() as u64,
+            entries: u64_from_usize(entries.as_mut_ptr().expose_provenance()),
             ..Default::default()
         };
         query(&mut details, entries)?;
@@ -176,7 +182,7 @@ fn sync_status_with(
                 details.count
             )));
         }
-        let entries = &entries[..details.count as usize];
+        let entries = &entries[..usize_from_u32(details.count)];
         // The kernel's full-query summary stops at its first nonpositive child.
         // Inspect every entry so a preceding pending child cannot hide an error.
         if details.status < 0 {
@@ -193,10 +199,12 @@ fn sync_status_with(
         return inspect(&mut [SyncFenceInfo::default()]);
     }
     let mut entries = Vec::new();
-    entries.try_reserve_exact(count as usize).map_err(|error| {
-        Error::Contract(format!("allocate sync_file fence information: {error}"))
-    })?;
-    entries.resize(count as usize, SyncFenceInfo::default());
+    entries
+        .try_reserve_exact(usize_from_u32(count))
+        .map_err(|error| {
+            Error::Contract(format!("allocate sync_file fence information: {error}"))
+        })?;
+    entries.resize(usize_from_u32(count), SyncFenceInfo::default());
     inspect(&mut entries)
 }
 
@@ -267,7 +275,12 @@ fn payload_mode(layout: &Layout) -> Result<PayloadMode> {
         return Err(Error::Contract("invalid sem32 maxSubmitted slot".into()));
     }
     Ok(PayloadMode::Tracked32 {
-        maximum_offset: layout.max_submitted as usize,
+        maximum_offset: usize::try_from(layout.max_submitted).map_err(|error| {
+            Error::Contract(format!(
+                "sem32 maxSubmitted offset {}: {error}",
+                layout.max_submitted
+            ))
+        })?,
     })
 }
 
@@ -302,7 +315,7 @@ pub(crate) fn layout_mode(raw: (u64, u64, u64, u32)) -> Result<String> {
 /// Public RM reconstruction contract; the producer publishes maximum first.
 pub(crate) fn extend_payload(low: u32, maximum: u64) -> Result<u64> {
     let epoch = maximum & !u64::from(u32::MAX);
-    let epoch = if low > maximum as u32 {
+    let epoch = if low > low_u32(maximum) {
         epoch
             .checked_sub(1 << 32)
             .ok_or_else(|| Error::Contract("sem32 payload precedes timeline origin".into()))?
@@ -346,8 +359,9 @@ impl NativeFenceSurface {
             .client
             .control(device.subdevice, 0x20801352, &mut layout)?;
         let mode = payload_mode(&layout)?;
-        let requested = usize::try_from(layout.stride)
-            .map_err(|_| Error::Contract("semaphore stride exceeds address space".into()))?;
+        let requested = usize::try_from(layout.stride).map_err(|error| {
+            Error::Contract(format!("semaphore stride exceeds address space: {error}"))
+        })?;
         let memory = device.allocate_aligned(requested, 4096, false, true)?;
         let mut mapping = memory.map()?;
         for offset in (0..memory.size).step_by(4) {
@@ -376,7 +390,7 @@ impl NativeFenceSurface {
             channel: None,
             mapping,
             gpu,
-            size: memory.size as u64,
+            size: u64_from_usize(memory.size),
             mode,
         })
     }
@@ -430,6 +444,8 @@ impl NativeFenceSurface {
             return extend_payload(low, self.maximum(maximum_offset)?.load(Ordering::Acquire));
         }
         // Works on LP32 without a tearing64 CPU load. Values never wrap.
+        // Not a wait: it retries only while the high word changes between the
+        // two reads, which happens once per 2^32 releases.
         loop {
             let high = self.mapping.read_u32(4)?;
             let low = self.mapping.read_u32(0)?;
@@ -468,8 +484,8 @@ impl NativeFenceSurface {
             };
             let mut create = ContextCreate {
                 index: 0,
-                parameters: &params as *const Import as u64,
-                parameters_size: size_of::<Import>() as u64,
+                parameters: u64_from_usize((&raw const params).expose_provenance()),
+                parameters_size: u64_from_usize(size_of::<Import>()),
                 handle: 0,
                 padding: 0,
             };
@@ -663,7 +679,7 @@ mod tests {
             revents: 0,
         };
         // SAFETY: one writable pollfd; fd remains owned by the caller.
-        let ret = unsafe { poll(&mut p, 1, timeout) };
+        let ret = unsafe { poll(&raw mut p, 1, timeout) };
         assert!(ret >= 0, "poll: {}", io::Error::last_os_error());
         ret != 0 && p.revents & 1 != 0
     }
@@ -1101,10 +1117,13 @@ mod tests {
                 if calls == 1 {
                     assert!(entries.is_empty());
                     info.status = 1; // Legacy boolean summary, including failures.
-                    info.count = statuses.len() as u32;
+                    info.count = u32::try_from(statuses.len()).unwrap();
                 } else {
-                    assert_eq!(info.count as usize, statuses.len());
-                    assert_eq!(info.entries, entries.as_mut_ptr() as u64);
+                    assert_eq!(usize_from_u32(info.count), statuses.len());
+                    assert_eq!(
+                        info.entries,
+                        u64_from_usize(entries.as_mut_ptr().expose_provenance())
+                    );
                     assert_eq!((info.flags, info.padding), (0, 0));
                     // Exact old kernel aggregation: first nonpositive wins.
                     info.status = statuses.iter().copied().find(|s| *s <= 0).unwrap_or(1);
@@ -1123,7 +1142,7 @@ mod tests {
     fn sync_status_rejects_invalid_counts_before_allocating() {
         for count in [
             0,
-            u32::MAX / size_of::<SyncFenceInfo>() as u32 + 1,
+            u32::MAX / u32::try_from(size_of::<SyncFenceInfo>()).unwrap() + 1,
             u32::MAX,
         ] {
             let mut calls = 0;

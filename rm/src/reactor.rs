@@ -68,7 +68,7 @@ impl WakeFd {
         let value = 1u64;
         loop {
             // SAFETY: writes 8 bytes from a live local u64 to an owned fd.
-            let n = unsafe { write(self.as_raw_fd(), (&value as *const u64).cast(), 8) };
+            let n = unsafe { write(self.as_raw_fd(), (&raw const value).cast(), 8) };
             if n == 8 {
                 return Ok(());
             }
@@ -85,7 +85,7 @@ impl WakeFd {
         let mut value = 0u64;
         loop {
             // SAFETY: reads at most 8 bytes into a live local u64 from an owned fd.
-            let n = unsafe { read(self.as_raw_fd(), (&mut value as *mut u64).cast(), 8) };
+            let n = unsafe { read(self.as_raw_fd(), (&raw mut value).cast(), 8) };
             if n == 8 {
                 return Ok(());
             }
@@ -169,14 +169,16 @@ impl Readiness {
         }));
         let fds = &mut self.fds;
         let count = Nfds::try_from(fds.len())
-            .map_err(|_| Error::Contract("too many RM wait descriptors".into()))?;
+            .map_err(|error| Error::Contract(format!("too many RM wait descriptors: {error}")))?;
         let spec = timeout.map(|t| TimeSpec {
             seconds: std::ffi::c_long::try_from(t.as_secs()).unwrap_or(std::ffi::c_long::MAX),
-            nanoseconds: t.subsec_nanos() as std::ffi::c_long,
+            nanoseconds: std::ffi::c_long::from(
+                i32::try_from(t.subsec_nanos()).expect("subsec_nanos is below 10^9"),
+            ),
         });
-        let pointer = spec
-            .as_ref()
-            .map_or(std::ptr::null(), |spec| spec as *const TimeSpec);
+        let pointer = spec.as_ref().map_or(std::ptr::null(), |spec| {
+            std::ptr::from_ref::<TimeSpec>(spec)
+        });
         // SAFETY: `count` pollfds in the live Vec, a NULL or live local
         // timespec, and no signal mask (the app's mask stays untouched).
         let n = unsafe { ppoll(fds.as_mut_ptr(), count, pointer, std::ptr::null()) };

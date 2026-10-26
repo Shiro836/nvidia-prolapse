@@ -25,12 +25,13 @@ use crate::{
     events::{HostListener, RmEvents, TriggerPort},
     gpu::{AddressSpace, GpuMapping, Push, Queue, QueueShared, SemaphoreOp, SubmitStatus},
     reclaim::Reclaim,
-    rm::{Client, Device, Error, Mapping, Memory, Result},
+    rm::{Client, Device, Error, Mapping, Memory, Result, WaitError},
     slots::{PAGE_BYTES, Slot, SlotPool, TimelineView},
     syncobj::{Foreign, Shared, SignalPlan, SyncObj, WaitPlan},
     waiters::Waiters,
     watcher::Watcher,
 };
+use nv_rm_core::conv::{high_u32, low_u32, u64_from_usize, usize_from_u32};
 use std::{
     collections::{HashMap, VecDeque},
     ffi::c_void,
@@ -150,7 +151,8 @@ impl Core {
     /// Claim the 1 s heavy-scan slot (stock throttles its notifier scan the
     /// same way: one vDSO clock read + cached words per check).
     fn scan_due(&self, force: bool) -> bool {
-        let now = self.epoch.elapsed().as_nanos() as u64;
+        // Saturates after 584 years of device lifetime.
+        let now = u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let last = self.last_scan.load(Ordering::Relaxed);
         (force || now.saturating_sub(last) >= 1_000_000_000)
             && self
@@ -305,7 +307,7 @@ pub struct Bridge {
 /// `id` is 0 (rejected) or an nv_rm_sync_create id whose payload is not
 /// destroyed during `'a`.
 unsafe fn sync_ref<'a>(id: u64) -> Result<&'a SyncObj> {
-    let pointer = id as usize as *const SyncObj;
+    let pointer = sync_pointer(id)?;
     if pointer.is_null() {
         return Err(Error::Contract("null synchronization id".into()));
     }
@@ -325,6 +327,7 @@ impl Bridge {
     }
     fn new(pci: [u32; 4]) -> Result<(Self, Info)> {
         crate::diag::install_panic_hook();
+        crate::diag::install_logger();
         let client = Client::open()?;
         let card = client
             .cards()?
@@ -332,9 +335,9 @@ impl Bridge {
             .find(|c| {
                 [
                     c.pci.domain,
-                    c.pci.bus as u32,
-                    c.pci.slot as u32,
-                    c.pci.function as u32,
+                    u32::from(c.pci.bus),
+                    u32::from(c.pci.slot),
+                    u32::from(c.pci.function),
                 ] == pci
             })
             .ok_or_else(|| Error::Contract("requested PCI NVIDIA GPU absent".into()))?;
@@ -361,7 +364,7 @@ impl Bridge {
             devices: (events.as_raw_fd(), events.error_fd()),
         });
         let capture = crate::capture::config()
-            .map(|c| crate::capture::Capture::new(c, (pci[1] << 8 | pci[2]) as usize));
+            .map(|c| crate::capture::Capture::new(c, usize_from_u32(pci[1] << 8 | pci[2])));
         let bridge = Self {
             core,
             capture: std::sync::atomic::AtomicBool::new(capture.is_some()),
@@ -389,7 +392,7 @@ impl Bridge {
                 capture,
                 capture_probe: None,
                 capture_refused: false,
-                capture_tag: (pci[1] << 8 | pci[2]) as usize,
+                capture_tag: usize_from_u32(pci[1] << 8 | pci[2]),
                 context_engines: Vec::new(),
                 bind_info: HashMap::new(),
             })),
@@ -414,7 +417,7 @@ impl Bridge {
         let gpu = inner.space.map(&memory)?;
         if gpu
             .address()
-            .checked_add(memory.size as u64)
+            .checked_add(u64_from_usize(memory.size))
             .is_none_or(|end| end >= 1 << 34)
         {
             return Err(Error::Contract(
@@ -557,7 +560,7 @@ impl Bridge {
                 .queues
                 .iter()
                 .enumerate()
-                .filter_map(|(i, q)| q.as_ref().map(|q| (i as u64 + 1, q.last_token())))
+                .filter_map(|(i, q)| q.as_ref().map(|q| (u64_from_usize(i) + 1, q.last_token())))
                 .collect()
         };
         for (context, token) in pending {
@@ -565,10 +568,16 @@ impl Bridge {
                 u64::MAX
             } else {
                 timeout_ns
-                    .saturating_sub(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64)
+                    .saturating_sub(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX))
             };
             if !self.wait_token(context, token, remaining)? {
-                return Err(Error::Contract("RM teardown drain deadline reached".into()));
+                return Err(WaitError::Timeout {
+                    operation: "RM teardown drain",
+                    object: format!("context {context} token {token}"),
+                    limit: Duration::from_nanos(timeout_ns),
+                    elapsed: start.elapsed(),
+                }
+                .into());
             }
         }
         Ok(())
@@ -585,12 +594,15 @@ impl Bridge {
     /// every CPU wait/status path already reports loss. Returns the context's
     /// last token and retirement view for `quiesce`.
     fn unblock_locked(&self, inner: &mut Inner, context: u64) -> Option<(u64, Arc<QueueShared>)> {
-        let index = (context - 1) as usize;
+        let index = context_index(context)?;
         let queue = inner.queues.get(index)?.as_ref()?;
         let shared = Arc::clone(queue.shared());
         let token = queue.last_token();
         // Entries newer than `completed` are still held by their batch (held
         // slots are released only through retired tokens <= completed).
+        // Unreadable completion (the device is lost) releases every entry:
+        // releasing an acquire the GPU already passed is harmless, keeping
+        // one it is blocked on frees a blocked channel.
         let completed = shared.completed().unwrap_or(0);
         let pool = &self.core.pool;
         for &(batch, acquire) in inner.acquires[index].iter() {
@@ -630,8 +642,13 @@ impl Bridge {
             },
             |_| {
                 let mut guard = self.lock();
+                // Refresh every channel's error notifier: an RC'd channel no
+                // longer runs, which the predicate above accepts. Its error is
+                // logged here; the device is already lost.
                 for queue in guard.0.queues.iter_mut().flatten() {
-                    let _ = queue.check_error();
+                    if let Err(error) = queue.check_error() {
+                        diag!("nvk Rust RM teardown: channel error: {error}");
+                    }
                 }
                 Ok(())
             },
@@ -681,8 +698,10 @@ impl Bridge {
         reclaim.begin(queues.iter().enumerate().filter_map(|(index, queue)| {
             let queue = queue.as_ref()?;
             let token = queue.last_token();
-            (token != 0 && !matches!(queue.shared().retired(token), Ok(true)))
-                .then_some((index as u32, token))
+            (token != 0 && !matches!(queue.shared().retired(token), Ok(true))).then_some((
+                u32::try_from(index).expect("context ids stay far below u32::MAX"),
+                token,
+            ))
         }))
     }
     /// Defer `items` behind the current GPU work, or reclaim them now when
@@ -737,7 +756,7 @@ impl Bridge {
                 queues, reclaim, ..
             } = &mut *inner;
             let retired = |queue: u32, token: u64| match queues
-                .get(queue as usize)
+                .get(usize_from_u32(queue))
                 .and_then(Option::as_ref)
             {
                 // Destroyed context: its teardown waited (bounded) or lost,
@@ -945,9 +964,9 @@ impl Bridge {
                         context,
                         pushes,
                         [
-                            waits.len() as u32,
-                            foreign.len() as u32,
-                            signals.len() as u32,
+                            c_count(waits.len()),
+                            c_count(foreign.len()),
+                            c_count(signals.len()),
                         ],
                         token,
                     );
@@ -1088,7 +1107,7 @@ impl Bridge {
                     let value = if pool.view == TimelineView::Native64 {
                         value
                     } else {
-                        u64::from(value as u32)
+                        u64::from(low_u32(value))
                     };
                     s.waits
                         .push(SemaphoreOp::AcquireTimeline(pool.gpu(slot), value));
@@ -1146,7 +1165,7 @@ impl Bridge {
                     let wire = if pool.view == TimelineView::Native64 {
                         value
                     } else {
-                        u64::from(value as u32)
+                        u64::from(low_u32(value))
                     };
                     s.signals
                         .push(SemaphoreOp::ReleaseTimeline(pool.gpu(slot), wire));
@@ -1172,7 +1191,7 @@ impl Bridge {
             }
         }
         let space = &inner.space;
-        let queue = inner.queues[(context - 1) as usize].as_mut().unwrap();
+        let queue = queue_slot(&mut inner.queues, context)?;
         let shadows = &s.shadows;
         let result = queue.submit(pushes, space, &s.waits, &s.signals, &s.held, |_| {
             for &(slot, value) in shadows {
@@ -1312,7 +1331,7 @@ impl Bridge {
                 };
                 let waits = [SemaphoreOp::AcquireBinary(pool.gpu(slot))];
                 let space = &inner.space;
-                let queue = inner.queues[(context - 1) as usize].as_mut().unwrap();
+                let queue = queue_slot(&mut inner.queues, context)?;
                 let status = queue.submit(&[], space, &waits, &[], &[slot], |_| Ok(()));
                 pool.release(slot); // the accepted batch holds its own reference
                 let token = match status {
@@ -1346,7 +1365,7 @@ impl Bridge {
                 let gate = self.slot_locked(inner)?;
                 let waits = [SemaphoreOp::AcquireBinary(pool.gpu(gate))];
                 let space = &inner.space;
-                let queue = inner.queues[(context - 1) as usize].as_mut().unwrap();
+                let queue = queue_slot(&mut inner.queues, context)?;
                 let status = queue.submit(&[], space, &waits, &[], &[gate], |_| Ok(()));
                 let token = match status {
                     Ok(SubmitStatus::Submitted(token)) => {
@@ -1426,7 +1445,7 @@ impl Bridge {
                 return;
             }
             cap.add_context(
-                i as u64 + 1,
+                u64_from_usize(i) + 1,
                 inner.context_engines.get(i).copied().unwrap_or(0),
                 queue.channel_class(),
             );
@@ -1475,7 +1494,7 @@ impl Bridge {
                     // Loud: an armed capture without timestamps is refused.
                     queue.enable_timing(&inner.space)?;
                     cap.add_context(
-                        inner.queues.len() as u64 + 1,
+                        u64_from_usize(inner.queues.len()) + 1,
                         engines,
                         queue.channel_class(),
                     );
@@ -1483,7 +1502,7 @@ impl Bridge {
                 inner.queues.push(Some(queue));
                 inner.acquires.push(VecDeque::new());
                 inner.context_engines.push(engines);
-                Ok(inner.queues.len() as u64)
+                Ok(u64_from_usize(inner.queues.len()))
             }
             Err(error) => {
                 self.core.pool.release(retire);
@@ -1503,18 +1522,25 @@ fn capture_submit(inner: &mut Inner, context: u64, pushes: &[Push], counts: [u32
     let device = &inner.device;
     let active = cap.active(|| {
         let mut time = 0u64;
-        let _ = device
+        // The GPU time only labels the capture start; a failed read leaves
+        // it 0 and the capture runs on.
+        if let Err(error) = device
             .client
-            .control(device.subdevice, 0x20800403, &mut time);
+            .control(device.subdevice, 0x20800403, &mut time)
+        {
+            diag!("nvk Rust RM capture: GPU time read failed: {error}");
+        }
         time
     });
     let mut times = Vec::new();
     for (i, q) in inner.queues.iter_mut().enumerate() {
         if let Some(q) = q.as_mut() {
-            q.drain_timing(&mut times);
+            if let Err(error) = q.drain_timing(&mut times) {
+                diag!("nvk Rust RM capture: timing ring read failed: {error}");
+            }
             if active {
                 for (tok, start, end) in times.drain(..) {
-                    cap.time(i as u64 + 1, tok, start, end);
+                    cap.time(u64_from_usize(i) + 1, tok, start, end);
                 }
             }
             times.clear();
@@ -1566,8 +1592,9 @@ fn capture_read(
     if buffer.cpu.refs() == 0 {
         return None;
     }
-    let at = (offset + address - start) as usize;
-    let mut words = vec![0u8; size as usize];
+    // A bind offset beyond the address space cannot be read: not captured.
+    let at = usize::try_from(offset + address - start).ok()?;
+    let mut words = vec![0u8; usize_from_u32(size)];
     let read = buffer.cpu.acquire(
         || Err(Error::Contract("capture: mapping vanished".into())),
         // Sound only after the GPU handoff: UNVERIFIED: capture copies pushbuffers NVK finished
@@ -1576,10 +1603,22 @@ fn capture_read(
     );
     match read {
         Ok(r) => {
-            let _ = buffer.cpu.release();
-            r.ok().map(|()| words)
+            if let Err(error) = buffer.cpu.release() {
+                diag!("nvk Rust RM capture: push mapping release: {error}");
+            }
+            // A failed read leaves this push uncaptured (capture mode only).
+            match r {
+                Ok(()) => Some(words),
+                Err(error) => {
+                    diag!("nvk Rust RM capture: push read: {error}");
+                    None
+                }
+            }
         }
-        Err(_) => None,
+        Err(error) => {
+            diag!("nvk Rust RM capture: push mapping: {error}");
+            None
+        }
     }
 }
 /// Plan/commit consistency: submission plans read each payload under its own
@@ -1602,7 +1641,8 @@ fn record_acquires(
     token: u64,
     acquires: impl IntoIterator<Item = Acquire>,
 ) {
-    let index = (context - 1) as usize;
+    let index = context_index(context)
+        .expect("the context was resolved by the submit that accepted the batch");
     let list = &mut inner.acquires[index];
     if list.front().is_some() {
         if let Some(Ok(completed)) = inner.queues[index].as_ref().map(|q| q.shared().completed()) {
@@ -1619,13 +1659,46 @@ fn record_acquires(
 fn strict_teardown() -> bool {
     std::env::var_os("NV_RM_STRICT_TEARDOWN").is_some_and(|v| v != "0")
 }
+/// Index of a 1-based context id (`nv_rm_context_create` returns
+/// `queues.len()` after the push) into `Inner.queues`; None for 0 and for ids
+/// beyond the address space.
+fn context_index(context: u64) -> Option<usize> {
+    context.checked_sub(1).and_then(|i| usize::try_from(i).ok())
+}
+/// The live queue of `context`, borrowed from the queue table alone so other
+/// fields of Inner stay usable.
+fn queue_slot(queues: &mut [Option<Queue>], context: u64) -> Result<&mut Queue> {
+    context_index(context)
+        .and_then(|i| queues.get_mut(i))
+        .and_then(Option::as_mut)
+        .ok_or_else(|| Error::Contract("unknown RM context".into()))
+}
+/// A count of an array C passed with a u32 count (`nv_rm.h`): it fits u32.
+fn c_count(len: usize) -> u32 {
+    u32::try_from(len).expect("nv_rm.h arrays arrive with u32 counts")
+}
+/// The payload pointer of a sync id (`nv_rm_sync_create`'s `Arc::into_raw`
+/// address, exposed as an integer for C).
+fn sync_pointer(id: u64) -> Result<*const SyncObj> {
+    usize::try_from(id)
+        .map(std::ptr::with_exposed_provenance)
+        .map_err(|error| Error::Contract(format!("synchronization id {id:#x}: {error}")))
+}
 fn queue_ref(inner: &Inner, context: u64) -> Result<&Queue> {
     context
         .checked_sub(1)
-        .and_then(|i| inner.queues.get(i as usize))
+        .and_then(|i| inner.queues.get(usize::try_from(i).ok()?))
         .and_then(Option::as_ref)
         .ok_or_else(|| Error::Contract("unknown RM context".into()))
 }
+/// The deadline of a caller's wait. `u64::MAX` is the caller asking for no
+/// bound (RUST.md §7's exemption): a Vulkan `UINT64_MAX` timeout, or `nvkmd_rm.c`'s
+/// ring-pressure and context-sync waits, which pass `UINT64_MAX` as NVK's nouveau
+/// backend does for the same operations (Mesa `nvkmd_nouveau_ctx.c`,
+/// `nvkmd_nouveau_exec_ctx_sync`: `drmSyncobjWait(..., INT64_MAX, ...)`). Such a
+/// wait still ends: the leader reads every channel's error notifier at least
+/// once per second (waiters.rs `SCAN_PERIOD`) and a dead channel ends it as
+/// device loss.
 fn deadline(start: Instant, timeout_ns: u64) -> Option<Instant> {
     (timeout_ns != u64::MAX).then(|| start + Duration::from_nanos(timeout_ns))
 }
@@ -1648,7 +1721,7 @@ impl Drop for Bridge {
             let pending: Vec<_> = {
                 let mut guard = self.lock();
                 let inner = &mut guard.0;
-                (1..=inner.queues.len() as u64)
+                (1..=u64_from_usize(inner.queues.len()))
                     .filter_map(|context| self.unblock_locked(inner, context))
                     .collect()
             };
@@ -1658,7 +1731,7 @@ impl Drop for Bridge {
         let inner = &mut guard.0;
         for (index, queue) in inner.queues.iter().enumerate() {
             if let Some(queue) = queue {
-                Self::check_idle_before_free(index as u64 + 1, queue);
+                Self::check_idle_before_free(u64_from_usize(index) + 1, queue);
             }
         }
         // Leaked payloads (API misuse) must not touch unmapped pages.
@@ -1686,8 +1759,8 @@ fn query_info(d: &Device) -> Result<Info> {
     d.client.control(d.subdevice, 0x20800110, &mut name)?;
     let mut gr = [[0xcu32, 0], [0xd, 0], [0x20, 0], [0x7, 0], [0x9, 0]];
     let mut query = abi::GrInfo {
-        count: gr.len() as u32,
-        entries: gr.as_mut_ptr() as u64,
+        count: u32::try_from(gr.len()).expect("a five-entry GR info query"),
+        entries: u64_from_usize(gr.as_mut_ptr().expose_provenance()),
         ..Default::default()
     };
     d.client.control(d.subdevice, 0x20801201, &mut query)?;
@@ -1704,8 +1777,8 @@ fn query_info(d: &Device) -> Result<Info> {
     let joinable = if caps.usermode.is_some() {
         let mut sub = [[0x2cu32, 0]];
         let mut query = abi::GrInfo {
-            count: sub.len() as u32,
-            entries: sub.as_mut_ptr() as u64,
+            count: u32::try_from(sub.len()).expect("a one-entry GR info query"),
+            entries: u64_from_usize(sub.as_mut_ptr().expose_provenance()),
             ..Default::default()
         };
         d.client.control(d.subdevice, 0x20801201, &mut query)?;
@@ -1718,15 +1791,15 @@ fn query_info(d: &Device) -> Result<Info> {
     let mut gpc = [0u64; 3];
     d.client.control(d.subdevice, 0x2080122a, &mut gpc)?;
     let mut tpc_count = 0;
-    for i in 0..32 {
-        if gpc[2] as u32 & (1 << i) != 0 {
-            let mut tpc = [0u64, 0, i as u64];
+    for i in 0..32u32 {
+        if low_u32(gpc[2]) & (1 << i) != 0 {
+            let mut tpc = [0u64, 0, u64::from(i)];
             d.client.control(d.subdevice, 0x2080122b, &mut tpc)?;
-            tpc_count += ((tpc[2] >> 32) as u32).count_ones();
+            tpc_count += high_u32(tpc[2]).count_ones();
         }
     }
     let mut fb = [0x7u32, 0];
-    let mut fbq = [1u64, fb.as_mut_ptr() as u64];
+    let mut fbq = [1u64, u64_from_usize(fb.as_mut_ptr().expose_provenance())];
     d.client.control(d.subdevice, 0x20801301, &mut fbq)?;
     let mut text = [0; 64];
     for (i, w) in name[1..].iter().enumerate() {
@@ -1741,17 +1814,17 @@ fn query_info(d: &Device) -> Result<Info> {
     };
     let c = d.card;
     Ok(Info {
-        vendor_id: c.pci.vendor as u32,
-        device_id: c.pci.device as u32,
+        vendor_id: u32::from(c.pci.vendor),
+        device_id: u32::from(c.pci.device),
         chipset: arch[0]
             .checked_add(arch[1])
             .ok_or_else(|| Error::Contract("chipset identity overflow".into()))?,
         sm: caps.sm,
         pci_domain: c.pci.domain,
-        pci_bus: c.pci.bus as u32,
-        pci_device: c.pci.slot as u32,
-        pci_function: c.pci.function as u32,
-        gpc_count: (gpc[2] as u32).count_ones(),
+        pci_bus: u32::from(c.pci.bus),
+        pci_device: u32::from(c.pci.slot),
+        pci_function: u32::from(c.pci.function),
+        gpc_count: low_u32(gpc[2]).count_ones(),
         tpc_count,
         mp_per_tpc: gr[2][1],
         max_warps_per_mp: gr[1][1],
@@ -1761,7 +1834,7 @@ fn query_info(d: &Device) -> Result<Info> {
         cls_m2mf: caps.m2mf,
         cls_compute: caps.compute,
         generic_kind: caps.generic_kind,
-        vram_size: fb[1] as u64 * 1024,
+        vram_size: u64::from(fb[1]) * 1024,
         bar_size: c.framebuffer_size,
         name: text,
         zcull,
@@ -1848,7 +1921,7 @@ impl crate::ffi::Failable for Bridge {
 fn guarded(entry: &'static str, bridge: Option<&Bridge>, f: impl FnOnce() -> i32) -> i32 {
     crate::ffi::guard(
         entry,
-        bridge.map(|b| b as &dyn crate::ffi::Failable),
+        bridge.map(|b| -> &dyn crate::ffi::Failable { b }),
         || -4,
         f,
     )
@@ -1857,16 +1930,27 @@ fn guarded(entry: &'static str, bridge: Option<&Bridge>, f: impl FnOnce() -> i32
 fn present(bridge: Option<&Bridge>) -> Result<&Bridge> {
     bridge.ok_or_else(|| Error::Contract("null RM bridge".into()))
 }
+/// The `VkResult` an `nv_rm_*` entry point returns for `error` (`nv_rm.h`; `nvkmd_rm.c`
+/// passes it through as the `VkResult`): `VK_ERROR_DEVICE_LOST` (-4) for a lost
+/// device, `VK_ERROR_OUT_OF_HOST_MEMORY` (-1) for an `ENOMEM` syscall, and
+/// `VK_ERROR_INITIALIZATION_FAILED` (-3) for every other failure.
+fn vk_status(error: &Error) -> i32 {
+    match error {
+        Error::DeviceLost(_) => -4,
+        Error::Io(_, error) if error.raw_os_error() == Some(12) => -1,
+        Error::Io(..)
+        | Error::Rm { .. }
+        | Error::Contract(_)
+        | Error::Wait(_)
+        | Error::BarPressure { .. } => -3,
+    }
+}
 fn report(result: Result<()>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
             diag!("nvk Rust RM: {e}");
-            match e {
-                Error::DeviceLost(_) => -4,
-                Error::Io(_, ref error) if error.raw_os_error() == Some(12) => -1,
-                _ => -3,
-            }
+            vk_status(&e)
         }
     }
 }
@@ -1896,7 +1980,7 @@ unsafe fn input<'a, T>(ptr: *const T, count: u32, maximum: u32) -> Result<&'a [T
     } else {
         // SAFETY: non-NULL with count <= maximum (checked above); the
         // elements are readable and unchanged for 'a (# Safety).
-        unsafe { std::slice::from_raw_parts(ptr, count as usize) }
+        unsafe { std::slice::from_raw_parts(ptr, usize_from_u32(count)) }
     })
 }
 fn status_of(result: Result<SubmitStatus>, out: *mut u64) -> i32 {
@@ -2042,9 +2126,10 @@ pub unsafe extern "C" fn nv_rm_alloc(
             // Retired frees first: their memory may be what this needs.
             b.reclaim_locked(s, false);
             let size = usize::try_from(size)
-                .map_err(|_| Error::Contract("memory size overflow".into()))?;
-            let alignment = usize::try_from(alignment.max(4096))
-                .map_err(|_| Error::Contract("memory alignment overflow".into()))?;
+                .map_err(|error| Error::Contract(format!("memory size {size}: {error}")))?;
+            let alignment = usize::try_from(alignment.max(4096)).map_err(|error| {
+                Error::Contract(format!("memory alignment {alignment}: {error}"))
+            })?;
             let memory = match placement {
                 Placement::VramCompressible => s.device.allocate_compressible(size, alignment)?,
                 Placement::VramPoolBlock => {
@@ -2072,7 +2157,7 @@ pub unsafe extern "C" fn nv_rm_alloc(
             let id = next_id(s)?;
             let a = Allocation {
                 id,
-                size: memory.size as u64,
+                size: u64_from_usize(memory.size),
                 cpu_address: 0,
             };
             s.buffers.insert(
@@ -2169,6 +2254,10 @@ pub unsafe extern "C" fn nv_rm_unmap(p: *mut Bridge, memory: u64) -> i32 {
 /// pointer is NULL or writable, and every input array readable for its count;
 /// every descriptor argument is open for the call; every sync id is 0 or a
 /// live nv_rm_sync_create payload.
+///
+/// # Panics
+/// Only on a broken internal invariant (an id validated under the device
+/// lock and then missing); the FFI guard turns that into device loss.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: u64) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
@@ -2198,7 +2287,10 @@ pub unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: u64) -> i32 {
                 b.lose_locked(s);
                 return Err(error);
             }
-            let buffer = s.buffers.remove(&memory).unwrap();
+            let buffer = s
+                .buffers
+                .remove(&memory)
+                .expect("looked up above under the same lock");
             b.reclaim_or_defer(s, [ReclaimItem::Memory(buffer)])
         })())
     })
@@ -2320,6 +2412,10 @@ pub unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: u64) -> i32 {
 /// live nv_rm_sync_create payload.
 /// `release(data, ..)` stays callable from any thread until nv_rm_close
 /// returns.
+///
+/// # Panics
+/// Only on a broken internal invariant (an id validated under the device
+/// lock and then missing); the FFI guard turns that into device loss.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_va_free(
     p: *mut Bridge,
@@ -2375,10 +2471,13 @@ pub unsafe extern "C" fn nv_rm_va_free(
             for id in ids {
                 s.bind_info.remove(id);
             }
-            freeing.extend(
-                ids.iter()
-                    .map(|id| ReclaimItem::Mapping(s.maps.remove(id).unwrap())),
-            );
+            freeing.extend(ids.iter().map(|id| {
+                ReclaimItem::Mapping(
+                    s.maps
+                        .remove(id)
+                        .expect("every id was validated above under the same lock"),
+                )
+            }));
             freeing.push(ReclaimItem::Va {
                 address,
                 size,
@@ -2454,6 +2553,10 @@ pub unsafe extern "C" fn nv_rm_context_create_shared(
 /// pointer is NULL or writable, and every input array readable for its count;
 /// every descriptor argument is open for the call; every sync id is 0 or a
 /// live nv_rm_sync_create payload.
+///
+/// # Panics
+/// Only on a broken internal invariant (an id validated under the device
+/// lock and then missing); the FFI guard turns that into device loss.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
@@ -2466,7 +2569,14 @@ pub unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -> i32 {
             // after 5 s; its acquires are then released so the channel runs
             // out, and only the idle channel is RM-freed (no schedule-off
             // first, as stock) before memory is released.
-            if !b.wait_token(id, token, 5_000_000_000).unwrap_or(false) {
+            // A wait that fails (device lost) is handled like one that ran out.
+            let drained = b
+                .wait_token(id, token, 5_000_000_000)
+                .unwrap_or_else(|error| {
+                    diag!("nvk Rust RM context {id} destroy drain: {error}");
+                    false
+                });
+            if !drained {
                 let pending = {
                     let mut guard = b.lock();
                     b.lose_locked(&mut guard.0);
@@ -2479,11 +2589,14 @@ pub unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -> i32 {
             let s = &mut guard.0;
             let queue = s
                 .queues
-                .get_mut((id - 1) as usize)
+                .get_mut(
+                    context_index(id)
+                        .ok_or_else(|| Error::Contract("destroy unknown context".into()))?,
+                )
                 .and_then(Option::take)
                 .ok_or_else(|| Error::Contract("destroy unknown context".into()))?;
             Bridge::check_idle_before_free(id, &queue);
-            s.acquires[(id - 1) as usize].clear();
+            s.acquires[context_index(id).expect("the queue of this id was just taken")].clear();
             drop(queue);
             // Groups that waited only on this queue can go now.
             b.reclaim_locked(s, false);
@@ -2676,10 +2789,12 @@ pub unsafe extern "C" fn nv_rm_exec(
             let mut token = 0;
             // SAFETY: this entry point's own arguments, under the same
             // contract; `token` is a live local.
-            let result = unsafe { nv_rm_submit(p, id, pushes, count, &mut token) };
+            let result = unsafe { nv_rm_submit(p, id, pushes, count, &raw mut token) };
             if result != 0 && result != 1 {
                 return result;
             }
+            // Synchronous by contract (nv_rm.h nv_rm_exec), so unbounded like
+            // nvkmd_rm.c's context sync; see `deadline` for how loss ends it.
             // SAFETY: this entry point's own device argument.
             let wait = unsafe { nv_rm_wait(p, id, token, u64::MAX) };
             if wait != 0 {
@@ -2753,7 +2868,7 @@ pub unsafe extern "C" fn nv_rm_is_lost(p: *const Bridge) -> i32 {
     // A failed device reads as lost (1), like NULL.
     crate::ffi::guard(
         "nv_rm_is_lost",
-        object.map(|b| b as &dyn crate::ffi::Failable),
+        object.map(|b| -> &dyn crate::ffi::Failable { b }),
         || 1,
         move || object.map_or(1, |b| i32::from(b.core.is_lost())),
     )
@@ -2853,7 +2968,7 @@ pub unsafe extern "C" fn nv_rm_import(
             let id = next_id(s)?;
             let result = Allocation {
                 id,
-                size: memory.size as u64,
+                size: u64_from_usize(memory.size),
                 cpu_address: 0,
             };
             s.buffers.insert(
@@ -2900,7 +3015,7 @@ pub unsafe extern "C" fn nv_rm_sync_create(
                     return Err(error);
                 }
             };
-            let id = Arc::into_raw(Arc::new(sync)) as usize as u64;
+            let id = u64_from_usize(Arc::into_raw(Arc::new(sync)).expose_provenance());
             // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, id) }
         })())
@@ -2920,7 +3035,7 @@ pub unsafe extern "C" fn nv_rm_sync_destroy(_p: *mut Bridge, id: u64) -> i32 {
             // SAFETY: id is the Arc pointer created by nv_rm_sync_create; Mesa
             // destroys each vk_sync exactly once. Accepted submissions own their
             // slot references independently of this payload.
-            drop(unsafe { Arc::from_raw(id as usize as *const SyncObj) });
+            drop(unsafe { Arc::from_raw(sync_pointer(id)?) });
             Ok(())
         })())
     })
@@ -3400,6 +3515,36 @@ pub unsafe extern "C" fn nv_rm_context_signal(
 mod tests {
     use super::*;
     use std::mem::{offset_of, size_of};
+    #[test]
+    fn status_codes_match_the_c_abi() {
+        // nvkmd_rm.c rm_result() returns the status as the VkResult.
+        let io = |errno| Error::Io("op", std::io::Error::from_raw_os_error(errno));
+        assert_eq!(vk_status(&Error::DeviceLost("x".into())), -4);
+        assert_eq!(vk_status(&io(12)), -1);
+        assert_eq!(vk_status(&io(22)), -3);
+        assert_eq!(vk_status(&Error::Contract("x".into())), -3);
+        assert_eq!(
+            vk_status(&Error::Rm {
+                operation: "op",
+                status: 0x1f
+            }),
+            -3
+        );
+        let wait = WaitError::Timeout {
+            operation: "op",
+            object: "x".into(),
+            limit: Duration::ZERO,
+            elapsed: Duration::ZERO,
+        };
+        assert_eq!(vk_status(&wait.into()), -3);
+        let bar = Error::BarPressure {
+            used: 1,
+            requested: 2,
+            limit: 3,
+        };
+        assert_eq!(vk_status(&bar), -3);
+        assert_eq!(report(Ok(())), 0);
+    }
     #[test]
     fn bridge_info_matches_independent_c_oracle() {
         // mesa/abi-check.c: host and Android compile from the public bridge header.

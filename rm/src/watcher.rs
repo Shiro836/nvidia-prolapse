@@ -156,8 +156,10 @@ impl Watcher {
     pub(crate) fn stop(&self, core: &Core) {
         self.lock().stop = true;
         self.wake();
-        if let Some(thread) = self.thread.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.lock().unwrap_or_else(|p| p.into_inner()).take()
+            && thread.join().is_err()
+        {
+            diag!("RM foreign watcher thread panicked");
         }
         let mut state = self.lock();
         for (_, slot) in state.gates.drain(..) {
@@ -171,8 +173,9 @@ impl Watcher {
         for shared in state.publish.drain(..) {
             // Successful drain published everything already; unfinished
             // points (lost/undrained device) become errors, never success.
-            if let Ok(published) = shared.refresh() {
-                changed |= published;
+            match shared.refresh() {
+                Ok(published) => changed |= published,
+                Err(error) => diag!("RM shared payload refresh at loss: {error}"),
             }
             if shared.has_local_work() {
                 changed |= shared.fail();
@@ -237,6 +240,9 @@ fn run(core: &Arc<Core>) {
         fds.dedup();
         // No timer: every source is a real descriptor (sync_files, RM HOST,
         // our eventfd). HUP/ERR on the RM HOST listener is device loss.
+        // Unbounded on purpose (RUST.md §7): this is the watcher thread's idle
+        // wait, not a caller's. Close ends it through `wake`; every caller
+        // waiting on a watched sync_file carries its own deadline (waiters.rs).
         let devices = host.map(|fd| (fd, fd));
         if let Err(error) = readiness.dispatch(&fds, devices, true) {
             diag!("RM foreign watcher: {error}");
@@ -331,8 +337,9 @@ fn service(core: &Arc<Core>, readiness: &Readiness, host: Option<RawFd>) {
             shared.has_local_work()
         });
         state.shared_gates.retain(|(shared, target, slot)| {
-            if let Ok(published) = shared.refresh() {
-                broadcast |= published;
+            match shared.refresh() {
+                Ok(published) => broadcast |= published,
+                Err(error) => diag!("RM shared gate refresh: {error}"),
             }
             if shared.completed() >= *target {
                 if let Err(error) = core.pool.store32(*slot, 1) {

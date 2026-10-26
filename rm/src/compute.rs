@@ -5,6 +5,7 @@ use crate::{
     gpu::{AddressSpace, GpuMapping},
     rm::{Device, Error, Mapping, Result},
 };
+use nv_rm_core::conv::{low_u32, u64_from_usize};
 use std::rc::Rc;
 
 pub(crate) const LOCAL_WINDOW: u64 = 0x729300000000;
@@ -25,7 +26,7 @@ impl Qmd {
         }
         for bit in low..=high {
             self.0[bit / 32] = (self.0[bit / 32] & !(1 << (bit % 32)))
-                | (((value >> (bit - low)) as u32 & 1) << (bit % 32));
+                | ((low_u32(value >> (bit - low)) & 1) << (bit % 32));
         }
         Ok(())
     }
@@ -47,8 +48,10 @@ impl ComputeJob {
         completion: u64,
     ) -> Result<Self> {
         let words: Vec<u32> = include_bytes!("../shaders/pattern.spv")
-            .chunks_exact(4)
-            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
             .collect();
         let program = crate::compiler::compile(&words, c"main")?;
         let mut constants = vec![0u8; 1152];
@@ -88,8 +91,8 @@ impl ComputeJob {
         for i in 0..4096 / 4 {
             descriptor_cpu.write_u32(i * 4, 0)?;
         }
-        for (i, chunk) in program.code.chunks_exact(4).enumerate() {
-            code_cpu.write_u32(i * 4, u32::from_le_bytes(chunk.try_into().unwrap()))?;
+        for (i, chunk) in program.code.as_chunks::<4>().0.iter().enumerate() {
+            code_cpu.write_u32(i * 4, u32::from_le_bytes(*chunk))?;
         }
         let address = descriptor_va.address();
         if address & 255 != 0 || address >> 40 != 0 {
@@ -99,6 +102,9 @@ impl ComputeJob {
         }
         let cbuf = address + 512;
         let mut qmd = Qmd([0; 96]);
+        let code_blocks = u64_from_usize((program.code.len() >> 8).min(0x1ff));
+        let shared_units = u64::from(program.shared_size.next_multiple_of(128)) >> 7;
+        let constant_units = u64_from_usize(constants.len().next_multiple_of(16)) >> 4;
         for (high, low, value) in [
             (149, 144, 0x3f), // group id
             (153, 151, 2),    // GRID_CTA
@@ -121,26 +127,22 @@ impl ComputeJob {
             (625, 624, 1), // CWD L1_SYSMEMBAR
             (1055, 1024, (code_va.address() >> 4) & 0xffffffff),
             (1076, 1056, code_va.address() >> 36),
-            (1085, 1077, ((program.code.len() >> 8).min(0x1ff)) as u64),
-            (1103, 1088, program.workgroup[0] as u64),
-            (1119, 1104, program.workgroup[1] as u64),
-            (1127, 1120, program.workgroup[2] as u64),
-            (1136, 1128, program.registers as u64),
-            (1141, 1137, program.barriers as u64),
-            (
-                1162,
-                1152,
-                program.shared_size.next_multiple_of(128) as u64 >> 7,
-            ),
+            (1085, 1077, code_blocks),
+            (1103, 1088, u64::from(program.workgroup[0])),
+            (1119, 1104, u64::from(program.workgroup[1])),
+            (1127, 1120, u64::from(program.workgroup[2])),
+            (1136, 1128, u64::from(program.registers)),
+            (1141, 1137, u64::from(program.barriers)),
+            (1162, 1152, shared_units),
             (1168, 1163, 9),
             (1174, 1169, 0x1a),
             (1180, 1175, 9),
-            (1279, 1248, groups[0] as u64),
-            (1295, 1280, groups[1] as u64),
-            (1327, 1312, groups[2] as u64),
+            (1279, 1248, u64::from(groups[0])),
+            (1295, 1280, u64::from(groups[1])),
+            (1327, 1312, u64::from(groups[2])),
             (1375, 1344, (cbuf >> 6) & 0xffffffff),
             (1394, 1376, cbuf >> 38),
-            (1407, 1395, constants.len().next_multiple_of(16) as u64 >> 4), // bytes rounded to 16-byte QMD size units
+            (1407, 1395, constant_units), // bytes rounded to 16-byte QMD size units
             (1856, 1856, 1),
             (1859, 1859, 1),
             (1919, 1888, (code_va.address() >> 8) & 0xffffffff),

@@ -14,6 +14,7 @@ use crate::{
     platform,
     rm::{Device, Error, Memory, Result},
 };
+use nv_rm_core::conv::u64_from_usize;
 use std::{
     fs::{File, OpenOptions},
     io,
@@ -99,8 +100,12 @@ struct CloseGem {
 }
 
 fn request(number: u8, size: usize, direction: u32) -> u32 {
-    assert!(size < 16384);
-    (direction << 30) | ((size as u32) << 16) | (u32::from(b'd') << 8) | u32::from(number)
+    // _IOC_SIZEBITS = 14 (asm-generic/ioctl.h): the size field is 13:0 of bits 29:16.
+    let size = u32::try_from(size)
+        .ok()
+        .filter(|&s| s < 16384)
+        .expect("ioctl argument structs are below 16 KiB");
+    (direction << 30) | (size << 16) | (u32::from(b'd') << 8) | u32::from(number)
 }
 fn drm_ioctl<T: FromBytes + IntoBytes + Immutable>(
     fd: BorrowedFd<'_>,
@@ -115,7 +120,7 @@ fn drm_ioctl<T: FromBytes + IntoBytes + Immutable>(
         platform::ioctl(
             fd.as_raw_fd(),
             request(number, size_of::<T>(), direction),
-            (value as *mut T).cast(),
+            std::ptr::from_mut::<T>(value).cast(),
         )
     };
     if result < 0 {
@@ -213,9 +218,9 @@ pub(crate) fn export(memory: &Rc<Memory>, drm_fd: BorrowedFd<'_>) -> Result<Owne
         },
     };
     let mut imported = ImportGem {
-        size: memory.size as u64,
-        parameters: (&mut private as *mut ImportMemory) as u64,
-        parameters_size: size_of::<ImportMemory>() as u64,
+        size: u64_from_usize(memory.size),
+        parameters: u64_from_usize((&raw mut private).expose_provenance()),
+        parameters_size: u64_from_usize(size_of::<ImportMemory>()),
         handle: 0,
         padding: 0,
     };
@@ -258,8 +263,11 @@ pub(crate) fn import(
             "dma-buf size must be nonzero and page-aligned".into(),
         ));
     }
-    let size = usize::try_from(size)
-        .map_err(|_| Error::Contract("dma-buf does not fit process address space".into()))?;
+    let size = usize::try_from(size).map_err(|error| {
+        Error::Contract(format!(
+            "dma-buf does not fit process address space: {error}"
+        ))
+    })?;
     let drm = isolated_drm(drm_fd)?;
     let mut prime = Prime {
         handle: 0,
@@ -303,8 +311,8 @@ pub(crate) fn import(
     let mut export_gem = ExportGem {
         handle: gem.handle,
         padding: 0,
-        parameters: (&mut opaque_fd as *mut i32) as u64,
-        parameters_size: size_of::<i32>() as u64,
+        parameters: u64_from_usize((&raw mut opaque_fd).expose_provenance()),
+        parameters_size: u64_from_usize(size_of::<i32>()),
     };
     drm_ioctl(drm.as_fd(), export_command, 3, &mut export_gem)?;
     let mut imported = ImportObject {

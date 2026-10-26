@@ -84,7 +84,7 @@ impl HevcDecoder {
             max_width,
             max_height,
             super::super::bytes_per_sample(bit_depth),
-        );
+        )?;
         let inputs = SessionInputs {
             // framestride in samples: stock hevc10 capture (352x288) writes 352 for its 704-byte
             // 16-bit pitch, hevc8 384 for a 384-byte pitch.

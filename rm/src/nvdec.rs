@@ -33,7 +33,10 @@
 //!   nv-nvdec-probe fixture/ out/ N ref.nv12
 use crate::{
     gpu::{AddressSpace, Object, hi_lo, method},
-    rm::{Device, Error, Result},
+    rm::{Device, Error, Result, WaitError},
+};
+use nv_rm_core::conv::{
+    const_u32_from_usize, high_u32, low_u8, low_u16, low_u32, u64_from_usize, usize_from_u32,
 };
 use std::{rc::Rc, time::Duration, time::Instant};
 
@@ -113,6 +116,9 @@ pub struct VideoChannel {
 }
 
 const ENTRIES: usize = 1024;
+/// `NVC9B0_ALLOCATION_PARAMETERS` size, as its `size` field records it.
+const DECODER_PARAMS_SIZE: u32 =
+    const_u32_from_usize(std::mem::size_of::<crate::abi::VideoDecoder>());
 
 impl VideoChannel {
     pub fn new(device: &Rc<Device>) -> Result<Self> {
@@ -170,13 +176,13 @@ impl VideoChannel {
         )?;
         let mut channel_params = crate::abi::Channel {
             fifo_address: queue_va.address(),
-            entries: ENTRIES as u32,
+            entries: const { const_u32_from_usize(ENTRIES) },
             context_share: context.handle,
             engine: NV2080_ENGINE_TYPE_NVDEC0,
             ..Default::default()
         };
         channel_params.userd_memory[0] = queue_memory.handle;
-        channel_params.userd_offsets[0] = (ENTRIES * 8) as u64;
+        channel_params.userd_offsets[0] = u64_from_usize(ENTRIES * 8);
         let channel = Object::new(
             device,
             group.handle,
@@ -186,10 +192,10 @@ impl VideoChannel {
         )?;
         device.client.compat.require_constant(
             "NV2080_ENGINE_TYPE_NVDEC0",
-            NV2080_ENGINE_TYPE_NVDEC0 as u64,
+            u64::from(NV2080_ENGINE_TYPE_NVDEC0),
         )?;
         let mut decoder_params = crate::abi::VideoDecoder {
-            size: std::mem::size_of::<crate::abi::VideoDecoder>() as u32,
+            size: DECODER_PARAMS_SIZE,
             ..Default::default()
         };
         let decoder = Object::new(
@@ -258,27 +264,32 @@ impl VideoChannel {
         for (k, w) in words.iter().enumerate() {
             self.command.write_u32(self.cmd_off + k * 4, *w)?;
         }
-        let entry =
-            (self.command_va + self.cmd_off as u64) | ((words.len() as u64) << 42) | (1 << 41);
+        let entry = (self.command_va + u64_from_usize(self.cmd_off))
+            | (u64_from_usize(words.len()) << 42)
+            | (1 << 41);
         self.cmd_off += round_up(words.len() * 4, 256);
-        self.ring.write_u32(self.put * 8, entry as u32)?;
-        self.ring
-            .write_u32(self.put * 8 + 4, (entry >> 32) as u32)?;
+        self.ring.write_u32(self.put * 8, low_u32(entry))?;
+        self.ring.write_u32(self.put * 8 + 4, high_u32(entry))?;
         self.put = (self.put + 1) % ENTRIES;
         let start = Instant::now();
         crate::platform::device_full_barrier();
-        self.ring.write_u32(ENTRIES * 8 + 0x8c, self.put as u32)?; // GPPut
+        self.ring
+            .write_u32(ENTRIES * 8 + 0x8c, slot_u32(self.put))?; // GPPut
         crate::platform::device_full_barrier();
         self.doorbell.write_u32(0x90, self.token)?;
         crate::platform::device_full_barrier();
-        let deadline = start + Duration::from_secs(2);
+        let limit = Duration::from_secs(2);
         while self.sem_cpu.read_u32(0)? != serial {
-            if Instant::now() >= deadline {
+            if start.elapsed() >= limit {
                 let gpget = self.ring.read_u32(ENTRIES * 8 + 0x88)?;
-                return Err(Error::Contract(format!(
-                    "NVDEC submission {serial} timed out (GPGet {gpget}, put {}); channel torn down",
-                    self.put
-                )));
+                // The channel is torn down by the caller's drop.
+                return Err(WaitError::Timeout {
+                    operation: "NVDEC submission",
+                    object: format!("release {serial} (GPGet {gpget}, put {})", self.put),
+                    limit,
+                    elapsed: start.elapsed(),
+                }
+                .into());
             }
             std::thread::sleep(Duration::from_micros(20));
         }
@@ -291,10 +302,15 @@ impl VideoChannel {
 impl Drop for VideoChannel {
     fn drop(&mut self) {
         if let Some(group) = self.objects.last() {
-            let _ = self
-                .device
-                .client
-                .control(group.handle, 0xa06c0101, &mut [0u8, 0, 0]);
+            // GPFIFO_SCHEDULE off before the frees; a failure leaves the free
+            // below to stop the channel (RM preempts on free), so it is logged.
+            if let Err(error) =
+                self.device
+                    .client
+                    .control(group.handle, 0xa06c0101, &mut [0u8, 0, 0])
+            {
+                crate::diag::diag!("NVDEC channel schedule-off failed: {error}");
+            }
         }
         while let Some(o) = self.objects.first().cloned() {
             drop(o);
@@ -363,8 +379,12 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
         bits_cpu.write_bytes(data.len(), &[0u8; 256])?;
         let out_va = surfaces[i].1.address();
         let mut words = Vec::new();
-        let d = ((desc.address() + desc_off as u64) >> 8) as u32;
-        let f = (filter.address() >> 8) as u32;
+        let d = low_u32((desc.address() + u64_from_usize(desc_off)) >> 8);
+        let chroma = u64_from_usize(chroma_offset);
+        // Buffer offsets in 256-byte units, added to the 32-bit FILTER_BUFFER field.
+        let intra_top = low_u32(u64_from_usize(intra_top_off >> 8));
+        let intra_unk = low_u32(u64_from_usize(intra_unk_off >> 8));
+        let f = low_u32(filter.address() >> 8);
         method(&mut words, 4, 0x200, &[7]); // SET_APPLICATION_ID HEVC
         // SET_CONTROL_PARAMS: codec HEVC, gptimer, err_conceal, mbtimer,
         // event_trace_logging, testrun_env PROD_RUN.
@@ -374,25 +394,21 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
             0x400,
             &[7 | 1 << 4 | 1 << 6 | 1 << 13 | 1 << 16 | 1 << 18],
         );
-        method(&mut words, 4, 0x404, &[d, (bits.address() >> 8) as u32]); // DRV_PIC_SETUP, IN_BUF_BASE
-        slots[frame.pos as usize] = Some(out_va);
+        method(&mut words, 4, 0x404, &[d, low_u32(bits.address() >> 8)]); // DRV_PIC_SETUP, IN_BUF_BASE
+        slots[usize_from_u32(frame.pos)] = Some(out_va);
         for (slot, va) in slots.iter().enumerate() {
             if let Some(va) = va {
-                method(&mut words, 4, 0x430 + slot as u32 * 4, &[(va >> 8) as u32]);
-                method(
-                    &mut words,
-                    4,
-                    0x474 + slot as u32 * 4,
-                    &[((va + chroma_offset as u64) >> 8) as u32],
-                );
+                let slot = slot_u32(slot) * 4;
+                method(&mut words, 4, 0x430 + slot, &[low_u32(va >> 8)]);
+                method(&mut words, 4, 0x474 + slot, &[low_u32((va + chroma) >> 8)]);
             }
         }
-        method(&mut words, 4, 0x414, &[(coloc.address() >> 8) as u32]); // COLOC_DATA
-        method(&mut words, 4, 0x424, &[(status.address() >> 8) as u32]); // NVDEC_STATUS
+        method(&mut words, 4, 0x414, &[low_u32(coloc.address() >> 8)]); // COLOC_DATA
+        method(&mut words, 4, 0x424, &[low_u32(status.address() >> 8)]); // NVDEC_STATUS
         method(&mut words, 4, 0x584, &[d + 2, f]); // HEVC TILE_SIZES, FILTER_BUFFER
-        method(&mut words, 4, 0x4c8, &[f + (intra_top_off >> 8) as u32]); // INTRA_TOP_BUF
+        method(&mut words, 4, 0x4c8, &[f + intra_top]); // INTRA_TOP_BUF
         if blackwell {
-            method(&mut words, 4, 0x4dc, &[f + (intra_unk_off >> 8) as u32]);
+            method(&mut words, 4, 0x4dc, &[f + intra_unk]);
         }
         method(&mut words, 4, 0x300, &[0]); // EXECUTE
         report.frame_times.push(ch.run(words)?);
@@ -402,7 +418,7 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
         }
         report.status_words.push(st);
         if !frame.is_hist {
-            slots[frame.pos as usize] = None;
+            slots[usize_from_u32(frame.pos)] = None;
         }
         let mut out = vec![0u8; surface_size];
         // Sound only after the GPU handoff: every frame's ch.run (synchronous submit + wait) completed.
@@ -450,6 +466,11 @@ const VP9_SEG_SIZE: usize = 0x8_0000;
 const VP9_COLMV_SIZE: usize = 0x100_0000;
 const VP9_SURFACES: usize = 10;
 
+/// A ring index or reference slot (below 16) as a method offset term or `GP_PUT`.
+fn slot_u32(slot: usize) -> u32 {
+    u32::try_from(slot).expect("slot and ring indices are small")
+}
+
 /// Build the engine's nvdec_vp9_pic_s for a parsed frame (field mapping
 /// checked against the stock pic_s of the same streams, see compare-desc).
 pub fn vp9_pic(
@@ -459,12 +480,15 @@ pub fn vp9_pic(
 ) -> crate::nvdec_drv::Vp9PicS {
     use crate::nvdec_drv::{Vp9Dims, Vp9PicS};
     let dims = |w: u32, hh: u32| Vp9Dims {
-        width: w as u16,
-        height: hh as u16,
-        stride: [round_up(w as usize, 64) as u16; 2],
+        // nvdec_vp9_pic_s frame sizes and strides are 16-bit fields
+        // (nvdec_drv.h): the low 16 bits are what the engine reads.
+        width: low_u16(w),
+        height: low_u16(hh),
+        stride: [low_u16(w.next_multiple_of(64)); 2],
     };
     let mut p = Vp9PicS {
-        stream_len: stream_len as u32,
+        // nvdec_vp9_pic_s.stream_len is 32 bits (nvdec_drv.h).
+        stream_len: low_u32(u64_from_usize(stream_len)),
         gptimer_timeout_value: 0x04d3_f640,
         surface: 1,
         ..Default::default()
@@ -483,49 +507,55 @@ pub fn vp9_pic(
     p.current = dims(h.width, h.height);
     let last_key = st.last_size.is_some() && st.last_frame_type == crate::vp9::KEY_FRAME;
     let res_change = st.last_size.is_some_and(|s| s != (h.width, h.height));
-    p.flags = (h.frame_type == crate::vp9::KEY_FRAME) as u8
-        | (last_key as u8) << 1
-        | (res_change as u8) << 2
-        | (h.error_resilient as u8) << 3
-        | (st.last_show_frame as u8) << 4
-        | (h.intra_only as u8) << 5;
+    p.flags = u8::from(h.frame_type == crate::vp9::KEY_FRAME)
+        | u8::from(last_key) << 1
+        | u8::from(res_change) << 2
+        | u8::from(h.error_resilient) << 3
+        | u8::from(st.last_show_frame) << 4
+        | u8::from(h.intra_only) << 5;
     p.ref_frame_sign_bias = h.sign_bias;
-    p.loop_filter_level = h.filter_level as i8;
-    p.loop_filter_sharpness = h.sharpness as i8;
+    // The signed char fields of nvdec_vp9_pic_s (nvdec_drv.h) take the
+    // parsed values bit for bit; the syntax limits them to 0..=63.
+    p.loop_filter_level = h.filter_level.cast_signed();
+    p.loop_filter_sharpness = h.sharpness.cast_signed();
     p.qp_y_ac = h.base_q_idx;
     p.qp_y_dc = h.delta_q_y_dc;
     p.qp_ch_ac = h.delta_q_uv_ac;
     p.qp_ch_dc = h.delta_q_uv_dc;
-    p.lossless = h.lossless as i8;
-    p.transform_mode = h.tx_mode as i8;
-    p.allow_high_precision_mv = h.allow_high_precision_mv as i8;
+    p.lossless = i8::from(h.lossless);
+    p.transform_mode = h.tx_mode.cast_signed();
+    p.allow_high_precision_mv = i8::from(h.allow_high_precision_mv);
     // Ignored for intra frames; stock writes 0 or 4 there depending on the
     // stream (a640: 0, vp9_640x360.webm: 4).
     p.mcomp_filter_type = if h.is_intra() {
         0
     } else {
-        h.interp_filter as i8
+        h.interp_filter.cast_signed()
     };
-    p.comp_pred_mode = h.reference_mode as i8;
+    p.comp_pred_mode = h.reference_mode.cast_signed();
     let s = h.sign_bias;
     if !h.is_intra() && (s[2] != s[1] || s[3] != s[1]) {
-        p.comp_fixed_ref = h.comp_fixed_ref as i8;
-        p.comp_var_ref = [h.comp_var_ref[0] as i8, h.comp_var_ref[1] as i8];
+        p.comp_fixed_ref = h.comp_fixed_ref.cast_signed();
+        p.comp_var_ref = [
+            h.comp_var_ref[0].cast_signed(),
+            h.comp_var_ref[1].cast_signed(),
+        ];
     }
-    p.log2_tile_columns = h.log2_tile_cols as i8;
-    p.log2_tile_rows = h.log2_tile_rows as i8;
+    // log2 tile counts are at most 6 (VP9 spec 7.2); the fields are signed chars.
+    p.log2_tile_columns = low_u8(h.log2_tile_cols).cast_signed();
+    p.log2_tile_rows = low_u8(h.log2_tile_rows).cast_signed();
     let seg = &st.seg;
-    p.segment_enabled = seg.enabled as u8;
-    p.segment_map_update = seg.update_map as u8;
-    p.segment_map_temporal_update = seg.temporal_update as u8;
-    p.segment_feature_mode = seg.abs_delta as u8;
+    p.segment_enabled = u8::from(seg.enabled);
+    p.segment_map_update = u8::from(seg.update_map);
+    p.segment_map_temporal_update = u8::from(seg.temporal_update);
+    p.segment_feature_mode = u8::from(seg.abs_delta);
     for i in 0..8 {
         for j in 0..4 {
-            p.segment_feature_enable[i][j] = seg.feature_enabled[i][j] as u8;
+            p.segment_feature_enable[i][j] = u8::from(seg.feature_enabled[i][j]);
             p.segment_feature_data[i][j] = seg.feature_data[i][j];
         }
     }
-    p.mode_ref_lf_enabled = h.mode_ref_delta_enabled as i8;
+    p.mode_ref_lf_enabled = i8::from(h.mode_ref_delta_enabled);
     p.mb_ref_lf_delta = st.ref_deltas;
     p.mb_mode_lf_delta = st.mode_deltas;
     // Stock writes 9 into the header's `reserved5` byte on every frame
@@ -588,14 +618,14 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
                 let s = st.slot_surface(h.frame_to_show).unwrap_or(0);
                 report.outputs.push(Vp9Output {
                     surface: read_surface(&surfaces, s, size)?,
-                    width: w as usize,
-                    height: hh as usize,
+                    width: usize_from_u32(w),
+                    height: usize_from_u32(hh),
                     stride,
                     chroma_offset: chroma,
                 });
                 continue;
             }
-            let (w, hh) = (h.width as usize, h.height as usize);
+            let (w, hh) = (usize_from_u32(h.width), usize_from_u32(h.height));
             let (stride, chroma, size) = *geometry.get_or_insert_with(|| {
                 let (w64, h64) = (round_up(w, 64), round_up(hh, 64));
                 (
@@ -620,7 +650,7 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
                 .ok_or_else(|| Error::Contract("VP9: no free surface".into()))?;
             // Descriptor: pic_s, tile sizes, probabilities, zeroed counts.
             if std::env::var_os("NVDEC_VP9_DEBUG").is_some() {
-                eprintln!(
+                crate::diag::diag!(
                     "vp9 frame {}: type {} show {} intra_only {} err_res {} parallel {} refresh_ctx {} ctx {} reset {} tx_mode {} q {} hdr {}+{} refresh {:#x}",
                     report.decoded,
                     h.frame_type,
@@ -663,8 +693,8 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             bits_cpu.write_bytes(tiles.len(), &[0u8; 256])?;
 
             let da = desc.address();
-            let a = |off: usize| ((da + off as u64) >> 8) as u32;
-            let fa = |off: usize| ((filter.address() + off as u64) >> 8) as u32;
+            let a = |off: usize| low_u32((da + u64_from_usize(off)) >> 8);
+            let fa = |off: usize| low_u32((filter.address() + u64_from_usize(off)) >> 8);
             let sva = |i: usize| surfaces[i].1.address();
             let mut words = Vec::new();
             // Stock writes every buffer-offset method as NONINC (offset>>8, 0).
@@ -675,28 +705,34 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             method(&mut words, 4, 0x200, &[9]); // SET_APPLICATION_ID VP9
             method(&mut words, 4, 0x400, &[0x52059]); // CONTROL_PARAMS as stock
             addr(&mut words, 0x404, &[a(0)]);
-            addr(&mut words, 0x408, &[(bits.address() >> 8) as u32]);
+            addr(&mut words, 0x408, &[low_u32(bits.address() >> 8)]);
             for i in 0..3 {
                 let s = if h.is_intra() {
                     cur
                 } else {
                     st.slot_surface(h.ref_frame_idx[i]).unwrap_or(cur)
                 };
-                addr(&mut words, 0x430 + 4 * i as u32, &[(sva(s) >> 8) as u32]);
+                addr(&mut words, 0x430 + 4 * slot_u32(i), &[low_u32(sva(s) >> 8)]);
                 method(
                     &mut words,
                     4,
-                    0x474 + 4 * i as u32,
-                    &[((sva(s) + chroma as u64) >> 8) as u32],
+                    0x474 + 4 * slot_u32(i),
+                    &[low_u32((sva(s) + u64_from_usize(chroma)) >> 8)],
                 );
             }
             addr(&mut words, 0x424, &[a(VP9_STATUS)]);
-            method(&mut words, 4, 0x40c, &[report.decoded as u32]); // PICTURE_INDEX
+            method(
+                &mut words,
+                4,
+                0x40c,
+                &[low_u32(u64_from_usize(report.decoded))],
+            ); // PICTURE_INDEX (32 bits)
             addr(&mut words, 0x5d0, &[a(VP9_TILES)]);
             addr(&mut words, 0x5c0, &[a(VP9_PROBS)]);
             addr(&mut words, 0x5c4, &[a(VP9_COUNTS)]);
-            let sega = |k: usize| ((seg.address() + (k * VP9_SEG_SIZE) as u64) >> 8) as u32;
-            let mva = |k: usize| ((colmv.address() + (k * VP9_COLMV_SIZE) as u64) >> 8) as u32;
+            let sega = |k: usize| low_u32((seg.address() + u64_from_usize(k * VP9_SEG_SIZE)) >> 8);
+            let mva =
+                |k: usize| low_u32((colmv.address() + u64_from_usize(k * VP9_COLMV_SIZE)) >> 8);
             addr(&mut words, 0x5c8, &[sega(seg_flip)]);
             addr(&mut words, 0x5cc, &[sega(1 - seg_flip)]);
             addr(&mut words, 0x5d8, &[mva(mv_flip)]);
@@ -704,12 +740,12 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             addr(&mut words, 0x5dc, &[fa(VP9_FILTER_OFF)]);
             addr(&mut words, 0x4c8, &[fa(0)]);
             addr(&mut words, 0x4dc, &[fa(VP9_4DC_OFF)]);
-            addr(&mut words, 0x43c, &[(sva(cur) >> 8) as u32]);
+            addr(&mut words, 0x43c, &[low_u32(sva(cur) >> 8)]);
             method(
                 &mut words,
                 4,
                 0x480,
-                &[((sva(cur) + chroma as u64) >> 8) as u32],
+                &[low_u32((sva(cur) + u64_from_usize(chroma)) >> 8)],
             );
             method(&mut words, 4, 0x300, &[0]); // EXECUTE
             report.frame_times.push(ch.run(words)?);
@@ -756,25 +792,37 @@ pub fn block_linear_offset(x: usize, y: usize, stride: usize) -> usize {
 }
 
 /// Untile a decoded surface to packed NV12 (w x h luma, then interleaved UV).
+///
+/// # Errors
+/// `Contract` when `surface` is too small for the requested size and layout.
 pub fn untile_nv12(
     surface: &[u8],
     w: usize,
     h: usize,
     stride: usize,
     chroma_offset: usize,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
+    let byte = |offset: usize| {
+        surface.get(offset).copied().ok_or_else(|| {
+            Error::Contract(format!(
+                "untile {w}x{h} (stride {stride}, chroma at {chroma_offset}): offset {offset} \
+                 beyond the {}-byte surface",
+                surface.len()
+            ))
+        })
+    };
     let mut out = Vec::with_capacity(w * h + w * h.div_ceil(2));
     for y in 0..h {
         for x in 0..w {
-            out.push(surface[block_linear_offset(x, y, stride)]);
+            out.push(byte(block_linear_offset(x, y, stride))?);
         }
     }
     for y in 0..h.div_ceil(2) {
         for x in 0..w {
-            out.push(surface[chroma_offset + block_linear_offset(x, y, stride)]);
+            out.push(byte(chroma_offset + block_linear_offset(x, y, stride))?);
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]

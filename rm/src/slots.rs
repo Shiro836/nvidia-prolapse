@@ -21,6 +21,7 @@
 //! captured by in-flight GPU work can never be recycled or re-initialized.
 //! Allocation zeroes all 16 bytes before the slot is handed out.
 use crate::rm::{Error, Result};
+use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence},
@@ -67,7 +68,7 @@ impl PageOffset {
             Word::Low => 0,
             Word::High => 8,
         };
-        Self((slot.0 as usize % SLOTS_PER_PAGE) * SLOT_BYTES + within)
+        Self((usize_from_u32(slot.0) % SLOTS_PER_PAGE) * SLOT_BYTES + within)
     }
 }
 
@@ -79,12 +80,12 @@ impl Page {
         // 4096-aligned until the pool is closed; the pool outlives `&self`.
         // Atomics have interior mutability, so the GPU's concurrent writes do
         // not conflict with the shared reference.
-        unsafe { &*((self.cpu + at.0) as *const AtomicU32) }
+        unsafe { &*std::ptr::with_exposed_provenance::<AtomicU32>(self.cpu + at.0) }
     }
     #[inline]
     fn atomic64(&self, at: PageOffset) -> &AtomicU64 {
         // SAFETY: as atomic32; `at` is 8-byte aligned.
-        unsafe { &*((self.cpu + at.0) as *const AtomicU64) }
+        unsafe { &*std::ptr::with_exposed_provenance::<AtomicU64>(self.cpu + at.0) }
     }
 }
 
@@ -182,24 +183,30 @@ impl SlotPool {
             ));
         }
         free.pages += 1;
-        let base = (index * SLOTS_PER_PAGE) as u32;
+        let slots = |page: usize| {
+            page.checked_mul(SLOTS_PER_PAGE)
+                .and_then(|slot| u32::try_from(slot).ok())
+                .ok_or_else(|| {
+                    Error::Contract(format!("semaphore pool page {index} beyond u32 slot ids"))
+                })
+        };
+        let (base, end) = (slots(index)?, slots(index + 1)?);
         // Hand out low indices first (LIFO pop takes from the end).
         free.free.reserve(SLOTS_PER_PAGE);
-        free.free
-            .extend((0..SLOTS_PER_PAGE as u32).rev().map(|i| base + i));
+        free.free.extend((base..end).rev());
         Ok(())
     }
 
     #[inline]
     fn page(&self, slot: Slot) -> &Page {
-        let index = slot.0 as usize / SLOTS_PER_PAGE;
+        let index = usize_from_u32(slot.0) / SLOTS_PER_PAGE;
         self.pages[index]
             .get()
             .expect("slot index refers to an installed page")
     }
     #[inline]
     fn offset(slot: Slot) -> usize {
-        (slot.0 as usize % SLOTS_PER_PAGE) * SLOT_BYTES
+        (usize_from_u32(slot.0) % SLOTS_PER_PAGE) * SLOT_BYTES
     }
 
     /// Pop a zeroed slot with one reference, or None if a new page is needed.
@@ -212,7 +219,7 @@ impl SlotPool {
                 .pop()?,
         );
         let page = self.page(slot);
-        let refs = &page.refs[slot.0 as usize % SLOTS_PER_PAGE];
+        let refs = &page.refs[usize_from_u32(slot.0) % SLOTS_PER_PAGE];
         debug_assert_eq!(refs.load(Ordering::Relaxed), 0);
         refs.store(1, Ordering::Relaxed);
         // No GPU reference exists (count was zero: every submission that
@@ -227,14 +234,14 @@ impl SlotPool {
     }
 
     pub(crate) fn retain(&self, slot: Slot) {
-        let previous =
-            self.page(slot).refs[slot.0 as usize % SLOTS_PER_PAGE].fetch_add(1, Ordering::Relaxed);
+        let previous = self.page(slot).refs[usize_from_u32(slot.0) % SLOTS_PER_PAGE]
+            .fetch_add(1, Ordering::Relaxed);
         debug_assert!(previous != 0, "retain of a free semaphore slot");
     }
 
     /// Drop one reference; the last one returns the slot to the free list.
     pub(crate) fn release(&self, slot: Slot) {
-        let refs = &self.page(slot).refs[slot.0 as usize % SLOTS_PER_PAGE];
+        let refs = &self.page(slot).refs[usize_from_u32(slot.0) % SLOTS_PER_PAGE];
         let previous = refs.fetch_sub(1, Ordering::Release);
         debug_assert!(previous != 0, "release of a free semaphore slot");
         if previous == 1 {
@@ -249,11 +256,11 @@ impl SlotPool {
     }
 
     pub(crate) fn refs(&self, slot: Slot) -> u32 {
-        self.page(slot).refs[slot.0 as usize % SLOTS_PER_PAGE].load(Ordering::Acquire)
+        self.page(slot).refs[usize_from_u32(slot.0) % SLOTS_PER_PAGE].load(Ordering::Acquire)
     }
 
     pub(crate) fn gpu(&self, slot: Slot) -> u64 {
-        self.page(slot).gpu + Self::offset(slot) as u64
+        self.page(slot).gpu + u64_from_usize(Self::offset(slot))
     }
 
     /// Device teardown: no CPU access to page memory is valid afterwards.
@@ -323,7 +330,7 @@ impl SlotPool {
             TimelineView::Native64 => self.word64(slot, Word::Low).store(value, Ordering::SeqCst),
             TimelineView::Split32 => {
                 self.word64(slot, Word::High).store(value, Ordering::SeqCst);
-                self.word32(slot).store(value as u32, Ordering::SeqCst);
+                self.word32(slot).store(low_u32(value), Ordering::SeqCst);
             }
         }
         crate::platform::device_write_barrier();
@@ -359,7 +366,7 @@ impl SlotPool {
                     // its larger shadow (VUID-VkSemaphoreSignalInfo-value-03259).
                     self.word64(slot, Word::High)
                         .fetch_max(value, Ordering::SeqCst);
-                    self.word32(slot).store(value as u32, Ordering::SeqCst);
+                    self.word32(slot).store(low_u32(value), Ordering::SeqCst);
                     true
                 }
             }
@@ -408,11 +415,11 @@ pub(crate) mod tests {
             for i in 0..pages {
                 // SAFETY: an all-zero u64 array is a valid HostPage.
                 let page: Box<HostPage> = unsafe { Box::new_zeroed().assume_init() };
-                let address = page.0.as_ptr() as usize;
+                let address = page.0.as_ptr().expose_provenance();
                 // SAFETY: the page is owned by the returned HostPages, which
                 // every test keeps alongside the pool; only the pool's atomics
                 // access it.
-                unsafe { pool.install_page(address, 0x1000_0000 + (i * PAGE_BYTES) as u64) }
+                unsafe { pool.install_page(address, 0x1000_0000 + u64_from_usize(i * PAGE_BYTES)) }
                     .unwrap();
                 owned.push(page);
             }

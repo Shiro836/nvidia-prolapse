@@ -8,11 +8,12 @@
 use super::hardware_tests::test_ffi as c;
 use super::*;
 use crate::{compute::ComputeJob, gpu::GpuMapping, rm::Mapping};
+use nv_rm_core::conv::{low_u32, usize_from_u32};
 
 /// 16 workgroups of 64 invocations: a small fraction of the SMs, so two such
 /// dispatches fit side by side when the hardware runs them concurrently.
 const GROUPS: u32 = 16;
-const INVOCATIONS: usize = GROUPS as usize * 64;
+const INVOCATIONS: usize = usize_from_u32(GROUPS) * 64;
 /// Target duration of one dispatch. Every workgroup runs for about this long,
 /// far below RM's default context-switch timeout (RmEngineContextSwitchTimeoutUs
 /// 0x3fffff, nvrm_registry.h), which a time-sliced control has to drain.
@@ -28,9 +29,9 @@ fn open() -> Box<Bridge> {
         .expect("NVIDIA RM GPU");
     let pci = [
         card.pci.domain,
-        card.pci.bus as u32,
-        card.pci.slot as u32,
-        card.pci.function as u32,
+        u32::from(card.pci.bus),
+        u32::from(card.pci.slot),
+        u32::from(card.pci.function),
     ];
     Box::new(Bridge::new(pci).unwrap().0)
 }
@@ -93,7 +94,7 @@ impl Work {
         // push constants at 1024.
         let mut constants = vec![0u8; 1152];
         constants[..8].copy_from_slice(&out_va.address().to_le_bytes());
-        constants[8..12].copy_from_slice(&((INVOCATIONS * 4) as u32).to_le_bytes());
+        constants[8..12].copy_from_slice(&u32::try_from(INVOCATIONS * 4).unwrap().to_le_bytes());
         constants[1024..1028].copy_from_slice(&iters.to_le_bytes());
         constants[1028..1032].copy_from_slice(&seed.to_le_bytes());
         let job = ComputeJob::compiled(
@@ -119,7 +120,7 @@ impl Work {
             0x2a0,
             &crate::gpu::hi_lo(crate::compute::SHARED_WINDOW),
         );
-        crate::gpu::method(&mut words, 1, 0x2b4, &[(job.address >> 8) as u32]); // SEND_PCAS_A
+        crate::gpu::method(&mut words, 1, 0x2b4, &[low_u32(job.address >> 8)]); // SEND_PCAS_A
         crate::gpu::method(&mut words, 1, 0x2c0, &[9]); // SEND_SIGNALING_PCAS2_B: invalidate + schedule
         let push_mem = device.allocate_aligned(4096, 4096, false, true).unwrap();
         let push_va = space.map(&push_mem).unwrap();
@@ -129,7 +130,7 @@ impl Work {
         }
         let push = Push {
             address: push_va.address(),
-            size: (words.len() * 4) as u32,
+            size: u32::try_from(words.len() * 4).unwrap(),
             flags: 0,
         };
         Self {
@@ -152,7 +153,7 @@ impl Work {
     fn check(&self) {
         let (a, c) = lcg_power(self.iters);
         for i in 0..INVOCATIONS {
-            let x = self.seed.wrapping_add(i as u32);
+            let x = self.seed.wrapping_add(u32::try_from(i).unwrap());
             let want = a.wrapping_mul(x).wrapping_add(c);
             let got = self.out.read_u32(i * 4).unwrap();
             assert_eq!(got, want, "seed {:#x} invocation {i}", self.seed);
@@ -235,6 +236,12 @@ fn shared_tsg_contexts_run_concurrently() {
     let mut probe = Work::new(b, &program, probe_iters, 0x1234);
     run(b, &mut [(owner, &mut probe)]);
     let t = run(b, &mut [(owner, &mut probe)]);
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-int `as` saturates, and the count is clamped right after"
+    )]
     let iters = ((f64::from(probe_iters) * TARGET.as_secs_f64() / t.as_secs_f64()) as u32)
         .clamp(1 << 16, 1 << 28);
     println!(

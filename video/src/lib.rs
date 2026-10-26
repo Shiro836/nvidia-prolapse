@@ -26,9 +26,7 @@
     clippy::match_same_arms,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::needless_pass_by_value,
     clippy::needless_range_loop,
-    clippy::print_stderr,
     clippy::redundant_closure_for_method_calls,
     clippy::same_functions_in_if_condition,
     clippy::semicolon_if_nothing_returned,
@@ -168,16 +166,16 @@ impl NvdecGen {
 }
 
 /// Explicit verification opt-in `NV_VIDEO_UNTESTED_CLASSES=1`: NVDEC classes this library never ran on
-/// hardware are accepted (cross-generation bit-exactness runs on rented GPUs). Announced once on stderr;
-/// never set in production.
+/// hardware are accepted (cross-generation bit-exactness runs on rented GPUs). Announced once as a
+/// `log` warning; never set in production.
 pub fn untested_classes_allowed() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         let on = std::env::var("NV_VIDEO_UNTESTED_CLASSES").is_ok_and(|v| v == "1");
         if on {
-            eprintln!(
-                "nv_video: NV_VIDEO_UNTESTED_CLASSES=1: NVDEC classes never run by this library are \
-                 enabled (verification only, outputs unverified)"
+            log::warn!(
+                "NV_VIDEO_UNTESTED_CLASSES=1: NVDEC classes never run by this library are enabled \
+                 (verification only, outputs unverified)"
             );
         }
         on
@@ -282,26 +280,40 @@ pub struct SurfaceLayout {
 }
 
 impl SurfaceLayout {
-    /// # Panics
-    /// If the layout does not fit the address space: callers size sessions within [`caps`]
-    /// (at most 8192x8192 with 16-bit samples, below 2^29 bytes).
-    pub fn new(max_width: u32, max_height: u32, bytes_per_sample: u32) -> Self {
-        let pitch = (max_width * bytes_per_sample).next_multiple_of(64);
-        let luma_rows = max_height.next_multiple_of(64);
+    /// # Errors
+    /// `Unsupported` when the layout does not fit the address space. Sessions within [`caps`]
+    /// (at most 8192x8192 with 16-bit samples, below 2^29 bytes) always fit.
+    pub fn new(max_width: u32, max_height: u32, bytes_per_sample: u32) -> VResult<Self> {
+        let too_large = || {
+            VideoError::Unsupported(format!(
+                "surface {max_width}x{max_height} with {bytes_per_sample}-byte samples exceeds the \
+                 address space"
+            ))
+        };
+        let pitch = max_width
+            .checked_mul(bytes_per_sample)
+            .and_then(|row| row.checked_next_multiple_of(64))
+            .ok_or_else(too_large)?;
+        let luma_rows = max_height
+            .checked_next_multiple_of(64)
+            .ok_or_else(too_large)?;
         let chroma_rows = max_height.div_ceil(2).next_multiple_of(64);
         let chroma_offset = u64::from(pitch) * u64::from(luma_rows);
-        let size = (usize::try_from(chroma_offset)
-            .expect("session sizes are capped by caps() (8192x8192, 16-bit samples)")
-            + usize_from_u32(pitch) * usize_from_u32(chroma_rows))
-        .next_multiple_of(1 << 16);
-        Self {
+        let size = usize::try_from(chroma_offset)
+            .ok()
+            .and_then(|luma| {
+                luma.checked_add(usize_from_u32(pitch).checked_mul(usize_from_u32(chroma_rows))?)
+            })
+            .and_then(|size| size.checked_next_multiple_of(1 << 16))
+            .ok_or_else(too_large)?;
+        Ok(Self {
             pitch,
             luma_rows,
             chroma_rows,
             chroma_offset,
             size,
             bytes_per_sample,
-        }
+        })
     }
 }
 
@@ -404,7 +416,10 @@ pub trait CodecDecoder {
     fn bit_depth(&self) -> u32;
     /// Engine surface layout for the session's max size (16-bit containers above 8 bits, stock
     /// `vp9_layout_13a8d0`: pitch align64(2w) for 16-bit formats).
-    fn surface_layout(&self, max_width: u32, max_height: u32) -> SurfaceLayout {
+    ///
+    /// # Errors
+    /// [`SurfaceLayout::new`]'s.
+    fn surface_layout(&self, max_width: u32, max_height: u32) -> VResult<SurfaceLayout> {
         SurfaceLayout::new(max_width, max_height, bytes_per_sample(self.bit_depth()))
     }
     /// Copy-engine GOB kinds of the engine's output (luma, chroma) on
@@ -615,11 +630,14 @@ mod tests {
     /// 384 / 352; vp9p0/vp9p2 and av1aom8/av1aom10 640x360 plane bits 9 / 2, format code 0 / 3).
     #[test]
     fn high_bit_depth_contract() {
-        let l8 = SurfaceLayout::new(352, 288, bytes_per_sample(8));
-        let l10 = SurfaceLayout::new(352, 288, bytes_per_sample(10));
+        let l8 = SurfaceLayout::new(352, 288, bytes_per_sample(8)).unwrap();
+        let l10 = SurfaceLayout::new(352, 288, bytes_per_sample(10)).unwrap();
         assert_eq!(l8.pitch / l8.bytes_per_sample, 384);
         assert_eq!(l10.pitch / l10.bytes_per_sample, 352);
-        assert_eq!(SurfaceLayout::new(640, 360, 2).pitch / 16, 0x50); // AV1 stride field
+        assert_eq!(SurfaceLayout::new(640, 360, 2).unwrap().pitch / 16, 0x50); // AV1 stride field
+        // Beyond the address space: an error, no longer an arithmetic panic.
+        assert!(SurfaceLayout::new(u32::MAX, 16, 2).is_err());
+        assert!(SurfaceLayout::new(16, u32::MAX, 1).is_err());
         assert_eq!((plane_kind_bits(1), plane_kind_bits(2)), (9, 2));
         assert_eq!((surface_format_code(8), surface_format_code(10)), (0, 3));
         assert_eq!(engine_gob_kinds(0xcfb0, 2), [2, 0]);

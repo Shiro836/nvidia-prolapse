@@ -26,6 +26,7 @@ use crate::{
     rm::{Device, Mapping, Memory},
     slots::{PAGE_BYTES, SlotPool, TimelineView},
 };
+use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::{
     collections::{HashMap, VecDeque},
     os::fd::{AsFd, BorrowedFd, OwnedFd},
@@ -335,8 +336,8 @@ impl Session {
             )));
         }
         if !super::output_layout_verified(class) {
-            eprintln!(
-                "nv_video: NVDEC class {class:#x}: engine output layout assumed GOB kind 0 (standard \
+            log::warn!(
+                "NVDEC class {class:#x}: engine output layout assumed GOB kind 0 (standard \
                  block linear) for copy_out; never measured on this class (verification run)"
             );
         }
@@ -419,8 +420,8 @@ impl Session {
             info.max_width,
             info.max_height,
         )?;
-        let layout = codec.surface_layout(info.max_width, info.max_height);
-        let count = codec.dpb_size() + 2 + info.extra_output_slots as usize;
+        let layout = codec.surface_layout(info.max_width, info.max_height)?;
+        let count = codec.dpb_size() + 2 + usize_from_u32(info.extra_output_slots);
         let mut surfaces = Vec::with_capacity(count);
         let mut surface_refs = Vec::with_capacity(count);
         for _ in 0..count {
@@ -598,8 +599,9 @@ impl Session {
                 self.display.push_back(id);
             }
         }
-        u32::try_from(self.shown - shown_before)
-            .map_err(|_| VideoError::Invalid("unit produced more than 2^32 pictures".into()))
+        u32::try_from(self.shown - shown_before).map_err(|error| {
+            VideoError::Invalid(format!("unit produced more than 2^32 pictures: {error}"))
+        })
     }
 
     fn emit(
@@ -866,7 +868,7 @@ impl Session {
             let (mem, va) = &imports[import_of[p]];
             let rows = if p == 0 { ch } else { ch.div_ceil(2) };
             let need = t.offset[p] + dst.plane_bytes(p, rows, cw, bps);
-            if need > mem.size as u64 {
+            if need > u64_from_usize(mem.size) {
                 return Err(VideoError::Invalid(format!(
                     "plane {p} needs {need} bytes, dma-buf has {}",
                     mem.size
@@ -977,9 +979,14 @@ impl Session {
             method(&mut w, 4, 0x300, &[launch]);
         }
         // Command buffer: reuse one whose copy retired.
-        let ci = match self.copy.commands.iter().position(|(_, tok)| {
-            *tok == 0 || self.copy.queue().shared().retired(*tok).unwrap_or(false)
-        }) {
+        let mut reusable = None;
+        for (i, (_, tok)) in self.copy.commands.iter().enumerate() {
+            if *tok == 0 || self.copy.queue().shared().retired(*tok)? {
+                reusable = Some(i);
+                break;
+            }
+        }
+        let ci = match reusable {
             Some(i) => i,
             None => {
                 self.copy
@@ -995,7 +1002,8 @@ impl Session {
         crate::platform::device_full_barrier();
         let push = Push {
             address: cmd.gpu.address(),
-            size: (w.len() * 4) as u32,
+            size: u32::try_from(w.len() * 4)
+                .expect("copy command buffers hold a few hundred words"),
             flags: 0,
         };
         // GPU-side ordering after the decode: acquire the NVDEC timeline.
@@ -1048,8 +1056,11 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Let in-flight work finish before memory goes away (bounded).
-        let _ = self.nvdec.wait(&self.drm, self.nvdec.submitted);
+        // Let in-flight work finish before memory goes away (bounded, 2 s).
+        // Teardown continues either way; a hung engine is logged.
+        if let Err(error) = self.nvdec.wait(&self.drm, self.nvdec.submitted) {
+            crate::diag::diag!("nv_video session teardown: {error}");
+        }
         let last = self.copy.queue().last_token();
         if last != 0 {
             // SAFETY: the session's own DRM file, open while `self` lives.
@@ -1058,9 +1069,11 @@ impl Drop for Session {
                     .queue()
                     .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), last)
             };
-            if let Ok(fd) = fence {
-                let _ =
-                    wait_sync_file(std::os::fd::AsRawFd::as_raw_fd(&fd), Duration::from_secs(2));
+            let waited = fence.map_err(|error| error.to_string()).and_then(|fd| {
+                wait_sync_file(std::os::fd::AsRawFd::as_raw_fd(&fd), Duration::from_secs(2))
+            });
+            if let Err(error) = waited {
+                crate::diag::diag!("nv_video session teardown: copy queue: {error}");
             }
         }
     }
@@ -1137,9 +1150,9 @@ impl TargetLayout {
                 t.modifier
             )));
         }
-        let h = (v & 0xf) as u32;
-        let g = ((v >> 20) & 3) as u32;
-        let c = ((v >> 23) & 7) as u32;
+        let h = low_u32(v & 0xf);
+        let g = low_u32((v >> 20) & 3);
+        let c = low_u32((v >> 23) & 7);
         if c != 0 || h > 5 {
             return Err(VideoError::Unsupported(format!(
                 "modifier {:#x}: compressed or block height > 32 GOBs",
@@ -1381,10 +1394,10 @@ mod tests {
 
     #[test]
     fn surface_layout_constant_pitch() {
-        let l = SurfaceLayout::new(1928, 1208, 1);
+        let l = SurfaceLayout::new(1928, 1208, 1).unwrap();
         assert_eq!(l.pitch, 1984);
         assert_eq!(l.luma_rows, 1216);
         assert_eq!(l.chroma_offset, 1984 * 1216);
-        assert!(l.size >= l.chroma_offset as usize + 1984 * 640);
+        assert!(l.size >= usize::try_from(l.chroma_offset).unwrap() + 1984 * 640);
     }
 }

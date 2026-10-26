@@ -117,7 +117,12 @@ impl<M: Lease> Slot<M> {
         }
         let mut entry = self.entry.borrow_mut();
         entry.refs = refs;
-        Ok(address(entry.mapping.as_ref().unwrap()))
+        Ok(address(
+            entry
+                .mapping
+                .as_ref()
+                .expect("the mapping was made above if it was missing"),
+        ))
     }
     pub fn release(&self) -> Result<()> {
         let mut entry = self.entry.borrow_mut();

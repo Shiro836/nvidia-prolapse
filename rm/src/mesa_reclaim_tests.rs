@@ -10,6 +10,7 @@
 //! /dev/nvidiaN); its render node is found through sysfs by PCI address.
 use super::hardware_tests::test_ffi::{self as c, CpuMap, Point, ReleaseSink, SyncHandle};
 use super::*;
+use nv_rm_core::conv::{high_u32, low_u32, u64_from_usize};
 use std::{
     fs::{File, OpenOptions},
     os::fd::{AsFd, AsRawFd, FromRawFd},
@@ -39,9 +40,9 @@ fn selected_pci() -> [u32; 4] {
         .expect("openable NVIDIA RM GPU");
     [
         card.pci.domain,
-        card.pci.bus as u32,
-        card.pci.slot as u32,
-        card.pci.function as u32,
+        u32::from(card.pci.bus),
+        u32::from(card.pci.slot),
+        u32::from(card.pci.function),
     ]
 }
 fn render_node(pci: [u32; 4]) -> File {
@@ -299,10 +300,10 @@ fn semaphore(words: &mut Vec<u32>, address: u64, value: u64, release: bool) {
         0,
         0x5c,
         &[
-            address as u32,
-            (address >> 32) as u32,
-            value as u32,
-            (value >> 32) as u32,
+            low_u32(address),
+            high_u32(address),
+            low_u32(value),
+            high_u32(value),
             execute,
         ],
     );
@@ -341,12 +342,15 @@ fn freed_memory_stays_mapped_until_the_gated_batch_retires() {
     let witness = alloc(b, size, true);
     let witness_cpu = map(b, witness);
     let witness_map = bind(b, witness, size, va_r);
-    let value = 0x5eed_0000_0000_0000
-        | (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
-            & 0xffff_ffff);
+    let value: u64 = 0x5eed_0000_0000_0000
+        | u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                & 0xffff_ffff,
+        )
+        .unwrap();
     witness_cpu.write_u64(0, 0);
     let mut words = Vec::new();
     semaphore(&mut words, va_m, value, true);
@@ -361,7 +365,7 @@ fn freed_memory_stays_mapped_until_the_gated_batch_retires() {
         ctx,
         &[Push {
             address: va_p,
-            size: (words.len() * 4) as u32,
+            size: u32::try_from(words.len() * 4).unwrap(),
             flags: 0,
         }],
         &[point(&gate, 1)],
@@ -462,7 +466,10 @@ fn concurrent_alloc_free_gated_submit_stress() {
     let timed = |slow: &AtomicU64, f: &mut dyn FnMut()| {
         let t = Instant::now();
         f();
-        slow.fetch_max(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        slow.fetch_max(
+            u64::try_from(t.elapsed().as_nanos()).unwrap(),
+            Ordering::Relaxed,
+        );
     };
     let take_slot = |pool: &VaPool| -> Option<u64> { pool.free.lock().unwrap().pop() };
     let mut threads = Vec::new();
@@ -491,7 +498,7 @@ fn concurrent_alloc_free_gated_submit_stress() {
                 let mapping = bind(&b, memory, size, va);
                 if gart && x & 64 != 0 {
                     let cpu = map(&b, memory);
-                    cpu.write_u32(0, ops as u32);
+                    cpu.write_u32(0, low_u32(ops));
                     assert_eq!(cpu.unmap(), 0);
                 }
                 timed(&slow, &mut || {
@@ -809,6 +816,9 @@ fn poll_readable(fd: i32, timeout_ms: i32) -> bool {
         revents: i16,
     }
     unsafe extern "C" {
+        #[cfg(target_os = "android")]
+        fn poll(fds: *mut PollFd, count: u32, timeout: i32) -> i32;
+        #[cfg(not(target_os = "android"))]
         fn poll(fds: *mut PollFd, count: std::ffi::c_ulong, timeout: i32) -> i32;
     }
     let mut p = PollFd {
@@ -818,11 +828,11 @@ fn poll_readable(fd: i32, timeout_ms: i32) -> bool {
     };
     let start = Instant::now();
     loop {
-        let left = timeout_ms - start.elapsed().as_millis() as i32;
+        let left = timeout_ms - i32::try_from(start.elapsed().as_millis()).unwrap();
         // SAFETY: `p` is one exclusive, initialised `struct pollfd` (poll(2):
         // int fd, short events, short revents, the layout PollFd declares) and
         // the count is 1; poll only writes `revents`. Any fd value is allowed.
-        let n = unsafe { poll(&mut p, 1, left.max(0)) };
+        let n = unsafe { poll(&raw mut p, 1, left.max(0)) };
         if n > 0 {
             return p.revents & 1 != 0;
         }
@@ -874,7 +884,7 @@ fn startup_sync_churn_every_exported_fence_signals() {
             let mut ctx = context(&b);
             let fences: Vec<SyncHandle> = (0..3).map(|_| create(&b, false, 0)).collect();
             // Mesa's heap: a range is reusable only after its release ran.
-            let pool = va_pool((0..64).map(|i| VA_BASE + (1 << 32) + ((t as u64) * 64 + i) * SLOT));
+            let pool = va_pool((0..64).map(|i| VA_BASE + (1 << 32) + (u64_from_usize(t) * 64 + i) * SLOT));
             let mut frames = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 frames += 1;
@@ -915,7 +925,7 @@ fn startup_sync_churn_every_exported_fence_signals() {
                 assert_eq!(r, 0);
                 assert_eq!(c::free(&b, memory), 0);
                 // vkQueueSignalReleaseImageANDROID: pooled export fence.
-                let fence = &fences[(frames % 3) as usize];
+                let fence = &fences[usize::try_from(frames % 3).unwrap()];
                 let mut ready = 0;
                 let p = point(fence, 0);
                 assert_eq!(c::sync_status_many(&b, &[p], 0, &mut ready), 0);
@@ -935,7 +945,7 @@ fn startup_sync_churn_every_exported_fence_signals() {
                     let start = Instant::now();
                     let signalled = poll_readable(fd, 100);
                     let waited = start.elapsed();
-                    worst.fetch_max(waited.as_nanos() as u64, Ordering::Relaxed);
+                    worst.fetch_max(u64::try_from(waited.as_nanos()).unwrap(), Ordering::Relaxed);
                     let status = crate::fences::sync_status(fd).unwrap_or(-1);
                     if !signalled || status != 1 {
                         failures.lock().unwrap().push(format!(
@@ -985,7 +995,7 @@ fn startup_sync_churn_every_exported_fence_signals() {
             *f,
             "one release per VA free"
         );
-        released.calls.fetch_add(*f as u32, Ordering::SeqCst);
+        released.calls.fetch_add(low_u32(*f), Ordering::SeqCst);
     }
     let failures = failures.lock().unwrap().clone();
     assert!(failures.is_empty(), "{failures:?}");
@@ -1102,7 +1112,7 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let mut x = 0x2545_f491_4f6c_dd1du64 ^ (t as u64 + 1);
+            let mut x = 0x2545_f491_4f6c_dd1du64 ^ (u64_from_usize(t) + 1);
             while !stop.load(Ordering::Relaxed) {
                 n += 1;
                 if idle != 0 {
@@ -1114,7 +1124,10 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
                 let token = submit(&b, ctx, &[], &[], &[point(&fence, 0)]);
                 let start = Instant::now();
                 let r = c::wait(&b, ctx, token, 100_000_000);
-                worst.fetch_max(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                worst.fetch_max(
+                    u64::try_from(start.elapsed().as_nanos()).unwrap(),
+                    Ordering::Relaxed,
+                );
                 if r != 0 {
                     // Distinguish slow from stranded: 2 s more without any
                     // doorbell, then one more batch (a doorbell) on this queue.
@@ -1161,7 +1174,7 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
             let cpu = map(&b, memory);
             assert_eq!(
                 cpu.len(),
-                size as usize,
+                usize::try_from(size).unwrap(),
                 "the fill covers exactly the allocation"
             );
             let mut words = 0u64;
@@ -1234,7 +1247,7 @@ fn cpu_released_acquire_runs_without_a_doorbell_after_idle() {
             thread::spawn(move || {
                 let ctx = context(&b);
                 let gate = create(&b, true, 0);
-                let mut x = 0x9e37_79b9_7f4a_7c15u64 ^ (t as u64 + 7);
+                let mut x = 0x9e37_79b9_7f4a_7c15u64 ^ (u64_from_usize(t) + 7);
                 let mut n = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     n += 1;
@@ -1246,7 +1259,7 @@ fn cpu_released_acquire_runs_without_a_doorbell_after_idle() {
                     assert_eq!(c::sync_signal(&b, &gate, n), 0);
                     let start = Instant::now();
                     let r = c::wait(&b, ctx, token, 100_000_000);
-                    worst.fetch_max(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    worst.fetch_max(u64::try_from(start.elapsed().as_nanos()).unwrap(), Ordering::Relaxed);
                     if r != 0 {
                         let late = c::wait(&b, ctx, token, 2_000_000_000) == 0;
                         if late {
@@ -1256,10 +1269,11 @@ fn cpu_released_acquire_runs_without_a_doorbell_after_idle() {
                         }
                         let next = submit(&b, ctx, &[], &[], &[]);
                         let after = c::wait(&b, ctx, token, 1_000_000_000) == 0;
-                        let _ = c::wait(&b, ctx, next, 1_000_000_000);
+                        let drained = c::wait(&b, ctx, next, 1_000_000_000);
                         failures.lock().unwrap().push(format!(
                             "thread {t} batch {n}: acquire not re-polled within 100 ms of the CPU release; \
-                             STRANDED: not retired within 2.1 s without doorbell (late={late}); after a doorbell: {after}"
+                             STRANDED: not retired within 2.1 s without doorbell (late={late}); after a doorbell: {after} \
+                             (next batch wait status {drained})"
                         ));
                         stop.store(true, Ordering::SeqCst);
                     }

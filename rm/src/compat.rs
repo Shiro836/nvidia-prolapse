@@ -5,6 +5,7 @@
 //! fields cross the boundary. Missing evidence and unsupported fields fail before
 //! an ioctl. This is ABI translation, not a hardware-support declaration.
 use crate::rm::{Error, Result};
+use nv_rm_core::conv::u64_from_usize;
 use std::{ffi::c_void, mem::size_of};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
@@ -314,7 +315,7 @@ impl Compat {
                 ));
             }
         };
-        self.require_constant(constant, command as u64)?;
+        self.require_constant(constant, u64::from(command))?;
         self.layout(layout)?;
         if matches!(command, 0xda0002 | 0xda0006) && !self.supports_semsurf_bind() {
             return Err(self.unsupported(layout, "BIND/UNBIND unavailable; use the explicitly selected legacy constructor notification path"));
@@ -425,7 +426,7 @@ impl Wire {
         self.bytes.as_mut_ptr().cast()
     }
     pub(crate) fn address(&mut self) -> u64 {
-        self.bytes.as_mut_ptr() as usize as u64
+        u64_from_usize(self.bytes.as_mut_ptr().expose_provenance())
     }
     pub(crate) fn unpack<T: FromBytes + IntoBytes>(&self, value: &mut T) -> Result<()> {
         if size_of::<T>() != self.logical.size {

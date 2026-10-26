@@ -58,7 +58,7 @@ impl H264Decoder {
             }
             .into());
         }
-        let layout = SurfaceLayout::new(max_width, max_height, 1);
+        let layout = SurfaceLayout::new(max_width, max_height, 1)?;
         let mut dec = Decoder::new(desc::EngineParams::for_class(
             decoder_class,
             Some(layout.pitch),

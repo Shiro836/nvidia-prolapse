@@ -14,10 +14,14 @@ use crate::{
     gpu::{AddressSpace, Object, method},
     rm::{Device, Mapping, Memory},
 };
+use nv_rm_core::conv::{const_u32_from_usize, high_u32, low_u32, u64_from_usize};
 use std::{os::fd::AsRawFd, rc::Rc, time::Duration};
 
 const NV2080_ENGINE_TYPE_NVDEC0: u32 = 0x13;
 const ENTRIES: usize = 1024;
+/// `NVC9B0_ALLOCATION_PARAMETERS` size, as its `size` field records it.
+const DECODER_PARAMS_SIZE: u32 =
+    const_u32_from_usize(std::mem::size_of::<crate::abi::VideoDecoder>());
 const COMMAND_BYTES: usize = 65536;
 
 pub struct NvdecChannel {
@@ -98,13 +102,13 @@ impl NvdecChannel {
         )?;
         let mut channel_params = crate::abi::Channel {
             fifo_address: queue_va.address(),
-            entries: ENTRIES as u32,
+            entries: const { const_u32_from_usize(ENTRIES) },
             context_share: context.handle,
             engine: NV2080_ENGINE_TYPE_NVDEC0,
             ..Default::default()
         };
         channel_params.userd_memory[0] = queue_memory.handle;
-        channel_params.userd_offsets[0] = (ENTRIES * 8) as u64;
+        channel_params.userd_offsets[0] = u64_from_usize(ENTRIES * 8);
         let channel = Object::new(
             device,
             group.handle,
@@ -117,7 +121,7 @@ impl NvdecChannel {
             u64::from(NV2080_ENGINE_TYPE_NVDEC0),
         )?;
         let mut decoder_params = crate::abi::VideoDecoder {
-            size: std::mem::size_of::<crate::abi::VideoDecoder>() as u32,
+            size: DECODER_PARAMS_SIZE,
             ..Default::default()
         };
         let decoder = Object::new(
@@ -182,16 +186,16 @@ impl NvdecChannel {
         for (k, w) in words.iter().enumerate() {
             self.command.write_u32(self.cmd_off + k * 4, *w)?;
         }
-        let entry =
-            (self.command_va + self.cmd_off as u64) | ((words.len() as u64) << 42) | (1 << 41);
+        let entry = (self.command_va + u64_from_usize(self.cmd_off))
+            | (u64_from_usize(words.len()) << 42)
+            | (1 << 41);
         self.cmd_off += bytes.next_multiple_of(256);
         self.timeline.publish_maximum(value)?;
-        self.ring.write_u32(self.put * 8, entry as u32)?;
-        self.ring
-            .write_u32(self.put * 8 + 4, (entry >> 32) as u32)?;
+        self.ring.write_u32(self.put * 8, low_u32(entry))?;
+        self.ring.write_u32(self.put * 8 + 4, high_u32(entry))?;
         self.put = (self.put + 1) % ENTRIES;
         crate::platform::device_full_barrier();
-        let put = self.put as u32;
+        let put = u32::try_from(self.put).expect("GP_PUT stays below ENTRIES");
         self.ring.write_u32(ENTRIES * 8 + 0x8c, put)?; // GPPut
         crate::platform::device_full_barrier();
         // Ring and USERD are VRAM written through BAR1 (write-combined). A BAR0
@@ -225,11 +229,14 @@ impl NvdecChannel {
         }
         // SAFETY: `drm` is a borrowed open File for the whole call.
         let fd = unsafe { self.timeline.context_fence(drm.as_raw_fd(), value) }?;
+        let start = std::time::Instant::now();
         wait_sync_file(fd.as_raw_fd(), Duration::from_secs(2)).map_err(|e| {
-            let gpget = self.ring.read_u32(ENTRIES * 8 + 0x88).unwrap_or(u32::MAX);
+            // Channel state for the message only: a failed read shows as an error.
+            let gpget = self.ring.read_u32(ENTRIES * 8 + 0x88);
             VideoError::DeviceLost(format!(
-                "NVDEC picture {value} did not complete ({e}; completed {:?}, GPGet {gpget}, put {})",
-                self.completed().ok(),
+                "NVDEC picture {value} did not complete after {:?} ({e}; completed {:?}, GPGet {gpget:?}, put {})",
+                start.elapsed(),
+                self.completed(),
                 self.put
             ))
         })?;
@@ -250,6 +257,11 @@ pub(crate) fn nvdec_usermode_class(classes: &[u32]) -> Option<u32> {
     [0xc661, 0xc361].into_iter().find(|c| classes.contains(c))
 }
 
+// poll(2)'s nfds_t: unsigned int on bionic (bits/poll.h), unsigned long on glibc.
+#[cfg(target_os = "android")]
+type Nfds = u32;
+#[cfg(not(target_os = "android"))]
+type Nfds = std::ffi::c_ulong;
 #[repr(C)]
 struct PollFd {
     fd: i32,
@@ -257,7 +269,7 @@ struct PollFd {
     revents: i16,
 }
 unsafe extern "C" {
-    fn poll(fds: *mut PollFd, n: std::ffi::c_ulong, timeout: i32) -> i32;
+    fn poll(fds: *mut PollFd, n: Nfds, timeout: i32) -> i32;
 }
 
 /// poll(POLLIN) on a sync_file until it signals or `timeout` elapses.
@@ -270,8 +282,10 @@ pub(crate) fn wait_sync_file(fd: i32, timeout: Duration) -> Result<(), String> {
             events: 1,
             revents: 0,
         };
+        // poll(2) takes int milliseconds: a longer wait is cut to INT_MAX and the loop continues.
+        let millis = i32::try_from(left.as_millis()).unwrap_or(i32::MAX);
         // SAFETY: one valid pollfd for the duration of the call.
-        let r = unsafe { poll(&mut p, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+        let r = unsafe { poll(&raw mut p, 1, millis) };
         if r > 0 {
             if p.revents & (8 | 32) != 0 {
                 return Err(format!("sync_file poll error revents {:#x}", p.revents));
@@ -290,12 +304,19 @@ pub(crate) fn wait_sync_file(fd: i32, timeout: Duration) -> Result<(), String> {
 
 impl Drop for NvdecChannel {
     fn drop(&mut self) {
-        let _ = self.timeline.unbind();
+        if let Err(error) = self.timeline.unbind() {
+            crate::diag::diag!("NVDEC timeline unbind failed: {error}");
+        }
         if let Some(group) = self.objects.last() {
-            let _ = self
-                .device
-                .client
-                .control(group.handle, 0xa06c0101, &mut [0u8, 0, 0]);
+            // GPFIFO_SCHEDULE off before the frees; a failure leaves the free
+            // below to stop the channel (RM preempts on free), so it is logged.
+            if let Err(error) =
+                self.device
+                    .client
+                    .control(group.handle, 0xa06c0101, &mut [0u8, 0, 0])
+            {
+                crate::diag::diag!("NVDEC channel schedule-off failed: {error}");
+            }
         }
         while !self.objects.is_empty() {
             drop(self.objects.remove(0));

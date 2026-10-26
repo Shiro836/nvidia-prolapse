@@ -56,7 +56,10 @@ pub(crate) fn open_rm(pci: Option<[u32; 4]>) -> VResult<(Rc<rm::Device>, [u32; 4
         Some(p) => Some(p),
         None => match std::env::var("NV_VIDEO_PCI") {
             Ok(s) => Some(parse_pci(&s)?),
-            Err(_) => None,
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error @ std::env::VarError::NotUnicode(_)) => {
+                return Err(VideoError::Invalid(format!("NV_VIDEO_PCI: {error}")));
+            }
         },
     };
     let card = client
@@ -70,7 +73,10 @@ fn parse_pci(s: &str) -> VResult<[u32; 4]> {
     let (dom, rest) = s.split_once(':').ok_or_else(bad)?;
     let (bus, rest) = rest.split_once(':').ok_or_else(bad)?;
     let (dev, fun) = rest.split_once('.').ok_or_else(bad)?;
-    let h = |v: &str| u32::from_str_radix(v, 16).map_err(|_| bad());
+    let h = |v: &str| {
+        u32::from_str_radix(v, 16)
+            .map_err(|error| VideoError::Invalid(format!("{}: {error}", bad())))
+    };
     Ok([h(dom)?, h(bus)?, h(dev)?, h(fun)?])
 }
 

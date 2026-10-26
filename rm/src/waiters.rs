@@ -293,7 +293,7 @@ mod tests {
         for round in 1..=rounds {
             barrier.wait();
             if round % 2 == 0 {
-                while fixture.waiters.registered() < waiters as u32 {
+                while fixture.waiters.registered() < u32::try_from(waiters).unwrap() {
                     std::thread::yield_now();
                 }
             } else if round % 3 == 0 {
@@ -363,7 +363,7 @@ mod tests {
                 })
                 .collect();
             ready.wait();
-            while fixture.waiters.registered() < waiters as u32 {
+            while fixture.waiters.registered() < u32::try_from(waiters).unwrap() {
                 std::thread::yield_now();
             }
             if round == 300 {

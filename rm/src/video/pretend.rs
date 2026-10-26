@@ -8,6 +8,7 @@ use super::{
     Allocator, BuildContext, CODEC_AV1, CODEC_H264, CODEC_HEVC, CODEC_VP9, CodecDecoder, Job,
     SurfaceRef, VResult, VideoError, bits, session::DESCRIPTOR_BYTES,
 };
+use nv_rm_core::conv::{u64_from_usize, usize_from_u32};
 
 /// One built picture.
 pub struct Built {
@@ -25,7 +26,7 @@ struct Mock(u64);
 impl Allocator for Mock {
     fn vram(&mut self, size: usize) -> VResult<u64> {
         let va = self.0;
-        self.0 += (size as u64).next_multiple_of(1 << 16);
+        self.0 += u64_from_usize(size).next_multiple_of(1 << 16);
         Ok(va)
     }
     fn write(&mut self, _va: u64, _offset: usize, _data: &[u8]) -> VResult<()> {
@@ -105,11 +106,11 @@ pub fn run_units(
     };
     let mut dec = decoder(codec, class, w, h, bit_depth, &config)?;
     dec.allocate(&mut Mock(1 << 36), w, h)?;
-    let layout = dec.surface_layout(w, h);
+    let layout = dec.surface_layout(w, h)?;
     let total = dec.dpb_size() + 2;
-    let surfaces: Vec<SurfaceRef> = (0..total as u64)
+    let surfaces: Vec<SurfaceRef> = (0..u64_from_usize(total))
         .map(|i| {
-            let base = (2 << 36) + i * (layout.size as u64).next_multiple_of(1 << 16);
+            let base = (2 << 36) + i * u64_from_usize(layout.size).next_multiple_of(1 << 16);
             SurfaceRef {
                 luma: base,
                 chroma: base + layout.chroma_offset,
@@ -127,7 +128,7 @@ pub fn run_units(
             let current = (0..total)
                 .find(|i| !referenced.contains(i))
                 .ok_or_else(|| VideoError::Invalid("no free surface".into()))?;
-            let k = picture_index as u64 % 4;
+            let k = u64::from(picture_index) % 4;
             let ctx = BuildContext {
                 decoder_class: class,
                 host_class,
@@ -170,9 +171,9 @@ pub fn methods(words: &[u32]) -> Vec<(u32, &'static str, Vec<u32>)> {
             _ => ("?", (h >> 16) & 0x1fff),
         };
         let m = (h & 0x1fff) << 2;
-        let vals = words[i + 1..i + 1 + n as usize].to_vec();
+        let vals = words[i + 1..i + 1 + usize_from_u32(n)].to_vec();
         r.push((m, kind, vals));
-        i += 1 + n as usize;
+        i += 1 + usize_from_u32(n);
     }
     r
 }

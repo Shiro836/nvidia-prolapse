@@ -13,6 +13,7 @@ description = "Syscall-free NVDEC codec layer: bitstream parsers, descriptor and
 nv-rm-core = { path = "../rm-core" }
 nv-rm-sys = { path = "../rm-sys" }
 thiserror.workspace = true
+log.workspace = true
 
 [lints]
 workspace = true

@@ -10,6 +10,7 @@ use crate::{
     abi,
     rm::{Device, Error, Result},
 };
+use nv_rm_core::conv::{u64_from_usize, usize_from_u32};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Submission {
@@ -49,14 +50,14 @@ pub(crate) fn copy_engine_parameters(
         )));
     }
     compat.require_constant("NVB0B5_ALLOCATION_PARAMETERS_VERSION_1", 1)?;
-    if partners.count as usize > partners.partners.len() {
+    if usize_from_u32(partners.count) > partners.partners.len() {
         return Err(Error::Contract(
             "RM copy partner count exceeds public array capacity".into(),
         ));
     }
     let mut selected = None;
     let mut seen = Vec::new();
-    for &engine in &partners.partners[..partners.count as usize] {
+    for &engine in &partners.partners[..usize_from_u32(partners.count)] {
         if seen.contains(&engine) {
             return Err(Error::Contract(
                 "RM returned duplicate engine partners".into(),
@@ -66,7 +67,7 @@ pub(crate) fn copy_engine_parameters(
         // COPY10+ is non-contiguous and absent from older headers. Test exact
         // profile constants instead of accepting a numeric interval or suffix.
         let is_copy = (0..20).any(|i| {
-            compat.constant(&format!("NV2080_ENGINE_TYPE_COPY{i}")) == Some(engine as u64)
+            compat.constant(&format!("NV2080_ENGINE_TYPE_COPY{i}")) == Some(u64::from(engine))
         });
         if is_copy && supports_class(engine)? && selected.replace(engine).is_some() {
             return Err(Error::Contract(format!(
@@ -173,7 +174,7 @@ pub fn query(device: &Device) -> Result<Capabilities> {
     let mut entries = [[0xcu32, 0]];
     let mut query = abi::GrInfo {
         count: 1,
-        entries: entries.as_mut_ptr() as u64,
+        entries: u64_from_usize(entries.as_mut_ptr().expose_provenance()),
         ..Default::default()
     };
     device
@@ -190,7 +191,7 @@ mod tests {
     }
     fn partners(values: &[u32]) -> abi::EnginePartners {
         let mut out = abi::EnginePartners {
-            count: values.len() as u32,
+            count: u32::try_from(values.len()).unwrap(),
             ..Default::default()
         };
         out.partners[..values.len()].copy_from_slice(values);

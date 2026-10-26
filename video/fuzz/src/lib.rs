@@ -191,7 +191,9 @@ pub fn decoder(data: &[u8]) {
     if dec.allocate(&mut alloc, w, h).is_err() {
         return;
     }
-    let layout = dec.surface_layout(w, h);
+    let Ok(layout) = dec.surface_layout(w, h) else {
+        return;
+    };
     let Ok(surface_bytes) = u64::try_from(layout.size) else {
         return;
     };

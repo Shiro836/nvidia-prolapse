@@ -103,7 +103,7 @@ static COMPILER: OnceLock<std::result::Result<Mutex<Functions>, String>> = OnceL
 fn functions() -> Result<&'static Mutex<Functions>> {
     let loaded=COMPILER.get_or_init(|| {
         let path=std::env::var("NV_NATIVE_COMPILER_PATH").unwrap_or_else(|_|"libnv_native_nak.so".into());
-        let path=CString::new(path).map_err(|_|"compiler path contains NUL".to_string())?;
+        let path=CString::new(path).map_err(|error| format!("compiler path contains NUL: {error}"))?;
         // dlclose stance: a loaded compiler stays loaded for the process
         // lifetime (the OnceLock keeps its function pointers), so they can
         // never outlive the DSO.
@@ -148,9 +148,9 @@ pub fn compile(words: &[u32], entry: &CStr) -> Result<Shader> {
     }
     let functions = functions()?
         .lock()
-        .map_err(|_| Error::Contract("NAK compiler lock poisoned".into()))?;
+        .map_err(|error| Error::Contract(format!("NAK compiler lock poisoned: {error}")))?;
     let mut result = Compiled::default();
-    let mut error = [0 as c_char; 2048];
+    let mut error: [c_char; 2048] = [0; 2048];
     // SAFETY: borrowed word/name buffers and correctly-sized C output structs;
     // serialized by the lock above, matching nv_nak.h in this source tree.
     let status = unsafe {
@@ -159,7 +159,7 @@ pub fn compile(words: &[u32], entry: &CStr) -> Result<Shader> {
             words.len(),
             entry.as_ptr(),
             120,
-            &mut result,
+            &raw mut result,
             error.as_mut_ptr(),
             error.len(),
         )
@@ -194,7 +194,7 @@ pub fn compile(words: &[u32], entry: &CStr) -> Result<Shader> {
     };
     // SAFETY: `result` was filled by this compile call and is freed once;
     // `code` (borrowed above) was copied out first.
-    unsafe { (functions.free)(&mut result) };
+    unsafe { (functions.free)(&raw mut result) };
     let shader = shader?;
     shader.validate()?;
     Ok(shader)

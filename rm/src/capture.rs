@@ -37,6 +37,7 @@
 //! submission for the start release); runs that measure FPS use mode `ts`,
 //! which never copies pushbuffer contents.
 
+use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -91,15 +92,17 @@ pub(crate) fn pool_binds<'a>(pushes: impl Iterator<Item = &'a [u8]>) -> Vec<Pool
     let mut touched = [[false; 2]; 2];
     for bytes in pushes {
         let words: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
         let mut i = 0;
         while i < words.len() {
             let h = words[i];
             let op = h >> 29;
-            let count = ((h >> 16) & 0x1fff) as usize;
-            let sc = ((h >> 13) & 7) as usize;
+            let count = usize_from_u32((h >> 16) & 0x1fff);
+            let sc = usize_from_u32((h >> 13) & 7);
             let method = (h & 0xfff) << 2;
             i += 1;
             let values: &[u32] = match op {
@@ -116,13 +119,13 @@ pub(crate) fn pool_binds<'a>(pushes: impl Iterator<Item = &'a [u8]>) -> Vec<Pool
             }
             for (n, &v) in values.iter().enumerate() {
                 let m = match op {
-                    1 => method + 4 * n as u32,
+                    1 => method + 4 * count_u32(n),
                     3 => method,
                     _ => method + if n == 0 { 0 } else { 4 },
                 };
                 for (k, base) in [SAMPLER_POOL_A, HEADER_POOL_A].into_iter().enumerate() {
                     if (base..base + 12).contains(&m) {
-                        regs[sc][k][((m - base) / 4) as usize] = Some(v);
+                        regs[sc][k][usize_from_u32((m - base) / 4)] = Some(v);
                         touched[sc][k] = true;
                     }
                 }
@@ -141,13 +144,13 @@ pub(crate) fn pool_binds<'a>(pushes: impl Iterator<Item = &'a [u8]>) -> Vec<Pool
             let entries = c.saturating_add(1);
             let bytes = (u64::from(entries) * 32).min(POOL_MAX_BYTES);
             out.push(PoolBind {
-                subchannel: sc as u32,
+                subchannel: count_u32(sc),
                 kind: if k == 0 { 2 } else { 1 },
                 // OFFSET_UPPER is 7:0 on NV9097 and 24:0 on newer classes
                 // (clce97.h:3213); unused bits are written as 0.
                 address: u64::from(a & 0x1ff_ffff) << 32 | u64::from(b),
                 entries,
-                size: bytes as u32,
+                size: low_u32(bytes),
             });
         }
     }
@@ -175,14 +178,16 @@ fn property(name: &str) -> Option<String> {
     }
     let name = std::ffi::CString::new(name).ok()?;
     // PROP_VALUE_MAX = 92 (sys/system_properties.h).
-    let mut value = [0 as std::os::raw::c_char; 92];
+    let mut value: [std::os::raw::c_char; 92] = [0; 92];
     // SAFETY: a NUL-terminated name and a PROP_VALUE_MAX buffer, the size
     // sys/system_properties.h requires for the value.
     let n = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
     if n <= 0 {
         return None;
     }
-    let bytes: Vec<u8> = value[..n as usize].iter().map(|&c| c as u8).collect();
+    let n = usize::try_from(n).ok()?;
+    // c_char is i8 on x86 bionic: the property bytes reinterpreted as u8.
+    let bytes: Vec<u8> = value.get(..n)?.iter().map(|&c| c.cast_unsigned()).collect();
     String::from_utf8(bytes).ok()
 }
 #[cfg(not(target_os = "android"))]
@@ -247,6 +252,13 @@ pub(crate) struct Capture {
     sequence: u32,
 }
 
+/// A count or length that fits the record format's u32 by construction: push
+/// counts and sizes arrive from C as u32, pool sizes are capped at
+/// `POOL_MAX_BYTES`, method indices come from 13-bit header counts.
+fn count_u32(n: usize) -> u32 {
+    u32::try_from(n).expect("capture fields are built from u32-sized driver data")
+}
+
 impl Capture {
     pub(crate) fn new(config: Config, device_tag: usize) -> Self {
         crate::diag::diag!(
@@ -272,8 +284,9 @@ impl Capture {
             sequence: 0,
         }
     }
+    /// Nanoseconds since the capture was created; saturates after 584 years.
     pub(crate) fn cpu_ns(&self) -> u64 {
-        self.epoch.elapsed().as_nanos() as u64
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
     /// Advance the arm/active/done state; true while recording.
     pub(crate) fn active(&mut self, gpu_now: impl FnOnce() -> u64) -> bool {
@@ -316,9 +329,8 @@ impl Capture {
                 ));
                 match File::create(&path) {
                     Ok(f) => {
-                        let mut w = BufWriter::with_capacity(1 << 20, f);
-                        let _ = w.write_all(MAGIC);
-                        self.file = Some(w);
+                        self.file = Some(BufWriter::with_capacity(1 << 20, f));
+                        self.write(MAGIC);
                         let mut p = Vec::new();
                         p.extend_from_slice(&self.cpu_ns().to_le_bytes());
                         p.extend_from_slice(&gpu_now().to_le_bytes());
@@ -347,12 +359,38 @@ impl Capture {
             }
         }
     }
+    /// One record: tag u32, payload length u32, payload.
     pub(crate) fn record(&mut self, tag: u32, payload: &[u8]) {
-        if let Some(w) = self.file.as_mut() {
-            let _ = w.write_all(&tag.to_le_bytes());
-            let _ = w.write_all(&(payload.len() as u32).to_le_bytes());
-            let _ = w.write_all(payload);
+        if self.file.is_none() {
+            return;
         }
+        let Ok(length) = u32::try_from(payload.len()) else {
+            self.abandon(&format!(
+                "record {tag} of {} bytes exceeds the format's 32-bit length",
+                payload.len()
+            ));
+            return;
+        };
+        self.write(&tag.to_le_bytes());
+        self.write(&length.to_le_bytes());
+        self.write(payload);
+    }
+    /// Append to the open capture file. A failed write ends this capture
+    /// (logged once, file closed): the capture is a diagnostic of the
+    /// driver and never fails the driver call that produced the record.
+    fn write(&mut self, bytes: &[u8]) {
+        if let Some(w) = self.file.as_mut()
+            && let Err(error) = w.write_all(bytes)
+        {
+            self.abandon(&format!("write failed: {error}"));
+        }
+    }
+    /// Stop recording after a capture error; the next capture starts again
+    /// from `go` like after a normal finish.
+    fn abandon(&mut self, reason: &str) {
+        crate::diag::diag!("nvk Rust RM capture abandoned: {reason}");
+        self.file = None;
+        self.state = State::Armed(None);
     }
     pub(crate) fn add_context(&mut self, context: u64, engines: u32, class: u32) {
         self.contexts.push((context, engines, class));
@@ -385,13 +423,13 @@ impl Capture {
         for c in counts {
             p.extend_from_slice(&c.to_le_bytes());
         }
-        p.extend_from_slice(&(pushes.len() as u32).to_le_bytes());
+        p.extend_from_slice(&count_u32(pushes.len()).to_le_bytes());
         for (address, size, flags, data) in pushes {
             p.extend_from_slice(&address.to_le_bytes());
             p.extend_from_slice(&size.to_le_bytes());
             p.extend_from_slice(&flags.to_le_bytes());
             let data = data.as_deref().unwrap_or(&[]);
-            p.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            p.extend_from_slice(&count_u32(data.len()).to_le_bytes());
             p.extend_from_slice(data);
         }
         self.record(REC_SUBMIT, &p);
@@ -406,7 +444,7 @@ impl Capture {
         p.extend_from_slice(&pool.subchannel.to_le_bytes());
         p.extend_from_slice(&pool.kind.to_le_bytes());
         p.extend_from_slice(&pool.entries.to_le_bytes());
-        p.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        p.extend_from_slice(&count_u32(bytes.len()).to_le_bytes());
         p.extend_from_slice(bytes);
         self.record(REC_POOL, &p);
     }
@@ -442,11 +480,18 @@ impl Capture {
         p.extend_from_slice(&reason.to_le_bytes());
         p.extend_from_slice(&0u32.to_le_bytes());
         self.record(REC_END, &p);
-        if let Some(mut w) = self.file.take() {
-            let _ = w.flush();
+        if let Some(mut w) = self.file.take()
+            && let Err(error) = w.flush()
+        {
+            crate::diag::diag!("nvk Rust RM capture: final flush failed: {error}");
         }
-        // Re-arm: the next capture starts when `go` is created again.
-        let _ = std::fs::remove_file(self.config.dir.join("go"));
+        // Re-arm: the next capture starts when `go` is created again. A `go`
+        // that is already gone (removed by the user) is the re-armed state.
+        if let Err(error) = std::fs::remove_file(self.config.dir.join("go"))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::diag::diag!("nvk Rust RM capture: cannot remove go: {error}");
+        }
         self.state = if reason == 2 {
             State::Done
         } else {
@@ -479,26 +524,27 @@ pub(crate) struct TimingRing {
 }
 impl TimingRing {
     pub(crate) fn entry_address(&self, seq: u32) -> u64 {
-        self.gpu.address() + (seq as usize % TS_ENTRIES * 32) as u64
+        self.gpu.address() + u64_from_usize(usize_from_u32(seq) % TS_ENTRIES * 32)
     }
     /// Pops completed entries: (token, start_ns, end_ns).
-    pub(crate) fn drain(&mut self, out: &mut Vec<(u64, u64, u64)>) {
+    pub(crate) fn drain(&mut self, out: &mut Vec<(u64, u64, u64)>) -> crate::rm::Result<()> {
         crate::platform::device_read_barrier();
         while let Some(&(seq, token)) = self.pending.front() {
-            let base = seq as usize % TS_ENTRIES * 32;
-            let end_payload = self.cpu.read_u32(base + 16).unwrap_or(0);
+            let base = usize_from_u32(seq) % TS_ENTRIES * 32;
+            let end_payload = self.cpu.read_u32(base + 16)?;
             if end_payload != seq {
                 // Stale entries can only be newer work still in flight.
                 break;
             }
-            let rd = |o: usize| -> u64 {
-                let lo = self.cpu.read_u32(o).unwrap_or(0) as u64;
-                let hi = self.cpu.read_u32(o + 4).unwrap_or(0) as u64;
-                lo | hi << 32
+            let rd = |o: usize| -> crate::rm::Result<u64> {
+                let lo = u64::from(self.cpu.read_u32(o)?);
+                let hi = u64::from(self.cpu.read_u32(o + 4)?);
+                Ok(lo | hi << 32)
             };
-            out.push((token, rd(base + 8), rd(base + 24)));
+            out.push((token, rd(base + 8)?, rd(base + 24)?));
             self.pending.pop_front();
         }
+        Ok(())
     }
 }
 

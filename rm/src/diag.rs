@@ -41,9 +41,43 @@ pub(crate) fn write(message: std::fmt::Arguments<'_>) {
     }
     {
         use std::io::Write;
-        // One locked write per line; a closed stderr is not an error source.
-        let _ = writeln!(std::io::stderr().lock(), "{message}");
+        // One locked write per line. A closed or full stderr has nowhere to
+        // report to: the line is dropped, deliberately and only here.
+        if let Err(error) = writeln!(std::io::stderr().lock(), "{message}") {
+            drop(error);
+        }
     }
+}
+
+/// The `log` facade's sink in this library: records from the logic crates
+/// (nv-video) go to the same place as [`write`]. Warnings and errors only, so
+/// no per-frame path formats anything (RUST.md §7, §14).
+struct Sink;
+impl log::Log for Sink {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            write(format_args!("{}: {}", record.target(), record.args()));
+        }
+    }
+    fn flush(&self) {}
+}
+
+/// Install [`Sink`] as this library's `log` logger, once, on the first open
+/// entry point (no load-time work, RUST.md §13). The facade's state is this
+/// cdylib's own copy, so another logger can only exist when the library is
+/// linked into a Rust program that set one: that program's logger then gets
+/// the records, which is the intended outcome, so the refusal is ignored.
+pub(crate) fn install_logger() {
+    static SINK: Sink = Sink;
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if log::set_logger(&SINK).is_ok() {
+            log::set_max_level(log::LevelFilter::Warn);
+        }
+    });
 }
 
 /// Log every panic of this library with its source location before the
