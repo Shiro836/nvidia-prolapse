@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Host-only "pretend class" builds (tests only): run a codec over a stream with the session's surface
 //! accounting for any NVDEC class and host GPFIFO class, without a GPU, and return every picture's
 //! descriptor slot and method list. Used to check the per-generation behaviour against stock's
@@ -245,10 +246,10 @@ const PER_CLASS: [(u32, u32, u32, bool, bool, bool, bool); 4] = [
     (0xcfb0, 0xc96f, 8, true, true, true, true),     // Blackwell GB20x
 ];
 
-const H264: &[u8] = include_bytes!("testdata/h264_160x144.h264");
-const HEVC: &[u8] = include_bytes!("testdata/hevc_160x144.hevc");
-const VP9: &[u8] = include_bytes!("testdata/vp9_160x144.ivf");
-const AV1: &[u8] = include_bytes!("av1/testdata/aom_hidden_640.ivf");
+const H264: &[u8] = include_bytes!("../../../video/src/testdata/h264_160x144.h264");
+const HEVC: &[u8] = include_bytes!("../../../video/src/testdata/hevc_160x144.hevc");
+const VP9: &[u8] = include_bytes!("../../../video/src/testdata/vp9_160x144.ivf");
+const AV1: &[u8] = include_bytes!("../../../video/src/av1/testdata/aom_hidden_640.ivf");
 
 fn rd32(d: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(d[o..o + 4].try_into().unwrap())

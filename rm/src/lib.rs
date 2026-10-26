@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Real native RM backend. Direct libc/ioctl calls; no NVIDIA userspace DSO,
 //! glibc shim, CUDA, Vulkan loader or existing HAL is loaded by this library.
 //! This is the backend foundation; a full Vulkan ICD is not implemented yet.
@@ -16,41 +17,32 @@
     clippy::cast_sign_loss,
     clippy::chunks_exact_to_as_chunks,
     clippy::collapsible_if,
-    clippy::default_trait_access,
     clippy::doc_markdown,
     clippy::explicit_iter_loop,
-    clippy::if_not_else,
     clippy::items_after_statements,
     clippy::let_underscore_must_use,
     clippy::let_underscore_untyped,
-    clippy::manual_midpoint,
     clippy::many_single_char_names,
     clippy::map_err_ignore,
     clippy::map_unwrap_or,
-    clippy::match_same_arms,
     clippy::mem_forget,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::multiple_unsafe_ops_per_block,
     clippy::needless_continue,
     clippy::needless_pass_by_value,
-    clippy::needless_range_loop,
     clippy::print_stderr,
     clippy::ptr_as_ptr,
     clippy::ptr_cast_constness,
     clippy::redundant_closure_for_method_calls,
     clippy::ref_as_ptr,
-    clippy::same_functions_in_if_condition,
-    clippy::semicolon_if_nothing_returned,
     clippy::similar_names,
     clippy::single_match_else,
     clippy::struct_excessive_bools,
     clippy::struct_field_names,
     clippy::too_many_lines,
     clippy::undocumented_unsafe_blocks,
-    clippy::unnested_or_patterns,
     clippy::unreadable_literal,
-    clippy::unused_self,
     clippy::unwrap_used,
     clippy::used_underscore_binding,
     clippy::wildcard_enum_match_arm,
@@ -62,29 +54,10 @@
     reason = "pre-standard code; cleanup tracked"
 )]
 #![cfg_attr(
-    not(test),
-    expect(
-        clippy::wildcard_imports,
-        reason = "pre-standard code; cleanup tracked"
-    )
-)]
-#![cfg_attr(
     test,
-    expect(
-        clippy::assert_is_empty,
-        clippy::format_collect,
-        clippy::format_push_string,
-        clippy::ignore_without_reason,
-        clippy::manual_is_multiple_of,
-        clippy::stable_sort_primitive,
-        reason = "pre-standard code; cleanup tracked"
-    )
+    expect(clippy::assert_is_empty, reason = "pre-standard code; cleanup tracked")
 )]
-#[cfg(all(not(target_pointer_width = "64"), feature = "prototype-vulkan"))]
-compile_error!(
-    "The standalone experimental Vulkan frontend is LP64; use the Mesa RM bridge on x86"
-);
-pub mod abi;
+pub use nv_rm_sys::abi;
 pub mod backend;
 pub mod capabilities;
 mod capture;
@@ -101,24 +74,19 @@ mod fences;
 pub mod gpu;
 pub mod mesa;
 pub mod nvdec;
-pub mod nvdec_drv;
-pub mod nvdec_hevc;
+pub use nv_rm_sys::nvdec_drv;
+pub use nv_video::nvdec_hevc;
 #[cfg(feature = "diagnostics")]
 pub mod perf_diagnostic;
 pub mod platform;
 mod reactor;
-mod reclaim;
+use nv_rm_core::reclaim;
 pub mod rm;
 mod slots;
 mod sync_memory;
 mod syncobj;
-// Fixed-shape probability/count tables are indexed in parallel like the spec.
 pub mod video;
-#[allow(clippy::needless_range_loop)]
-pub mod vp9;
-mod vp9_tables;
-#[cfg(feature = "prototype-vulkan")]
-pub mod vulkan;
+pub use nv_video::nvdec_vp9 as vp9;
 mod waiters;
 mod watcher;
 

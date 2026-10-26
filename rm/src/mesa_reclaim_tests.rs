@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Liveness fixtures for deferred reclamation and foreign-gate wakeups
 //! (local NVIDIA GPU, ignored by default). Run alone:
 //!   cargo test --offline --no-default-features --lib mesa::reclaim_tests \

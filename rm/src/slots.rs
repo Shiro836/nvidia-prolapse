@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Per-device pool of 16-byte GPU semaphore slots in RM system memory.
 //!
 //! The mapped word is the only truth for ordinary synchronization: CPU status,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Local-GPU fixtures for contexts that share a TSG (ignored by default).
 //! Two compute contexts in one TSG on different subcontexts (VEIDs) run on
 //! the GR engine at the same time; the same pair in two TSGs is time-sliced.

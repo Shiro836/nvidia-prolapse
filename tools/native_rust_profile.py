@@ -35,8 +35,10 @@ def identity(path):
 def source_snapshot(root):
     root = Path(root)
     crate, mesa = root / 'rm', root / 'mesa'
-    paths = sorted((crate / 'src').rglob('*.rs'))
-    paths += [crate / 'Cargo.toml', root / 'Cargo.toml', root / 'Cargo.lock', mesa / 'nv_rm.h',
+    crates = [crate, root / 'rm-core', root / 'rm-sys', root / 'video']
+    paths = sorted(path for member in crates for path in (member / 'src').rglob('*.rs'))
+    paths += [member / 'Cargo.toml' for member in crates]
+    paths += [root / 'Cargo.toml', root / 'Cargo.lock', mesa / 'nv_rm.h',
               mesa / 'nvkmd_rm.h', mesa / 'nvkmd_rm.c', mesa / 'build.py',
               mesa / 'build-compat.patch', mesa / 'rm-integration.patch',
               root / 'tools/native_rust_profile.py']

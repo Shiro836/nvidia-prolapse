@@ -15,6 +15,7 @@ they are.
 | Directory | What it is |
 |---|---|
 | `rm/` | Rust backend that talks to NVIDIA's kernel module (RM ioctls), plus the NVDEC video core |
+| `rm-sys/`, `rm-core/`, `video/` | its raw RM/NVDEC bindings, its syscall-free core (errors, push-buffer encoding, reclamation) and the syscall-free NVDEC codec layer |
 | `mesa/` | Mesa NVK and NAK at a pinned release, our patch stack, and the C adapter (`nvkmd_rm.c`) between NVK and `rm/` |
 | `hal/` | Android Vulkan HAL (`vulkan.nvidia.so`) over NVK: native and hardware buffers, ASTC/ETC2 emulation |
 | `gralloc/` | gralloc backend for minigbm (`libgbm_mesa_wrapper.so`) and the minigbm patches it needs |

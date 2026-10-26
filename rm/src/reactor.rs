@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Linux readiness primitives for caller-side waits and the foreign watcher.
 //!
 //! RM dataless event readiness is consumed by poll itself. Exactly one thread

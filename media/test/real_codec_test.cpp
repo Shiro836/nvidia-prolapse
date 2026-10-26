@@ -63,7 +63,7 @@ static std::vector<uint8_t> slurp(const char *p)
 
 static uint32_t align_up(uint32_t v, uint32_t a) { return (v + a - 1) & ~(a - 1); }
 
-/* NAL boundaries exactly as the backend's parser sees them (native/src/video/bits.rs
+/* NAL boundaries exactly as the backend's parser sees them (video/src/bits.rs
  * split_annexb): start code at `start` (including a leading zero when 00 00 00 01),
  * payload from `nal`. */
 struct Nal {
@@ -91,7 +91,7 @@ static std::vector<Nal> split_annexb(const std::vector<uint8_t> &d)
     return out;
 }
 
-/* Access units per H.264 7.4.1.2.3 / H.265 7.4.2.4.4, same rule as native/src/video/bits.rs
+/* Access units per H.264 7.4.1.2.3 / H.265 7.4.2.4.4, same rule as video/src/bits.rs
  * access_units(): a unit starts at a parameter set / AUD / prefix SEI after a slice, or at
  * the first slice of a new picture. */
 static std::vector<std::pair<size_t, size_t>> access_units(const std::vector<uint8_t> &d, bool hevc)

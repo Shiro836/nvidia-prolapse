@@ -1,0 +1,11 @@
+[package]
+name = "nv-rm-sys"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Raw bindings of the NVIDIA RM and NVDEC interfaces (open-gpu-kernel-modules, nvdec_drv.h)"
+
+[lints]
+workspace = true

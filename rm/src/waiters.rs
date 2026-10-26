@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Caller-side CPU waits: one device HOST RM event descriptor, leader/follower.
 //!
 //! Public nvidia_poll (OGKM kernel-open/nvidia/nv.c) registers the waitqueue,

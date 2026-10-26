@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Debt ledger (RUST.md "Existing code"): every workspace lint this crate still violates.
 #![expect(
     clippy::print_stderr,

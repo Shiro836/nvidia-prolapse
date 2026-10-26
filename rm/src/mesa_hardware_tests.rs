@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Local-GPU fixtures for the caller-side bridge (ignored by default).
 //! Run alone: cargo test --offline --no-default-features --lib
 //!   mesa::hardware_tests -- --ignored --test-threads=1 --nocapture

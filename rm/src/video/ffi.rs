@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! C ABI of video/nv_video.h (v1 entry points, v2 additions: HDR static metadata and the
 //! per-unit displayable-picture count).
 use super::{

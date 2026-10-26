@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Opt-in command-stream capture and per-submission GPU timestamps for
 //! performance measurement (perf work, 2026-10-15). Off by default; when the
 //! configuration below is absent the backend's cost is one `Option` check and

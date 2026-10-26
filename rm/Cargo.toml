@@ -37,11 +37,11 @@ name = "nv-nvdec-probe"
 path = "src/bin/nv-nvdec-probe.rs"
 
 [dependencies]
-ash = { version = "=0.38.0", default-features = false, features = ["std", "debug"] }
+nv-rm-core = { path = "../rm-core" }
+nv-rm-sys = { path = "../rm-sys" }
+nv-video = { path = "../video" }
 
 [features]
-default = ["prototype-vulkan"]
-prototype-vulkan = []
 # vast.ai hardware-invariant probe only; never enabled for the NVK bridge.
 diagnostics = []
 

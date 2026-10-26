@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Native RM-managed GPU address space and Blackwell copy queue.
 //! Uses public RM/GPFIFO/CE definitions, not a proprietary userspace library.
 //! An explicit FERMI_VASPACE_A is passed to NV01_MEMORY_VIRTUAL and the channel.
@@ -537,13 +538,7 @@ impl Drop for GpuMapping {
     }
 }
 
-pub(crate) fn method(words: &mut Vec<u32>, subchannel: u32, address: u32, values: &[u32]) {
-    words.push((2 << 28) | ((values.len() as u32) << 16) | (subchannel << 13) | (address >> 2));
-    words.extend_from_slice(values);
-}
-pub(crate) fn hi_lo(address: u64) -> [u32; 2] {
-    [(address >> 32) as u32, address as u32]
-}
+pub(crate) use nv_rm_core::push::{hi_lo, method};
 
 /// One isolated hardware-copy smoke operation. It owns every object and mapping
 /// through completion or channel teardown. No shader compiler or Vulkan API yet.

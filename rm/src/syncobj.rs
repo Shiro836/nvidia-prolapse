@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Caller-side synchronization payloads (Mesa vk_sync backing).
 //!
 //! Ordinary (process-local) payloads are one 16-byte slot of the device slot

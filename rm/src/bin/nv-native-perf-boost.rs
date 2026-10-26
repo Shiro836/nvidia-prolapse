@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Explicit, bounded diagnostic only. Never called by the production backend.
 use nv_bionic_native::{perf_diagnostic::PerformanceVote, rm};
 use std::io::Write;

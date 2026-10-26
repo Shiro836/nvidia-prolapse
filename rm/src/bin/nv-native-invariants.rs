@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! vast.ai hardware-invariant probe (feature `diagnostics`).
 //! Emits exactly one JSON object on stdout; exit 0 = pass, 1 = fail.
 //!   versions        every exact release compiled in, with static predicates

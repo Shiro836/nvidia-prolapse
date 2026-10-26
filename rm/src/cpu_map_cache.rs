@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Owned CPU mappings are lazy and may survive logical unmap until allocation
 //! free. Idle leases are reclaimable under CPU-VA/RM/BAR pressure; active leases
 //! are never indexed. One weak FIFO gives O(1) transitions without an Rc cycle.

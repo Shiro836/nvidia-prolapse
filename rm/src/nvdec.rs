@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! V0 feasibility spike: NVDEC (video decoder class, e.g. Blackwell 0xCFB0)
 //! driven directly through the native RM backend, no NVIDIA userspace.
 //!
@@ -44,14 +45,7 @@ const fn round_up(v: usize, a: usize) -> usize {
     v.div_ceil(a) * a
 }
 
-pub struct HevcFrame {
-    pub offset: usize,
-    pub size: usize,
-    /// curr_pic_idx (picture slot) of this frame.
-    pub pos: u32,
-    /// Picture becomes a reference for later frames.
-    pub is_hist: bool,
-}
+pub use nv_video::nvdec_hevc::HevcFrame;
 
 pub struct HevcStream<'a> {
     pub bitstream: &'a [u8],

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Public Blackwell QMD v5 descriptor construction for runtime-compiled shaders.
 //! NAK supplies code and resource metadata; local stacks remain unsupported.
 use crate::{

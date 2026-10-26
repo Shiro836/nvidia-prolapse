@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Backend diagnostics sink.
 //!
 //! On Android, a graphics driver's stderr is not connected to anything the

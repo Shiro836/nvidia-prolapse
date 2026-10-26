@@ -1,0 +1,11 @@
+[package]
+name = "nv-rm-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Syscall-free core of the RM backend: error type, push-buffer method encoding, deferred reclamation"
+
+[lints]
+workspace = true

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Exact-release RM wire adapters generated from independent public C probes.
 //! Membership is never interpolated across a branch or a version backport.
 //! Logical caller structures use the 615.71.09 schema; only named initialized

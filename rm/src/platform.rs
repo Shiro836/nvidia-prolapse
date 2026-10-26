@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! CPU/libc contracts for direct RM userspace.
 //!
 //! ABI authority: NDK r29 bits/ioctl.h, sys/mman.h and unistd.h; glibc

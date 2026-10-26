@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Source-defined RM <-> NVIDIA DRM PRIME external memory.
 //!
 //! Authorities: matching open kernel module ctrl0000unix.h (0x3d05/0x3d06),

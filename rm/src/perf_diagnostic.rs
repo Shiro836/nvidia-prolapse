@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Bounded, explicitly requested performance-vote experiment; no production policy.
 //! Public OGKM 610.57.04 ctrl2080perf.h:54-102 and nvos.h NVOS54.
 //! Independent public-header C assertions verified all five Android CPU ABIs.

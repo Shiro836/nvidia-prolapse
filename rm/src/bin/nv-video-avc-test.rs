@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GNU host test of nv_video.h through its C ABI: every frame goes through
 //! nv_video_decode -> nv_video_next_picture -> nv_video_copy_out (LINEAR NV12
 //! dma-buf target) -> wait release fence -> CPU readback -> compare with a

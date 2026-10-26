@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! The one optional driver thread: `nvk-rm-foreign`.
 //!
 //! Started lazily on the first *pending* foreign dependency (an imported

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Explicit RM-advertised/public-header/Mesa backend intersection.
 //!
 //! Authorities: OGKM 615.71.09 class/cl* and ctrl2080gr.h SM_VERSION;

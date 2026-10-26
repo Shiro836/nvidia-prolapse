@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Hardware-invariant diagnostics for the vast.ai harness (feature
 //! `diagnostics` only; production bridges never compile this module).
 //! Read-only queries of the same public RM controls the backend itself uses.

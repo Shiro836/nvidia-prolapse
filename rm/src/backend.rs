@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Thread-safe Vulkan-facing API. One worker owns all thread-confined RM/GPU
 //! objects. Callers exchange IDs and mapped addresses, never Rust references.
 //! Submission is synchronous for now: success means the GPU release completed.

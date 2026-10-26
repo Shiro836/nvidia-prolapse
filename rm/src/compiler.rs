@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Source-built Mesa SPIR-V/NIR/NAK bridge, loaded once and called serially.
 //! This module never recognizes a fixture or substitutes a precompiled shader.
 use crate::rm::{Error, Result};

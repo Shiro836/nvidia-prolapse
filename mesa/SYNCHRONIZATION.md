@@ -187,7 +187,7 @@ publishes loss on error, and is cancelled and joined at teardown.
 
 ## Resource reclamation: frees never wait for the GPU
 
-`src/reclaim.rs`, `mesa.rs` `reclaim_*`. GPU work can legitimately be gated on
+`rm-core/src/reclaim.rs`, `mesa.rs` `reclaim_*`. GPU work can legitimately be gated on
 a foreign sync_file whose producer is the thread that is freeing memory
 (Android: the release fence of a buffer needs the app's next frame). The former
 `nv_rm_free`/`nv_rm_unbind` drained every queue's last token first and so

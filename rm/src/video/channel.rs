@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! One NVDEC channel: TSG on the NVDEC0 runlist, SYNC context share, host
 //! GPFIFO channel, decoder-class object (setup facts as in the V0 spike,
 //! nvdec.rs), plus a 64-bit completion timeline on an RM semaphore surface so

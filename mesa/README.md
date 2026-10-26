@@ -9,9 +9,7 @@ address binding, channels, execution and synchronization through `nv_rm.h`.
 The source pin is **ddaf85e353442d9d7f192fdcf1823e652e3f2ee3** (tag mesa-26.2.5,
 2026-10-14; moved from 0b97dcdd = mesa-25.2.0 on 2026-10-16). The isolated
 `build/mesa-rm-source` worktree leaves the compiler-only worktree and original
-Mesa checkout unchanged. This is separate from the earlier narrow experimental
-Vulkan frontend: Rust builds use `--no-default-features` so it does not export
-the prototype Vulkan entrypoints into the full NVK process.
+Mesa checkout unchanged.
 
 ## Rebuild
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! V0 NVDEC spike driver: decode an HEVC fixture through the native RM
 //! backend and compare against a software NV12 reference.
 //! usage: nv-nvdec-probe <fixture-dir> <out-dir> [max-frames] [reference.nv12]

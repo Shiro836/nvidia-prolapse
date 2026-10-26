@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Codec-agnostic decode session: DPB surface pool, 4-slot descriptor /
 //! bitstream ring, display queue, picture refcounts, and copy_out on the copy
 //! engine with a sync_file release fence.
@@ -182,25 +183,7 @@ impl CopyEngine {
     }
 }
 
-/// Admission of one decode unit (`NV_VIDEO_E_AGAIN` otherwise), decided before
-/// the codec consumes any state. `need`: pictures the unit decodes; `free`:
-/// surfaces neither referenced nor held now; `held`: distinct surfaces of
-/// unreleased pictures; `total`: pool size. Either every picture can take a
-/// surface that is free already, or (codecs bounding their references to
-/// `max_referenced` distinct surfaces between pictures) the references, the
-/// picture in flight and every held picture fit the pool at once, so each
-/// picture of the unit finds a surface whatever the unit refreshes. A caller
-/// that holds nothing is therefore never refused when
-/// `max_referenced + 1 <= total`.
-pub(crate) fn unit_admitted(
-    need: usize,
-    free: usize,
-    max_referenced: Option<usize>,
-    held: usize,
-    total: usize,
-) -> bool {
-    need <= free || max_referenced.is_some_and(|n| n + 1 + held <= total)
-}
+pub(crate) use nv_video::unit_admitted;
 
 /// Why a session's requested bit depth cannot be built, or `None` when the caps mask covers
 /// it. H.264 has no 10/12-bit path in this library: the codec is constructed without a bit
@@ -1249,7 +1232,7 @@ mod tests {
     #[test]
     fn parameter_set_unit_produces_no_picture() {
         use super::super::{CODEC_HEVC, bits, pretend};
-        let stream: &[u8] = include_bytes!("testdata/hevc_160x144.hevc");
+        let stream: &[u8] = include_bytes!("../../../video/src/testdata/hevc_160x144.hevc");
         let aus = bits::access_units(stream, true);
         let mut ps = Vec::new();
         for n in bits::split_annexb(aus[0]) {

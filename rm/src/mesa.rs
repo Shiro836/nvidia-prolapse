@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Mesa nvkmd -> Rust RM bridge, executed entirely on the calling threads.
 //! The C ABI is documented in mesa/nv_rm.h.
 //!

@@ -4,6 +4,7 @@ C ABI: `nv_video.h` (v2: every v1 entry point and struct layout unchanged; v2 ad
 `nv_video_picture_hdr` with `struct NvVideoHdrMetadata`, makes `nv_video_decode` return
 the number of displayable pictures the unit produced (success is `rc >= 0`), and adds
 `NV_VIDEO_E_RESIZE` + `nv_video_required_size` for adaptive streams). Implementation: `src/video/`
+(channel, session, C ABI) over the syscall-free codec layer in the `nv-video` crate (`../../video/src/`)
 (exported from `libnv_bionic_native` for GNU and bionic, 64- and 32-bit). Host test:
 `target/release/nv-video-test <in.ivf> <ref.nv12|-> [max_w max_h]` (every frame through
 decode → next_picture → copy_out into a LINEAR NV12 dma-buf → release fence → readback).
@@ -15,7 +16,8 @@ re-passes the previous release fence as the acquire fence and times the copy_out
 
 | File | Role |
 |---|---|
-| `mod.rs` | errors (`VideoError` ↔ `NV_VIDEO_E_*`), device open by PCI identity (`NV_VIDEO_PCI`), caps per NVDEC class, the `CodecDecoder` trait |
+| `mod.rs` | device open by PCI identity (`NV_VIDEO_PCI`), re-exports of the codec layer |
+| `nv-video` `lib.rs` | errors (`VideoError` ↔ `NV_VIDEO_E_*`), caps per NVDEC class, the `CodecDecoder` trait |
 | `channel.rs` | NVDEC channel (TSG on NVDEC0, SYNC subcontext, host GPFIFO, decoder object) + 64-bit completion timeline on an RM semaphore surface; CPU waits are sync_file + poll, never spins |
 | `session.rs` | DPB surface pool (VRAM, engine layout, sized from the session max so the pitch never changes), 4-slot descriptor/bitstream ring (stock growth `(len+0x8ff)&~0xff`), display queue, picture refcounts (`E_AGAIN`), `copy_out` on a backend copy `Queue` |
 | `vp9.rs` | VP9 profile 0 (8-bit) and profile 2 (10-bit) codec |
