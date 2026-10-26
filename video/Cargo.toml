@@ -3,7 +3,9 @@ name = "nv-video"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# nvdec_vp9_tables.rs is generated from libvpx (BSD-3-Clause, licenses/libvpx-BSD-3-Clause.txt);
+# nvdec_hevc.rs ports tinygrad (MIT, licenses/tinygrad-MIT.txt).
+license = "MIT AND BSD-3-Clause"
 publish.workspace = true
 description = "Syscall-free NVDEC codec layer: bitstream parsers, descriptor and method builders"
 
