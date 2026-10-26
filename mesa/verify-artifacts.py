@@ -5,12 +5,17 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+# The pin lives in one place, mesa/build.py's `PIN = "<sha>"` line (build.sh reads it the same way).
+pins = re.findall(r'^PIN = "([0-9a-f]{40})"', (HERE / "build.py").read_text(), re.MULTILINE)
+if len(pins) != 1:
+    raise SystemExit(f"mesa/build.py: expected exactly one PIN = \"<40-hex sha>\" line, found {len(pins)}")
 report = {"time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-          "mesa_pin": "ddaf85e353442d9d7f192fdcf1823e652e3f2ee3",
+          "mesa_pin": pins[0],
           "note": "Artifact and instance lifecycle checks only; GPU gates are separate", "checks": []}
 for target in ("host", "android", "android32"):
     build = ROOT / f"build/nvk-{target}"
