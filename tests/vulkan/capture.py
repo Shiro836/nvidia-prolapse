@@ -156,19 +156,16 @@ def normalise_capture(path):
     them back, so their position depends on GPU timing). Masked: CPU and GPU timestamps (START cpu/gpu ns,
     SUBMIT/MARK/END cpu ns), the pid in START, context ids (the address of the context object in the
     driver's heap), renumbered C0, C1, ... by first appearance, the id of a fence-export MARK (kinds 2 and
-    3, sync-file and opaque fd: the sync object id nvkmd passes to nv_rm_sync_export_fd, a heap address),
-    renumbered F0, F1, ... the same way, and the unwritten NVK sample-location bytes (SAMPLE_LOCATIONS).
+    3, sync-file and opaque fd: the sync object id nvkmd passes to nv_rm_sync_export_fd, a heap address
+    that the allocator reuses differently from build to build, so it is masked entirely), and the
+    unwritten NVK sample-location bytes (SAMPLE_LOCATIONS).
     Kept: every other pushbuffer byte, push GPU address, size and flags, submission tokens, wait/signal
     counts, context engines and class, fence-export kinds, pool addresses and contents.
     """
     contexts = {}
-    exports = {}
 
     def ctx(value):
         return contexts.setdefault(value, f"C{len(contexts)}")
-
-    def export(value):
-        return exports.setdefault(value, f"F{len(exports)}")
 
     out = []
     for tag, p in records(path):
@@ -189,7 +186,7 @@ def normalise_capture(path):
             pass
         elif tag == 4:
             _, c, token, kind, _ = struct.unpack_from("<QQQII", p)
-            out.append(f"MARK {ctx(c)} token={export(token) if kind in (2, 3) else token} kind={kind}")
+            out.append(f"MARK {ctx(c)} token={"*" if kind in (2, 3) else token} kind={kind}")
         elif tag == 5:
             out.append(f"END reason={struct.unpack_from('<QI', p)[1]}")
         elif tag == 6:
