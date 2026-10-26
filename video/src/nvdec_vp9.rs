@@ -1056,13 +1056,17 @@ impl Vp9State {
 }
 
 fn get_prob(num: u32, den: u32) -> u8 {
-    // num <= den (callers pass ct[0] of den = ct[0] + ct[1]), so p <= 256 before the clamp.
+    // num <= den unless den wrapped (see merge_probs), so p <= 256 then. A wrapped den (counts
+    // no valid stream produces) gives a larger p, clamped to 255 here; libvpx's get_prob
+    // (vpx_dsp/prob.h:48) truncates such a quotient to int before its branchless clip.
     let p = (u64::from(num) * 256 + (u64::from(den) >> 1)) / u64::from(den);
     u8::try_from(p.clamp(1, 255)).expect("clamped to 1..=255")
 }
 
 fn merge_probs(pre: u8, ct: [u32; 2], count_sat: u32, max_update: u32) -> u8 {
-    let den = ct[0] + ct[1];
+    // The counts are what the decoder wrote to GPU memory. libvpx sums them as unsigned int,
+    // which wraps (vpx_dsp/prob.h:59 get_binary_prob, :73 merge_probs; libvpx 23fbf91f).
+    let den = ct[0].wrapping_add(ct[1]);
     let prob = if den == 0 { 128 } else { get_prob(ct[0], den) };
     let count = den.min(count_sat);
     let factor = max_update * count / count_sat;
@@ -1075,7 +1079,8 @@ const COUNT_TO_UPDATE_FACTOR: [u32; 21] = [
 ];
 
 fn mode_mv_merge(pre: u8, ct: [u32; 2]) -> u8 {
-    let den = ct[0] + ct[1];
+    // GPU-written counts, unsigned sum as in libvpx (vpx_dsp/prob.h:86 mode_mv_merge_probs).
+    let den = ct[0].wrapping_add(ct[1]);
     if den == 0 {
         return pre;
     }
@@ -1100,7 +1105,9 @@ fn tree_merge(tree: &[i8], pre: &[u8], counts: &[u32], out: &mut [u8]) {
         let l = side(tree[i], out);
         let r = side(tree[i + 1], out);
         out[i >> 1] = mode_mv_merge(pre[i >> 1], [l, r]);
-        l + r
+        // libvpx returns `left_count + right_count` as unsigned int (vpx_dsp/prob.c:41
+        // tree_merge_probs_impl).
+        l.wrapping_add(r)
     }
     walk(0, tree, pre, counts, out);
 }
@@ -1316,6 +1323,20 @@ mod tests {
             inv_remap_prob(0, 250),
             255 - u8::try_from(inv_recenter_nonneg(7, 5)).unwrap()
         );
+    }
+
+    #[test]
+    fn merge_sums_of_gpu_counts_wrap_like_libvpx() {
+        // den = u32::MAX + 2 wraps to 1 (unsigned int in libvpx); this get_prob clamps to 255.
+        let factor = 112 / 24;
+        let want = (100 * (256 - factor) + 255 * factor + 128) >> 8;
+        assert_eq!(u32::from(merge_probs(100, [u32::MAX, 2], 24, 112)), want);
+        // den wraps to 0: no update.
+        assert_eq!(merge_probs(100, [u32::MAX, 1], 24, 112), 100);
+        assert_eq!(mode_mv_merge(77, [u32::MAX, 1]), 77);
+        let mut out = [0u8; 1];
+        tree_merge(&[-0, -1], &[90], &[u32::MAX, 1], &mut out);
+        assert_eq!(out[0], 90);
     }
 
     #[test]
