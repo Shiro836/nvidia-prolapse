@@ -235,14 +235,14 @@ pub fn decoder(data: &[u8]) {
                 layout,
             };
             picture_index = picture_index.wrapping_add(1);
-            let mut desc = vec![0u8; 0x5000];
-            if dec.build(&job, &ctx, &mut desc).is_err() {
+            let mut descriptor = vec![0u8; 0x5000];
+            if dec.build(&job, &ctx, &mut descriptor).is_err() {
                 break;
             }
             let readback = job
                 .readback
                 .clone()
-                .map(|r| desc.get(r).map(<[u8]>::to_vec));
+                .map(|r| descriptor.get(r).map(<[u8]>::to_vec));
             let readback = match readback {
                 Some(Some(bytes)) => Some(bytes),
                 Some(None) => break,
