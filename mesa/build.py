@@ -250,6 +250,11 @@ NVK_PATCHES = (
     # driver does on its Turing and Volta compute queues), and the
     # compute-only family is offered from Volta on.
     "nvk-compute-queue-no-mme.patch",
+    # vkCmdCopyMemoryIndirectKHR on a queue without a copy engine (the
+    # compute-only family): one copy kernel per command that reads the
+    # command and moves its bytes, as the proprietary driver records it,
+    # instead of copy-engine methods the channel has no object for.
+    "nvk-compute-queue-copy-memory-indirect.patch",
 )
 
 NVK_PATCH_LIST = [HERE / name for name in NVK_PATCHES]
