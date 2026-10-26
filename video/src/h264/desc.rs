@@ -118,6 +118,9 @@ fn put16(d: &mut [u8], o: usize, v: u16) {
 }
 
 /// Builds setup (0x200) + scaling matrices (0xe0) = 0x2e0 bytes.
+///
+/// # Panics
+/// Never for a parsed picture: `frame_num < MaxFrameNum <= 2^16`.
 pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
     let (sps, pps) = (inp.sps, inp.pps);
     let mut d = vec![0u8; SETUP_SIZE + SCALING_SIZE];

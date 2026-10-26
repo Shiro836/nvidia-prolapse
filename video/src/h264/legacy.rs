@@ -52,6 +52,9 @@ fn put32(d: &mut [u8], o: usize, v: u32) {
 
 /// Builds the 0x300-byte setup + the slice-offset table at +0x300 (one u32 per slice: the
 /// offset of its start code in the bitstream).
+///
+/// # Panics
+/// Never: there are fewer slices than bitstream bytes, whose count fits u32.
 pub fn build(
     inp: &DescInput,
     ep: &EngineParams,

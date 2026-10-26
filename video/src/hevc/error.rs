@@ -28,7 +28,7 @@ pub enum HevcError {
         /// `pps_seq_parameter_set_id`.
         sps: u32,
     },
-    /// CtbLog2SizeY outside 4..=6 (7.4.3.2.1).
+    /// `CtbLog2SizeY` outside 4..=6 (7.4.3.2.1).
     #[error("CtbLog2SizeY {0}")]
     CtbSize(u32),
     /// A reference picture of the RPS that the DPB does not hold (8.3.2).
@@ -53,15 +53,15 @@ pub enum HevcError {
     /// A profile other than Main, Main 10, Main Still Picture.
     #[error("HEVC profile_idc {0} (only Main, Main 10, Main Still Picture)")]
     Profile(u32),
-    /// chroma_format_idc other than 1 (4:2:0).
+    /// `chroma_format_idc` other than 1 (4:2:0).
     #[error("HEVC chroma_format_idc {0} (only 4:2:0)")]
     ChromaFormat(u32),
     /// Luma/chroma bit depths other than 8/8 and 10/10.
     #[error("HEVC bit depth {luma}/{chroma} (8/8 or 10/10)")]
     BitDepth {
-        /// BitDepthY.
+        /// `BitDepthY`.
         luma: u32,
-        /// BitDepthC.
+        /// `BitDepthC`.
         chroma: u32,
     },
     /// A reserved VCL NAL unit type (Table 7-1).
@@ -72,7 +72,7 @@ pub enum HevcError {
         "HEVC {picture}-bit picture in a {session}-bit session (create the session with the stream's bit depth)"
     )]
     SessionBitDepth {
-        /// The picture's BitDepthY.
+        /// The picture's `BitDepthY`.
         picture: u32,
         /// The session's.
         session: u32,

@@ -122,6 +122,12 @@ impl Bits {
 }
 
 /// Builds the setup buffer ([`SETUP_SIZE`] bytes).
+///
+/// # Errors
+/// Unsupported coding tools ([`crate::hevc::HevcError`]) and fields the picture does not fit.
+///
+/// # Panics
+/// Never: `NumPocTotalCurr.min(8)` fits u8.
 pub fn build(
     sps: &Sps,
     pps: &Pps,

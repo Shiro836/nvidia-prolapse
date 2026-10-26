@@ -146,7 +146,7 @@ impl From<nv_rm_core::Error> for VideoError {
 }
 
 /// `Result` with the crate's [`VideoError`].
-pub type VResult<T> = std::result::Result<T, VideoError>;
+pub type VResult<T> = Result<T, VideoError>;
 
 /// A value derived from the bitstream (or from the session geometry) that does not fit the
 /// integer type of the field it is stored in.
@@ -179,7 +179,7 @@ where
 /// session of the new size decodes the stream from there on, so the caller re-creates
 /// the session ([`VideoError::Resize`]) the way `FFmpeg` re-creates its hardware decoder
 /// when the coded size changes (libavcodec/decode.c:1227 `ff_hwaccel_uninit` in
-/// `ff_get_format`, reached from h264_slice.c:920, hevc/hevcdec.c:725, vp9.c:254,
+/// `ff_get_format`, reached from `h264_slice.c:920`, `hevc/hevcdec.c:725`, `vp9.c:254`,
 /// av1dec.c:664). Anywhere else the references live in this session: refused.
 pub fn too_large(
     codec: &str,

@@ -478,15 +478,15 @@ fn decode_subexp(r: &mut BitReader, num_syms: i32) -> Result<i32> {
         let a = 1i32 << b2;
         if num_syms <= mk + 3 * a {
             // num_syms > mk here: the previous iteration had num_syms > mk + 3a.
-            let v = r.ns(fit(num_syms - mk, "subexp numSyms - mk")?)?;
-            return Ok(fit::<i32, _>(v, "subexp ns")? + mk);
+            let sym = r.ns(fit(num_syms - mk, "subexp numSyms - mk")?)?;
+            return Ok(fit::<i32, _>(sym, "subexp ns")? + mk);
         }
         if r.flag()? {
             i += 1;
             mk += a;
         } else {
-            let v = r.f(fit(b2, "subexp b2")?)?;
-            return Ok(fit::<i32, _>(v, "subexp_bits")? + mk);
+            let bits = r.f(fit(b2, "subexp b2")?)?;
+            return Ok(fit::<i32, _>(bits, "subexp_bits")? + mk);
         }
     }
 }

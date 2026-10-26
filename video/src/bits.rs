@@ -121,6 +121,9 @@ impl<'a> BitReader<'a> {
         self.pos
     }
     /// `u(n)` (H.264 7.2 / H.265 7.2 `read_bits(n)`), `n <= 32`.
+    ///
+    /// # Errors
+    /// [`Error::WidthTooLarge`] above 32 bits, [`Error::Truncated`] past the end.
     pub fn u(&mut self, n: u32) -> Result<u32> {
         if n > 32 {
             return Err(Error::WidthTooLarge(n));
@@ -139,9 +142,17 @@ impl<'a> BitReader<'a> {
         }
         Ok(v)
     }
+    /// One bit as a flag.
+    ///
+    /// # Errors
+    /// [`Error::Truncated`] past the end.
     pub fn flag(&mut self) -> Result<bool> {
         Ok(self.u(1)? != 0)
     }
+    /// Skips `n` bits.
+    ///
+    /// # Errors
+    /// [`Error::SkipPastEnd`] past the end.
     pub fn skip(&mut self, n: usize) -> Result<()> {
         let end = self.pos.checked_add(n);
         if end.is_none_or(|end| end.div_ceil(8) > self.data.len()) {
@@ -154,6 +165,9 @@ impl<'a> BitReader<'a> {
         Ok(())
     }
     /// `ue(v)` (H.264 9.1, H.265 9.2): `2^zeros - 1 + read_bits(zeros)`, at most `2^32 - 2`.
+    ///
+    /// # Errors
+    /// [`Error::ExpGolombTooLong`] or [`Error::Truncated`].
     pub fn ue(&mut self) -> Result<u32> {
         let mut zeros = 0;
         while !self.flag()? {
@@ -170,6 +184,9 @@ impl<'a> BitReader<'a> {
     }
     /// `se(v)` (H.264 9.1.1, H.265 9.2.2): k -> (-1)^(k+1) * Ceil(k / 2), within `i32` for every
     /// k of `ue(v)`.
+    ///
+    /// # Errors
+    /// As [`Self::ue`].
     pub fn se(&mut self) -> Result<i32> {
         let k = self.ue()?;
         let magnitude = k.div_ceil(2);
@@ -178,6 +195,9 @@ impl<'a> BitReader<'a> {
         Ok(if k & 1 == 1 { magnitude } else { -magnitude })
     }
     /// `ue(v)` checked against an inclusive maximum (named for the error).
+    ///
+    /// # Errors
+    /// [`Error::AboveMax`], or as [`Self::ue`].
     pub fn ue_max(&mut self, max: u32, field: &'static str) -> Result<u32> {
         let value = self.ue()?;
         if value > max {
@@ -185,6 +205,10 @@ impl<'a> BitReader<'a> {
         }
         Ok(value)
     }
+    /// `se(v)` checked against an inclusive range (named for the error).
+    ///
+    /// # Errors
+    /// [`Error::OutsideRange`], or as [`Self::ue`].
     pub fn se_range(&mut self, min: i32, max: i32, field: &'static str) -> Result<i32> {
         let value = self.se()?;
         if value < min || value > max {

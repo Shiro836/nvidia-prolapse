@@ -60,6 +60,9 @@ fn grain_i16(v: i32) -> i16 {
 }
 
 /// Fill `out` (`FILM_GRAIN_MEMORY_SIZE` bytes) for one picture.
+///
+/// # Panics
+/// Never: grain samples are bounded by the clamp (see `grain_i16`).
 pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
     out[..FILM_GRAIN_MEMORY_SIZE].fill(0);
     let bd = u32::from(seq.bit_depth);

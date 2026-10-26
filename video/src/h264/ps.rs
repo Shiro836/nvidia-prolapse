@@ -271,6 +271,31 @@ fn vui(r: &mut BitReader) -> VResult<Vui> {
     Ok(v)
 }
 
+/// `frame_crop_{left,right,top,bottom}_offset` times CropUnitX/Y (7.4.2.1.1, eq. 7-19..7-22),
+/// checked: offsets are ue(v) up to 2^32 - 2, so the products and sums are checked before the
+/// size test.
+fn frame_crop(
+    [l, rr, t, b]: [u32; 4],
+    (cx, cy): (u32, u32),
+    width: u32,
+    height: u32,
+) -> VResult<(u32, u32, u32, u32)> {
+    let crop = (
+        l.checked_mul(cx),
+        rr.checked_mul(cx),
+        t.checked_mul(cy),
+        b.checked_mul(cy),
+    );
+    let (Some(cl), Some(cr), Some(ct), Some(cb)) = crop else {
+        return Err(H264Error::CropTooLarge.into());
+    };
+    let fits = |a: u32, b: u32, size: u32| a.checked_add(b).is_some_and(|sum| sum < size);
+    if !fits(cl, cr, width) || !fits(ct, cb, height) {
+        return Err(H264Error::CropTooLarge.into());
+    }
+    Ok((cl, cr, ct, cb))
+}
+
 pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
     let mut r = BitReader::new(rbsp);
     r.skip(8)?; // NAL header
@@ -360,23 +385,8 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
             (2, _) => (2, 2 - u32::from(s.frame_mbs_only)),
             _ => (1, 2 - u32::from(s.frame_mbs_only)),
         };
-        let (l, rr, t, b) = (r.ue()?, r.ue()?, r.ue()?, r.ue()?);
-        // CropUnitX/Y * frame_crop_*_offset (7.4.2.1.1, eq. 7-19..7-22); offsets are ue(v) up to
-        // 2^32 - 2, so the products and sums are checked before the size test.
-        let crop = (
-            l.checked_mul(cx),
-            rr.checked_mul(cx),
-            t.checked_mul(cy),
-            b.checked_mul(cy),
-        );
-        let (Some(cl), Some(cr), Some(ct), Some(cb)) = crop else {
-            return Err(H264Error::CropTooLarge.into());
-        };
-        s.crop = (cl, cr, ct, cb);
-        let fits = |a: u32, b: u32, size: u32| a.checked_add(b).is_some_and(|sum| sum < size);
-        if !fits(cl, cr, s.width()) || !fits(ct, cb, s.height()) {
-            return Err(H264Error::CropTooLarge.into());
-        }
+        let offsets = [r.ue()?, r.ue()?, r.ue()?, r.ue()?];
+        s.crop = frame_crop(offsets, (cx, cy), s.width(), s.height())?;
     }
     if r.flag()? {
         s.vui = vui(&mut r)?;

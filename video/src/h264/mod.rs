@@ -87,16 +87,16 @@ struct RefPic {
     poc: [i32; 2],
     non_existing: bool,
 }
-/// A syntax value of at most 2^16 as `i32`: frame_num and pic_order_cnt_lsb are read with
-/// u(log2_max_frame_num) / u(log2_max_pic_order_cnt_lsb) bits and MaxFrameNum is
-/// 2^log2_max_frame_num, with both log2 values at most 16 (7.4.2.1.1, enforced by `parse_sps`).
+/// A syntax value of at most 2^16 as `i32`: `frame_num` and `pic_order_cnt_lsb` are read with
+/// `u(log2_max_frame_num)` / `u(log2_max_pic_order_cnt_lsb)` bits and `MaxFrameNum` is
+/// `2^log2_max_frame_num`, with both log2 values at most 16 (7.4.2.1.1, enforced by `parse_sps`).
 fn syntax_i32(v: u32) -> i32 {
     i32::try_from(v).expect("frame_num, pic_order_cnt_lsb and MaxFrameNum are <= 2^16")
 }
 
-/// picNumX = CurrPicNum - (difference_of_pic_nums_minus1 + 1) (8.2.5.4.1, eq. 8-39), or `None`
-/// when it is outside `i32`: no picture has such a PicNum (PicNums lie in
-/// -MaxFrameNum..MaxFrameNum, 8.2.4.1), and the ue(v) difference goes up to 2^32 - 2.
+/// `picNumX = CurrPicNum - (difference_of_pic_nums_minus1 + 1)` (8.2.5.4.1, eq. 8-39), or `None`
+/// when it is outside `i32`: no picture has such a `PicNum` (they lie in
+/// `-MaxFrameNum..MaxFrameNum`, 8.2.4.1), and the ue(v) difference goes up to 2^32 - 2.
 fn pic_num_x(cur_pic_num: i32, difference_of_pic_nums_minus1: u32) -> Option<i32> {
     i32::try_from(i64::from(cur_pic_num) - i64::from(difference_of_pic_nums_minus1) - 1).ok()
 }

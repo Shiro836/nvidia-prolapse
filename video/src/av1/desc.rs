@@ -242,6 +242,9 @@ fn gptimer(w: u32, h: u32) -> u64 {
     (u64::from((w.div_ceil(16) * h.div_ceil(16)).max(8100)) * 10_000).min(u64::from(u32::MAX))
 }
 
+///
+/// # Panics
+/// Never for a parsed header: relative distances are within -128..=127.
 pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
     let (s, h) = (i.seq, i.hdr);
     let mut b = [0u8; PIC_S_SIZE];
@@ -567,6 +570,9 @@ fn put_frame_info(p: &mut [u8], base: usize, w: u32, h: u32, stride: u64) {
 }
 
 /// `AV1TileInfo_OLD` entries: width/height in superblocks, then [start, end) of the tile data.
+///
+/// # Errors
+/// A tile wider or higher than its byte field ([`crate::OutOfRange`]).
 pub fn build_tile_info(
     h: &FrameHeader,
     tiles: &[TileRange],
@@ -643,6 +649,9 @@ fn round2signed(x: i64, n: i64) -> i64 {
 }
 
 /// Spec 7.11.3.6 setup_shear: returns (alpha, beta, gamma, delta) or None when the model is not valid.
+///
+/// # Panics
+/// Never: the validity test bounds the parameters below 2^14.
 pub fn setup_shear(m: &[i32; 6]) -> Option<[i16; 4]> {
     let m: [i64; 6] = m.map(i64::from);
     if m[2] <= 0 {

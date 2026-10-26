@@ -432,14 +432,14 @@ fn stock_new_h264_setup_frame_num_and_poc_wrap() {
     );
 }
 
-/// MMCO 1/3 with difference_of_pic_nums_minus1 = 2^31 - 1 (any ue(v) value up to 2^32 - 2 is
-/// syntactically valid; 7.4.3.3 bounds picNumX semantically): computing
-/// CurrPicNum - (difference_of_pic_nums_minus1 + 1) in i32 overflowed and panicked. It is now the
-/// "missing PicNum" bitstream error every other out-of-range picNumX gets.
+/// MMCO 1/3 with `difference_of_pic_nums_minus1` = 2^31 - 1 (any ue(v) value up to 2^32 - 2 is
+/// syntactically valid; 7.4.3.3 bounds `picNumX` semantically): computing
+/// `CurrPicNum - (difference_of_pic_nums_minus1 + 1)` in i32 overflowed and panicked. It is now
+/// the "missing `PicNum`" bitstream error every other out-of-range `picNumX` gets.
 #[test]
 fn mmco_difference_beyond_i32_is_a_bitstream_error() {
     let stream = include_bytes!("../testdata/h264_160x144.h264");
-    let aus = crate::bits::access_units(stream, false);
+    let aus = bits::access_units(stream, false);
     let mut dec = Decoder::new(EngineParams::for_class(0xcfb0, None));
     dec.decode_au(aus[0], 0).expect("IDR decodes");
     let slice = split_annexb(aus[1])

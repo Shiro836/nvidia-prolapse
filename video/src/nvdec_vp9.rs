@@ -58,7 +58,7 @@ pub enum Vp9Error {
     /// `frame_sync_code` is not 0x49 0x83 0x42 (6.2.1).
     #[error("VP9: frame sync code")]
     SyncCode,
-    /// `color_space` CS_RGB (only in profiles 1 and 3).
+    /// `color_space` `CS_RGB` (only in profiles 1 and 3).
     #[error("VP9: RGB colour space unsupported in profile {0}")]
     RgbColourSpace(u32),
     /// An inter frame references a slot that holds no frame.
@@ -236,7 +236,7 @@ impl BitReader<'_> {
         let v = crate::fit::<i32, _>(self.f(n)?, "su(n) magnitude")?;
         Ok(if self.bit()? != 0 { -v } else { v })
     }
-    /// su(n) for n <= 7 (delta_q 4 bits, loop filter deltas 6 bits, 6.2.9-6.2.10): fits `i8`.
+    /// su(n) for n <= 7 (`delta_q` 4 bits, loop filter deltas 6 bits, 6.2.9-6.2.10): fits `i8`.
     fn s_i8(&mut self, n: u32) -> Result<i8> {
         Ok(crate::fit(self.s(n)?, "su(n)")?)
     }
@@ -1271,6 +1271,10 @@ fn adapt_mode(fc: &mut FrameContext, pre: &FrameContext, c: &Vp9EntropyCounts, h
 
 /// Tile (width, height) in SB64 units, raster order, as the engine reads them
 /// at descriptor offset 0x200 (u16 pairs; layout observed in the stock trace).
+///
+/// # Panics
+/// Never for a parsed header: `frame_width/height_minus_1` are f(16), so a tile has at most
+/// 1024 SB64 per side.
 pub fn tile_sizes(h: &FrameHeader) -> Vec<(u16, u16)> {
     let (sb_cols, sb_rows) = (h.width.div_ceil(64), h.height.div_ceil(64));
     let start = |i: u32, n: u32, log2: u32| (i * n) >> log2;

@@ -27,13 +27,13 @@ pub enum Av1Error {
         "AV1 bit depth {bit_depth} / mono {mono_chrome} / subsampling {subsampling_x}{subsampling_y} in a {session_bit_depth}-bit 4:2:0 session (8- or 10-bit 4:2:0, session created with the stream's bit depth)"
     )]
     SessionFormat {
-        /// BitDepth.
+        /// `BitDepth`.
         bit_depth: u8,
-        /// mono_chrome.
+        /// `mono_chrome`.
         mono_chrome: bool,
-        /// subsampling_x.
+        /// `subsampling_x`.
         subsampling_x: u8,
-        /// subsampling_y.
+        /// `subsampling_y`.
         subsampling_y: u8,
         /// The session's bit depth.
         session_bit_depth: u32,
@@ -83,6 +83,9 @@ impl<'a> BitReader<'a> {
         i32::try_from(value).map_err(|_overflow| Av1Error::Invalid("su(n) wider than 32 bits"))
     }
     /// su(n) for n <= 8, whose range -2^(n-1)..2^(n-1) fits `i8`.
+    ///
+    /// # Errors
+    /// `n` above 8, or the read runs past the data.
     pub fn su_i8(&mut self, n: u32) -> Result<i8> {
         if n > 8 {
             return Err(Av1Error::Invalid("su(n) wider than 8 bits read as i8"));

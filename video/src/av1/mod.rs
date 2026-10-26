@@ -391,6 +391,9 @@ impl PictureJob {
     /// Build the descriptor block (pic_s, tile info, global motion, film grain) into `block`
     /// (`desc::DESC_BLOCK_SIZE` bytes). `pitch` = luma pitch of the decode surface in bytes;
     /// `blackwell_b` = the class gate of the stat word and the +0x244 word (`desc::PicInputs`).
+    ///
+    /// # Errors
+    /// A descriptor field the picture does not fit ([`crate::OutOfRange`]).
     pub fn build_descriptor(
         &self,
         pitch: u32,

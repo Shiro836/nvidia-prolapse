@@ -35,14 +35,14 @@ pub enum H264Error {
     /// The sliding window (8.2.5.3) found no short-term reference to drop.
     #[error("sliding window with no short-term reference to remove")]
     SlidingWindowEmpty,
-    /// A frame_num gap without `gaps_in_frame_num_value_allowed_flag` (7.4.3).
+    /// A `frame_num` gap without `gaps_in_frame_num_value_allowed_flag` (7.4.3).
     #[error(
         "frame_num gap {prev} -> {frame_num} without gaps_in_frame_num_value_allowed_flag (lost pictures)"
     )]
     FrameNumGap {
-        /// PrevRefFrameNum.
+        /// `PrevRefFrameNum`.
         prev: u32,
-        /// The slice's frame_num.
+        /// The slice's `frame_num`.
         frame_num: u32,
     },
     /// The first picture is not an IDR picture.
@@ -56,7 +56,7 @@ pub enum H264Error {
     MissingPicNum {
         /// The operation (1 or 3).
         mmco: u8,
-        /// CurrPicNum.
+        /// `CurrPicNum`.
         cur_pic_num: i32,
         /// `difference_of_pic_nums_minus1`.
         difference_minus1: u32,
@@ -64,7 +64,7 @@ pub enum H264Error {
     /// MMCO 2 on a long-term picture number no reference has (8.2.5.4.2).
     #[error("MMCO2 on missing LongTermPicNum {0}")]
     MissingLongTermPicNum(u32),
-    /// MMCO 3 or 6 with a LongTermFrameIdx above MaxLongTermFrameIdx (8.2.5.4.3, 8.2.5.4.6).
+    /// MMCO 3 or 6 with a `LongTermFrameIdx` above `MaxLongTermFrameIdx` (8.2.5.4.3, 8.2.5.4.6).
     #[error("MMCO{mmco} LongTermFrameIdx {idx} above MaxLongTermFrameIdx")]
     LongTermIdxAboveMax {
         /// The operation (3 or 6).
@@ -93,7 +93,7 @@ pub enum H264Error {
         /// Height in pixels.
         height: u32,
     },
-    /// chroma_format_idc other than 1 (4:2:0).
+    /// `chroma_format_idc` other than 1 (4:2:0).
     #[error(
         "H.264 chroma_format_idc {0} (only 4:2:0: the session's surfaces and copy-out are NV12/P010 \
          4:2:0, so 4:2:2/4:4:4 needs a new surface layout and copy path)"
