@@ -2,8 +2,9 @@
 //! H.264 slice header (7.3.3) up to and including dec_ref_pic_marking(). The engine parses the
 //! slice header again itself (NEW_H264 takes the Annex-B slices verbatim); we need it for POC,
 //! frame_num, reference marking and the picture-level flags.
-use super::super::{VResult, bits::BitReader, bitstream, unsupported};
+use super::super::{VResult, bits::BitReader};
 use super::ps::{Pps, Sps};
+use crate::h264::H264Error;
 use nv_rm_core::conv::{low_u8, usize_from_u32};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +68,7 @@ fn skip_ref_pic_list_modification(r: &mut BitReader) -> VResult<()> {
                     r.ue()?;
                 }
                 3 => break,
-                v => return bitstream(format!("modification_of_pic_nums_idc = {v}")),
+                v => return Err(H264Error::ModificationIdc(v).into()),
             }
         }
     }
@@ -119,12 +120,13 @@ pub fn parse_slice_header(
     ][usize_from_u32(st % 5)];
     let pps_id = r.ue_max(255, "pic_parameter_set_id")?;
     let Some((sps, pps)) = sps_of(pps_id) else {
-        return bitstream(format!(
-            "slice references missing PPS {pps_id} (or its SPS)"
-        ));
+        return Err(H264Error::MissingPps(pps_id).into());
     };
     if sps.separate_colour_plane {
-        return unsupported("H.264 separate_colour_plane_flag (4:4:4 independent planes)");
+        return Err(H264Error::Unsupported(
+            "H.264 separate_colour_plane_flag (4:4:4 independent planes)",
+        )
+        .into());
     }
     let frame_num = r.u(sps.log2_max_frame_num_minus4 + 4)?;
     let (mut field_pic, mut bottom_field) = (false, false);
@@ -186,7 +188,7 @@ pub fn parse_slice_header(
         }
     }
     if nal_unit_type == 20 || nal_unit_type == 21 {
-        return unsupported("H.264 MVC/SVC slice extension");
+        return Err(H264Error::Unsupported("H.264 MVC/SVC slice extension").into());
     }
     if slice_type != SliceType::I && slice_type != SliceType::Si {
         skip_ref_pic_list_modification(&mut r)?;
@@ -223,11 +225,11 @@ pub fn parse_slice_header(
                     4 => Mmco::MaxLongTermIdx(r.ue_max(16, "max_long_term_frame_idx_plus1")?),
                     5 => Mmco::Reset,
                     6 => Mmco::CurrentToLong(r.ue()?),
-                    v => return bitstream(format!("memory_management_control_operation = {v}")),
+                    v => return Err(H264Error::MmcoValue(v).into()),
                 };
                 ops.push(op);
                 if ops.len() > 66 {
-                    return bitstream("too many memory_management_control_operations");
+                    return Err(H264Error::TooManyMmcos.into());
                 }
             }
             h.mmco = Some(ops);

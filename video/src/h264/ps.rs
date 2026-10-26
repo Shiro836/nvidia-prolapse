@@ -4,8 +4,9 @@
 //! engine consumes (CUVID `WeightScale4x4/8x8` are raster: FFmpeg h264_ps.c stores
 //! `factors[zigzag[i]]`; the stock NEW_H264 builder at ELF 0x3c460 copies them verbatim to
 //! setup+0x200).
-use super::super::{VResult, bits::BitReader, bitstream, unsupported};
+use super::super::{VResult, bits::BitReader};
 use crate::fit;
+use crate::h264::H264Error;
 use nv_rm_core::conv::low_u8;
 
 /// 4x4 zig-zag (frame) scan: coded index → raster index (Table 8-13).
@@ -369,12 +370,12 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
             b.checked_mul(cy),
         );
         let (Some(cl), Some(cr), Some(ct), Some(cb)) = crop else {
-            return bitstream("frame cropping larger than the picture");
+            return Err(H264Error::CropTooLarge.into());
         };
         s.crop = (cl, cr, ct, cb);
         let fits = |a: u32, b: u32, size: u32| a.checked_add(b).is_some_and(|sum| sum < size);
         if !fits(cl, cr, s.width()) || !fits(ct, cb, s.height()) {
-            return bitstream("frame cropping larger than the picture");
+            return Err(H264Error::CropTooLarge.into());
         }
     }
     if r.flag()? {
@@ -411,12 +412,19 @@ pub fn parse_pps(rbsp: &[u8], sps_lookup: impl Fn(u32) -> Option<Sps>) -> VResul
     let id = r.ue_max(255, "pic_parameter_set_id")?;
     let sps_id = r.ue_max(31, "seq_parameter_set_id")?;
     let Some(sps) = sps_lookup(sps_id) else {
-        return bitstream(format!("PPS {id} references missing SPS {sps_id}"));
+        return Err(H264Error::MissingSps {
+            pps: id,
+            sps: sps_id,
+        }
+        .into());
     };
     let entropy_coding_mode = r.flag()?;
     let bfpo = r.flag()?;
     if r.ue()? > 0 {
-        return unsupported("H.264 slice groups (FMO, num_slice_groups_minus1 > 0)");
+        return Err(H264Error::Unsupported(
+            "H.264 slice groups (FMO, num_slice_groups_minus1 > 0)",
+        )
+        .into());
     }
     let l0 = r.ue_max(31, "num_ref_idx_l0_default_active_minus1")?;
     let l1 = r.ue_max(31, "num_ref_idx_l1_default_active_minus1")?;

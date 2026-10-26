@@ -315,9 +315,9 @@ fn au(sps: &[u8], pps: &[u8], slice: &[u8]) -> Vec<u8> {
 fn expect_unsupported(data: &[u8], feature: &str) {
     let mut dec = Decoder::new(EngineParams::blackwell(None));
     match dec.begin(data) {
-        Err(crate::VideoError::Unsupported(reason)) => assert!(
-            reason.contains(feature),
-            "refusal reason {reason:?} does not name {feature:?}"
+        Err(e) if e.code() == -2 => assert!(
+            e.message().contains(feature),
+            "refusal reason {e:?} does not name {feature:?}"
         ),
         Err(e) => panic!("expected Unsupported({feature:?}), got {e:?}"),
         Ok(_) => panic!("expected Unsupported({feature:?}), the picture was accepted"),

@@ -25,13 +25,15 @@
 //! data partitioning, redundant pictures, MVC/SVC, pictures larger than 4096×4096.
 pub mod codec;
 pub mod desc;
+mod error;
+pub use error::H264Error;
 pub mod legacy;
 pub mod ps;
 pub mod slice;
 #[cfg(test)]
 mod tests;
 
-use super::{VResult, bits, bitstream, fit, unsupported};
+use super::{VResult, bits, fit};
 use desc::{DescInput, DescRef, EngineParams};
 use ps::{Pps, Sps};
 use slice::{Mmco, SliceHeader, SliceType};
@@ -227,7 +229,7 @@ impl Decoder {
                 self.pps.insert(p.id, p);
                 Ok(true)
             }
-            15 => unsupported("H.264 subset SPS (SVC/MVC)"),
+            15 => Err(H264Error::Unsupported("H.264 subset SPS (SVC/MVC)").into()),
             _ => Ok(false),
         }
     }
@@ -241,8 +243,12 @@ impl Decoder {
             }
             match t {
                 1 | 5 => {}
-                2..=4 => return unsupported("H.264 data partitioning (NAL types 2-4)"),
-                14 | 20 => return unsupported("H.264 MVC/SVC NAL units"),
+                2..=4 => {
+                    return Err(
+                        H264Error::Unsupported("H.264 data partitioning (NAL types 2-4)").into(),
+                    );
+                }
+                14 | 20 => return Err(H264Error::Unsupported("H.264 MVC/SVC NAL units").into()),
                 _ => continue,
             }
             let hdr = slice::parse_slice_header(&bits::unescape(n.nal), |id| {
@@ -250,7 +256,10 @@ impl Decoder {
                 Some((self.sps.get(&p.sps_id)?.clone(), p.clone()))
             })?;
             if hdr.redundant_pic_cnt > 0 {
-                return unsupported("H.264 redundant pictures (redundant_pic_cnt > 0)");
+                return Err(H264Error::Unsupported(
+                    "H.264 redundant pictures (redundant_pic_cnt > 0)",
+                )
+                .into());
             }
             let intra = matches!(hdr.slice_type, SliceType::I | SliceType::Si);
             match &mut pic {
@@ -277,7 +286,10 @@ impl Decoder {
                         || hdr.nal_unit_type != p.hdr.nal_unit_type
                         || hdr.pic_order_cnt_lsb != p.hdr.pic_order_cnt_lsb
                     {
-                        return unsupported("more than one H.264 picture in one access unit");
+                        return Err(H264Error::Unsupported(
+                            "more than one H.264 picture in one access unit",
+                        )
+                        .into());
                     }
                     p.intra &= intra;
                     p.slice_offsets
@@ -384,7 +396,7 @@ impl Decoder {
                 *e = Some(r);
                 Ok(())
             }
-            None => bitstream("H.264 DPB overflow (more than 16 reference frames)"),
+            None => Err(H264Error::DpbOverflow.into()),
         }
     }
 
@@ -404,7 +416,7 @@ impl Decoder {
                 .min_by_key(|&(_, w)| w);
             match victim {
                 Some((i, _)) => self.dpb[i] = None,
-                None => return bitstream("sliding window with no short-term reference to remove"),
+                None => return Err(H264Error::SlidingWindowEmpty.into()),
             }
         }
         Ok(())
@@ -418,10 +430,11 @@ impl Decoder {
             return Ok(());
         }
         if !sps.gaps_in_frame_num_allowed {
-            return bitstream(format!(
-                "frame_num gap {prev} -> {} without gaps_in_frame_num_value_allowed_flag (lost pictures)",
-                h.frame_num
-            ));
+            return Err(H264Error::FrameNumGap {
+                prev,
+                frame_num: h.frame_num,
+            }
+            .into());
         }
         let mut f = (prev + 1) % max;
         while f != h.frame_num {
@@ -521,32 +534,31 @@ impl Decoder {
         let h = &pic.hdr;
         let sps = &pic.sps;
         if h.field_pic {
-            return unsupported(
+            return Err(H264Error::Unsupported(
                 "H.264 field pictures (PAFF): field-pair DPB marking and the legacy field setup are not implemented",
-            );
+            )
+            .into());
         }
         if sps.chroma_format_idc != 1 {
-            return unsupported(format!(
-                "H.264 chroma_format_idc {} (only 4:2:0: the session's surfaces and copy-out are \
-                 NV12/P010 4:2:0, so 4:2:2/4:4:4 needs a new surface layout and copy path)",
-                sps.chroma_format_idc
-            ));
+            return Err(H264Error::ChromaFormat(sps.chroma_format_idc).into());
         }
         if sps.bit_depth_luma_minus8 != 0 || sps.bit_depth_chroma_minus8 != 0 {
-            return unsupported(
+            return Err(H264Error::Unsupported(
                 "H.264 bit depth above 8 (the H.264 codec creates 8-bit surfaces -- the session \
                  passes no bit depth to it -- and there is no 10-bit setup path)",
-            );
+            )
+            .into());
         }
         if sps.width() > 4096 || sps.height() > 4096 {
-            return unsupported(format!(
-                "H.264 picture {}x{} above 4096x4096",
-                sps.width(),
-                sps.height()
-            ));
+            return Err(H264Error::TooLarge {
+                what: "picture",
+                width: sps.width(),
+                height: sps.height(),
+            }
+            .into());
         }
         if !h.idr() && !self.seen_idr {
-            return bitstream("H.264 stream does not start with an IDR picture");
+            return Err(H264Error::NoIdr.into());
         }
         let (h, sps) = (h.clone(), sps.clone());
         if h.idr() {
@@ -601,7 +613,7 @@ impl Decoder {
             slice_offsets,
         } = pic;
         if self.referenced_surfaces().contains(&surface) {
-            return bitstream(format!("target surface {surface} is still a reference"));
+            return Err(H264Error::TargetReferenced(surface).into());
         }
         let bias = if sps.pic_order_cnt_type == 0 {
             POC_TYPE0_BIAS
@@ -742,9 +754,12 @@ impl Decoder {
                             match x.and_then(|x| self.find_short(x, h.frame_num, max)) {
                                 Some(i) => self.dpb[i] = None,
                                 None => {
-                                    return bitstream(format!(
-                                        "MMCO1 on missing PicNum {cur_pic_num} - ({d} + 1)"
-                                    ));
+                                    return Err(H264Error::MissingPicNum {
+                                        mmco: 1,
+                                        cur_pic_num,
+                                        difference_minus1: d,
+                                    }
+                                    .into());
                                 }
                             }
                         }
@@ -755,15 +770,13 @@ impl Decoder {
                         {
                             Some(i) => self.dpb[i] = None,
                             None => {
-                                return bitstream(format!("MMCO2 on missing LongTermPicNum {n}"));
+                                return Err(H264Error::MissingLongTermPicNum(n).into());
                             }
                         },
                         Mmco::ShortToLong(d, idx) => {
                             let x = pic_num_x(cur_pic_num, d);
                             if self.max_lt_idx.is_none_or(|m| idx > m) {
-                                return bitstream(
-                                    "MMCO3 LongTermFrameIdx above MaxLongTermFrameIdx",
-                                );
+                                return Err(H264Error::LongTermIdxAboveMax { mmco: 3, idx }.into());
                             }
                             let target = x.and_then(|x| self.find_short(x, h.frame_num, max));
                             if let Some(j) = self
@@ -783,9 +796,12 @@ impl Decoder {
                                         .long_term_idx = Some(idx);
                                 }
                                 None => {
-                                    return bitstream(format!(
-                                        "MMCO3 on missing PicNum {cur_pic_num} - ({d} + 1)"
-                                    ));
+                                    return Err(H264Error::MissingPicNum {
+                                        mmco: 3,
+                                        cur_pic_num,
+                                        difference_minus1: d,
+                                    }
+                                    .into());
                                 }
                             }
                         }
@@ -807,9 +823,7 @@ impl Decoder {
                         }
                         Mmco::CurrentToLong(idx) => {
                             if self.max_lt_idx.is_none_or(|m| idx > m) {
-                                return bitstream(
-                                    "MMCO6 LongTermFrameIdx above MaxLongTermFrameIdx",
-                                );
+                                return Err(H264Error::LongTermIdxAboveMax { mmco: 6, idx }.into());
                             }
                             for e in self.dpb.iter_mut() {
                                 if e.is_some_and(|r| r.long_term_idx == Some(idx)) {
@@ -830,11 +844,11 @@ impl Decoder {
             let n =
                 u32::try_from(self.dpb.iter().flatten().count()).expect("the DPB has 16 entries");
             if n >= sps.max_num_ref_frames.max(1) {
-                return bitstream(format!(
-                    "reference marking leaves {} frames with max_num_ref_frames {}",
-                    n + 1,
-                    sps.max_num_ref_frames
-                ));
+                return Err(H264Error::TooManyReferences {
+                    frames: n + 1,
+                    max: sps.max_num_ref_frames,
+                }
+                .into());
             }
             self.insert_ref(RefPic {
                 surface: Some(surface),

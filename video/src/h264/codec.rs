@@ -11,6 +11,7 @@
 //!   176, 352, 1920), legacy MBHIST/HISTORY instead of filter/intra/0x4dc.
 use super::{Begun, Decoder, MAX_SLOTS, desc, legacy};
 use crate::fit;
+use crate::h264::H264Error;
 use crate::{
     Allocator, BuildContext, CODEC_H264, CodecDecoder, DecodeJob, Job, NvdecGen,
     PictureInfo as SessionInfo, SurfaceLayout, VResult, VideoError, bits,
@@ -50,9 +51,12 @@ impl H264Decoder {
         codec_config: &[u8],
     ) -> VResult<Self> {
         if max_width > 4096 || max_height > 4096 {
-            return Err(VideoError::Unsupported(format!(
-                "H.264 session {max_width}x{max_height} above 4096x4096"
-            )));
+            return Err(H264Error::TooLarge {
+                what: "session",
+                width: max_width,
+                height: max_height,
+            }
+            .into());
         }
         let layout = SurfaceLayout::new(max_width, max_height, 1);
         let mut dec = Decoder::new(desc::EngineParams::for_class(
@@ -61,9 +65,10 @@ impl H264Decoder {
         ));
         if !codec_config.is_empty() {
             if codec_config[0] == 1 {
-                return Err(VideoError::Unsupported(
-                    "H.264 avcC codec_config (pass Annex-B parameter sets)".into(),
-                ));
+                return Err(H264Error::Unsupported(
+                    "H.264 avcC codec_config (pass Annex-B parameter sets)",
+                )
+                .into());
             }
             dec.configure(codec_config)?;
         }

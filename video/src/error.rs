@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! The crate's API error, [`VideoError`], and the conversions from each subsystem's own error into
 //! it: the shared bit reader (`bits::Error`), AV1 (`av1::obu::Av1Error`), the VP9 front end
-//! (`nvdec_vp9::Vp9Error`) and values that do not fit their field ([`OutOfRange`]). The C ABI
+//! (`nvdec_vp9::Vp9Error`), H.264 (`h264::H264Error`) and values that do not fit their field ([`OutOfRange`]). The C ABI
 //! reports a [`VideoError`] as one `NV_VIDEO_E_*` code ([`VideoError::code`]) plus its message.
 //!
 //! Plain data; no state.
@@ -56,6 +56,10 @@ pub enum VideoError {
     /// VP9 parse failure (`NV_VIDEO_E_BITSTREAM`).
     #[error(transparent)]
     Vp9(#[from] crate::nvdec_vp9::Vp9Error),
+    /// H.264 parse or reference-marking failure: `NV_VIDEO_E_UNSUPPORTED` for an unimplemented
+    /// feature, else `NV_VIDEO_E_BITSTREAM`.
+    #[error(transparent)]
+    H264(#[from] crate::h264::H264Error),
 }
 
 impl VideoError {
@@ -63,6 +67,13 @@ impl VideoError {
     pub fn code(&self) -> i32 {
         match self {
             Self::Invalid(_) => -1,
+            Self::H264(e) => {
+                if e.is_unsupported() {
+                    -2
+                } else {
+                    -3
+                }
+            }
             Self::Unsupported(_) | Self::Av1(crate::av1::obu::Av1Error::Unsupported(_)) => -2,
             Self::Bitstream(_)
             | Self::Bits(_)
@@ -90,7 +101,7 @@ impl VideoError {
             | Self::DeviceLost(m)
             | Self::Again(m)
             | Self::Resize { reason: m, .. } => Cow::Borrowed(m),
-            Self::Bits(_) | Self::Range(_) | Self::Av1(_) | Self::Vp9(_) => {
+            Self::Bits(_) | Self::Range(_) | Self::Av1(_) | Self::Vp9(_) | Self::H264(_) => {
                 Cow::Owned(self.to_string())
             }
         }
