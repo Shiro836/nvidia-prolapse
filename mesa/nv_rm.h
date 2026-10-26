@@ -136,6 +136,13 @@ int32_t nv_rm_context_signal(struct NvRmDevice*, uint64_t context,
  * requested (uncompressed) kind. Size must be a 64 KiB multiple; the alignment
  * is raised to 64 KiB. */
 #define NV_RM_PLACEMENT_VRAM_COMPRESSIBLE 2u
+/* One GPU-internal pool block: 2 MiB of device memory in one physically
+ * contiguous huge page, GPU-cached, uncompressed, never CPU-mapped or
+ * exported (the NVOS32 request the proprietary driver uses for the memory
+ * holding its command buffers' QMDs and launch counters). Size must be
+ * exactly 2 MiB and the kind 0; nv_rm_map fails on it, and it binds whole at a
+ * 2 MiB aligned VA. */
+#define NV_RM_PLACEMENT_VRAM_POOL_BLOCK 3u
 /* C owns [16 GiB, 1 TiB), Rust internal mappings must remain below 16 GiB. */
 #define NV_RM_VA_START (UINT64_C(1) << 34)
 #define NV_RM_VA_END (UINT64_C(1) << 40)

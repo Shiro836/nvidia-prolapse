@@ -556,6 +556,67 @@ impl Device {
             None,
         )
     }
+    /// One GPU-internal pool block (see [`pool_block`]): 2 MiB of device
+    /// memory in one contiguous huge page, GPU-cached, uncompressed, never
+    /// CPU-mapped or exported. Fails when RM grants other page size,
+    /// location, physicality or compression than requested.
+    pub(crate) fn allocate_pool_block(self: &Rc<Self>) -> Result<Rc<Memory>> {
+        self.allocate_pool_block_granted().map(|(memory, _)| memory)
+    }
+    /// [`Self::allocate_pool_block`] plus what RM returned for it.
+    pub(crate) fn allocate_pool_block_granted(
+        self: &Rc<Self>,
+    ) -> Result<(Rc<Memory>, PoolBlockGrant)> {
+        let generic_kind = self.generic_kind()?;
+        let size = POOL_BLOCK_SIZE as u64;
+        let mut parameters = abi::MemoryAlloc {
+            owner: self.client.root,
+            memory_type: 0,
+            flags: pool_block::FLAGS,
+            attr: pool_block::ATTR,
+            attr2: pool_block::ATTR2,
+            format: generic_kind,
+            size,
+            alignment: 0,
+            limit: size - 1,
+            ..Default::default()
+        };
+        let handle = self.client.allocate(self.handle, 0x40, &mut parameters)?;
+        let granted = parameters.attr & pool_block::ATTR_CHECKED;
+        if granted != pool_block::ATTR & pool_block::ATTR_CHECKED || parameters.size != size {
+            let status = self.client.free(self.handle, handle);
+            return Err(Error::Contract(format!(
+                "RM granted pool block attr {:#010x} size {:#x} (requested attr {:#010x}: VIDMEM, \
+                 CONTIGUOUS, PAGE_SIZE HUGE, COMPR NONE, size {size:#x}){}",
+                parameters.attr,
+                parameters.size,
+                pool_block::ATTR,
+                match status {
+                    Ok(()) => String::new(),
+                    Err(e) => format!("; freeing it failed too: {e}"),
+                }
+            )));
+        }
+        let grant = PoolBlockGrant {
+            attr: parameters.attr,
+            attr2: parameters.attr2,
+            format: parameters.format,
+            size: parameters.size,
+        };
+        let memory = Rc::new(Memory {
+            device: Rc::clone(self),
+            handle,
+            parent: self.handle,
+            size: POOL_BLOCK_SIZE,
+            system: false,
+            owned: true,
+            charge_bar: false,
+            _mapping_owner: None,
+            compressed: false,
+            pages: PhysicalPages::Huge2M,
+        });
+        Ok((memory, grant))
+    }
     fn allocate_placed(
         self: &Rc<Self>,
         requested_size: usize,
@@ -648,12 +709,55 @@ impl Device {
             charge_bar: !system,
             _mapping_owner: None,
             compressed: compressible && compression_granted(parameters.attr),
-            big_pages: compressible,
+            pages: if compressible {
+                PhysicalPages::Big64K
+            } else {
+                PhysicalPages::Small4K
+            },
         }))
     }
 }
 /// RM big page size used for compressible memory and big-page mappings.
 pub(crate) const BIG_PAGE: usize = 1 << 16;
+/// Page size of a physical allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PhysicalPages {
+    /// RM's default (4 KiB) pages.
+    Small4K,
+    /// 64 KiB big pages (compressible device-local memory).
+    Big64K,
+    /// 2 MiB huge pages, physically contiguous (a GPU-internal pool block).
+    Huge2M,
+}
+/// The NVOS32 fields RM returns for a pool-block request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PoolBlockGrant {
+    pub(crate) attr: u32,
+    pub(crate) attr2: u32,
+    pub(crate) format: u32,
+    pub(crate) size: u64,
+}
+/// Size of one GPU-internal pool block (one 2 MiB huge page).
+pub const POOL_BLOCK_SIZE: usize = 2 << 20;
+/// NVOS32 request of a GPU-internal pool block, field by field from public
+/// nvos.h; these are the values the proprietary driver (615.78.08) sends for
+/// the device memory that holds its command buffers' QMDs, kernel parameter
+/// blocks and launch counters (NV_ESC_RM_VID_HEAP_CONTROL ALLOC_SIZE: flags
+/// 0xc00d, attr 0x11800000, attr2 0x100005, format = the generic kind, size
+/// 2 MiB, alignment 0), which it maps once and never CPU-maps.
+pub(crate) mod pool_block {
+    /// IGNORE_BANK_PLACEMENT | FORCE_MEM_GROWS_DOWN | FORCE_ALIGN_HOST_PAGE |
+    /// MEMORY_HANDLE_PROVIDED | MAP_NOT_REQUIRED.
+    pub(crate) const FLAGS: u32 = 0x1 | 0x4 | 0x8 | 0x4000 | 0x8000;
+    /// PAGE_SIZE (24:23) HUGE, PHYSICALITY (28:27) CONTIGUOUS; LOCATION VIDMEM,
+    /// COHERENCY UNCACHED, COMPR NONE and FORMAT PITCH are the zero values.
+    pub(crate) const ATTR: u32 = (3 << 23) | (2 << 27);
+    /// ZBC (1:0) PREFER_NO_ZBC, GPU_CACHEABLE (3:2) YES, PAGE_SIZE_HUGE
+    /// (21:20) 2MB.
+    pub(crate) const ATTR2: u32 = 1 | (1 << 2) | (1 << 20);
+    /// The granted attr must keep these fields as requested.
+    pub(crate) const ATTR_CHECKED: u32 = (3 << 23) | (3 << 25) | (3 << 27) | (3 << 12);
+}
 const NONCONTIG_FROM: usize = 16 << 20;
 /// NVOS32 attr for a compressible device-local request (nvos.h fields:
 /// COMPR 13:12 = ANY, PAGE_SIZE 24:23 = BIG, PHYSICALITY 28:27 = NONCONTIGUOUS
@@ -707,7 +811,7 @@ impl Device {
             charge_bar: false,
             _mapping_owner: None,
             compressed: false,
-            big_pages: false,
+            pages: PhysicalPages::Small4K,
         })
         .map()
     }
@@ -733,7 +837,7 @@ impl Device {
             charge_bar: true,
             _mapping_owner: Some(owner),
             compressed: false,
-            big_pages: false,
+            pages: PhysicalPages::Small4K,
         })
         .map()
     }
@@ -763,8 +867,9 @@ pub struct Memory {
     /// RM granted compression (NVOS32 attr COMPR != NONE on return) for an
     /// allocation that asked for it; only then may a VA carry a compressible kind.
     pub(crate) compressed: bool,
-    /// Physical pages are big (64 KiB): aligned VA ranges may map with big PTEs.
-    pub(crate) big_pages: bool,
+    /// Physical page size: with big (64 KiB) pages aligned VA ranges may map
+    /// with big PTEs; a huge-page pool block maps at RM's default page size.
+    pub(crate) pages: PhysicalPages,
 }
 impl Memory {
     /// Adopt the owned handle returned by RM object import. Import duplicates
@@ -786,10 +891,15 @@ impl Memory {
             charge_bar: !system,
             _mapping_owner: None,
             compressed: false,
-            big_pages: false,
+            pages: PhysicalPages::Small4K,
         })
     }
     pub fn map(self: &Rc<Self>) -> Result<Mapping> {
+        if self.pages == PhysicalPages::Huge2M {
+            return Err(Error::Contract(
+                "a GPU-internal pool block is never CPU-mapped".into(),
+            ));
+        }
         loop {
             if self.device.cpu_mapping_failed() {
                 return Err(Error::DeviceLost(
@@ -1976,5 +2086,81 @@ GCC version: gcc 15.2.1"
         });
         assert!(BarReservation::reserve(&huge, 1).is_err());
         assert_eq!(huge.used.get(), u64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod pool_block_tests {
+    use super::*;
+    fn field(v: u32, hi: u32, lo: u32) -> u32 {
+        (v >> lo) & (u32::MAX >> (31 - (hi - lo)))
+    }
+    #[test]
+    #[ignore = "local NVIDIA GPU: one GPU-internal pool block; RM grants the requested NVOS32 attributes"]
+    fn pool_block_has_the_requested_attributes() {
+        let client = Client::open().unwrap();
+        let card = client.cards().unwrap().into_iter().next().unwrap();
+        let device = client.device(card).unwrap();
+        let (memory, grant) = device.allocate_pool_block_granted().unwrap();
+        assert_eq!(grant.size, POOL_BLOCK_SIZE as u64);
+        assert_eq!(
+            field(grant.attr, 24, 23),
+            3,
+            "PAGE_SIZE HUGE: {:#010x}",
+            grant.attr
+        );
+        assert_eq!(
+            field(grant.attr, 26, 25),
+            0,
+            "LOCATION VIDMEM: {:#010x}",
+            grant.attr
+        );
+        assert_eq!(
+            field(grant.attr, 28, 27),
+            2,
+            "PHYSICALITY CONTIGUOUS: {:#010x}",
+            grant.attr
+        );
+        assert_eq!(
+            field(grant.attr, 13, 12),
+            0,
+            "COMPR NONE: {:#010x}",
+            grant.attr
+        );
+        assert_eq!(
+            field(grant.attr, 31, 29),
+            0,
+            "COHERENCY UNCACHED: {:#010x}",
+            grant.attr
+        );
+        assert_eq!(
+            field(grant.attr2, 3, 2),
+            1,
+            "GPU_CACHEABLE YES: {:#010x}",
+            grant.attr2
+        );
+        assert_eq!(
+            field(grant.attr2, 21, 20),
+            1,
+            "PAGE_SIZE_HUGE 2MB: {:#010x}",
+            grant.attr2
+        );
+        assert_eq!(
+            grant.format,
+            device.generic_kind().unwrap(),
+            "the generic kind"
+        );
+        eprintln!(
+            "pool block granted attr {:#010x} attr2 {:#010x} format {:#x} size {:#x}",
+            grant.attr, grant.attr2, grant.format, grant.size
+        );
+        assert!(memory.map().is_err(), "never CPU-mapped");
+        let space = crate::gpu::AddressSpace::new(&device).unwrap();
+        let gpu = space.map(&memory).unwrap();
+        assert_eq!(
+            gpu.address() % POOL_BLOCK_SIZE as u64,
+            0,
+            "mapped at a 2 MiB VA"
+        );
     }
 }
