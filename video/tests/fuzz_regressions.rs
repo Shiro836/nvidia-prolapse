@@ -43,3 +43,11 @@ fn h264_crop_offsets_overflow() {
     replay(drivers::h264_headers, "h264_headers-crop_top_overflow");
     replay(drivers::decoder, "decoder-h264_crop_bottom_overflow");
 }
+
+/// AV1 frame of size 0 (a frame_size_with_refs copy of an empty reference slot): tile_info's
+/// non-uniform spacing divided by its widest tile, 0.
+#[test]
+fn av1_tile_info_zero_size() {
+    replay(drivers::av1_headers, "av1_headers-tile_info_zero_size");
+    replay(drivers::decoder, "decoder-av1_tile_info_zero_size");
+}

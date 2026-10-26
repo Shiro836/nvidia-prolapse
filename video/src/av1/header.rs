@@ -1115,6 +1115,13 @@ impl ParserState {
         } else {
             ((h.mi_cols + 15) >> 4, (h.mi_rows + 15) >> 4, 4)
         };
+        // A conformant frame is at least one superblock (MiCols, MiRows >= 2, spec 7.21); a size of
+        // 0 comes from frame_size_with_refs copying a reference slot that holds no frame
+        // (RefValid = 0, spec 6.8.6), and the non-uniform spacing below would divide by its
+        // widest tile, 0.
+        if sb_cols == 0 || sb_rows == 0 {
+            return Err(Av1Error::Invalid("tile_info: frame of zero superblocks"));
+        }
         let sb_size = sb_shift + 2;
         let max_tile_width_sb = 4096 >> sb_size;
         let mut max_tile_area_sb = (4096 * 2304) >> (2 * sb_size);
