@@ -78,8 +78,7 @@ fn qctx_thresholds() {
 }
 
 /// Dump every picture job of the IVF streams in $AV1_IVF_DIR to $AV1_OUT_DIR (descriptor block + job
-/// summary) for comparison with stock captures (compare script
-/// native/tools/av1/compare_stock.py).
+/// summary) for comparison with stock captures.
 #[test]
 #[ignore]
 fn dump_jobs() {

@@ -2,7 +2,7 @@
  * on the real GPU, driving the sequence ANGLE and Skia/HWUI use (AHB-CONTRACT.md).
  *
  * The host has no libnativewindow: this executable exports `nvhal_test_ahb_fns` (linked -rdynamic),
- * a fake AHardwareBuffer API whose allocator mirrors nvidia-prolapse/gralloc/nvidia_gbm_wrapper.c: an exportable
+ * a fake AHardwareBuffer API whose allocator mirrors gralloc/nvidia_gbm_wrapper.c: an exportable
  * VkImage with DRM format modifiers (block-linear for GPU buffers, LINEAR + host-visible memory for
  * CPU buffers), exported as a dma-buf and described by a synthetic minigbm cros_gralloc_handle.
  * The "original" image of each fake AHB stays alive, so pixels written through the HAL's AHB

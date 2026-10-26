@@ -4,7 +4,7 @@
  *   M=build/mesa-rm-source; cc -std=c11 -Wall -Wextra -Werror \
  *     -I$M/src/nouveau/vulkan -I$M/src/nouveau/headers -I$M/src \
  *     -I$M/include -I$M/src/nouveau/headers/nvidia/classes \
- *     nvidia-prolapse/driver-source/native/mesa/tests/pascal-a-clear.c -o pascal-a-clear && ./pascal-a-clear
+ *     mesa/tests/pascal-a-clear.c -o pascal-a-clear && ./pascal-a-clear
  *
  * Expected words are the stock 580.178.04 eglcore pushes (objdump of
  * libnvidia-eglcore at ELF 0xb5b8f7 and 0xb5b881): only PASCAL_A gets them.

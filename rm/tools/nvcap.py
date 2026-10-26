@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decode a Rust RM perf capture (native/src/capture.rs) into per-frame tables.
+"""Decode a Rust RM perf capture (rm/src/capture.rs) into per-frame tables.
 
 usage: nvcap.py CAP.bin [--driver nvk|nvrm] [--json OUT] [--frames-skip N] [--top N]
 

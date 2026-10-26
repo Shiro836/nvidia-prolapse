@@ -28,7 +28,7 @@
  * (MESA_NVK, or NVIDIA_PROPRIETARY for the stock comparison), never by a node
  * path. Build/run (repository root):
  *   cc -std=c11 -Wall -Wextra -Werror -I<mesa>/include \
- *     nvidia-prolapse/driver-source/native/mesa/tests/nvk-3d-view-of-2d-image.c -ldl \
+ *     mesa/tests/nvk-3d-view-of-2d-image.c -ldl \
  *     -o nvk-3d-view-of-2d-image
  *   LD_LIBRARY_PATH=<rust lib dir> ./nvk-3d-view-of-2d-image <nvk-host>/src/nouveau/vulkan/libvulkan_nouveau.so
  *   ./nvk-3d-view-of-2d-image libGLX_nvidia.so.0     (stock comparison)

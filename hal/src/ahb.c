@@ -111,7 +111,7 @@ static VkFormat ahb_to_vk(uint32_t f) {
     }
 }
 
-/* What the gralloc backend can allocate (nvidia-prolapse/gralloc/nvidia_gbm_wrapper.c nvg_formats): DRM fourcc of
+/* What the gralloc backend can allocate (gralloc/nvidia_gbm_wrapper.c nvg_formats): DRM fourcc of
  * the buffer -> VkFormat of its memory, and the AHB format an export allocates for a VkFormat. */
 static const struct { uint32_t fourcc; VkFormat vk; uint32_t ahb; } gralloc_formats[] = {
     {DRM_FORMAT_ABGR8888, VK_FORMAT_R8G8B8A8_UNORM, AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM},
@@ -540,7 +540,7 @@ static void sc_icd_ci(const struct nvhal_image *w, struct icd_ci *c) {
 }
 
 /* Modifiers the gralloc backend would choose for an image of this format and tiling: the same
- * filter as nvidia-prolapse/gralloc/nvidia_gbm_wrapper.c nvg_alloc (single plane, LINEAR only for CPU buffers,
+ * filter as gralloc/nvidia_gbm_wrapper.c nvg_alloc (single plane, LINEAR only for CPU buffers,
  * block-linear only for GPU buffers, SAMPLED|TRANSFER_SRC|TRANSFER_DST (+COLOR_ATTACHMENT for GPU)). */
 static uint32_t gralloc_modifiers(struct nvhal_instance *inst, VkPhysicalDevice pd, VkFormat f, bool linear,
                                   uint64_t *mods, VkFormatFeatureFlags2 *feats, uint32_t cap) {
@@ -637,7 +637,7 @@ static void replay_object_state(struct nvhal_image *w, VkImage real) {
  * dma-buf samples zeros as well. So the layout must be one the ICD can bind plane by plane: each offset a multiple of
  * the ICD's per-plane alignment, each plane's required size inside the dma-buf, the planes in order without overlap.
  * NVK reports exact sizes and 32-byte alignment, i.e. its own LINEAR import rule. The gralloc lays NV12/P010 out by
- * this rule (nvidia-prolapse/gralloc, minigbm 0004 + get_gbm_layout_ops). */
+ * this rule (gralloc/, minigbm 0004 + get_gbm_layout_ops). */
 static VkResult yuv_layout_bindable(struct nvhal_device *d, struct nvhal_image *w, const struct gbuf *b,
                                     VkImageUsageFlags usage, const VkAllocationCallbacks *alloc, const char *who) {
     const VkFormatFeatureFlags2 mf = modifier_features(d->inst, d->physical_device, b->format, DRM_FORMAT_MOD_LINEAR);

@@ -3,8 +3,7 @@
 //! accounting for any NVDEC class and host GPFIFO class, without a GPU, and return every picture's
 //! descriptor slot and method list. Used to check the per-generation behaviour against stock's
 //! per-class gates
-//! and against stock traces captured on other generations (`dump_pretend`, compare script
-//! `tools/video/compare_pretend.py`).
+//! and against stock traces captured on other generations (`dump_pretend`).
 use super::{
     Allocator, BuildContext, CODEC_AV1, CODEC_H264, CODEC_HEVC, CODEC_VP9, CodecDecoder, Job,
     SurfaceRef, VResult, VideoError, bits, session::DESCRIPTOR_BYTES,
@@ -180,7 +179,7 @@ pub fn methods(words: &[u32]) -> Vec<(u32, &'static str, Vec<u32>)> {
 
 /// Dump every picture of the streams in `$NV_PRETEND_STREAMS` built for `$NV_PRETEND_CLASS` (hex, default
 /// c9b0) / `$NV_PRETEND_HOST` (hex, default c56f) into `$NV_PRETEND_OUT/<stream>/NNN.{desc,words}` for
-/// `tools/video/compare_pretend.py` against stock traces of the same streams.
+/// comparison against stock traces of the same streams.
 #[test]
 #[ignore = "needs NV_PRETEND_STREAMS / NV_PRETEND_OUT"]
 fn dump_pretend() {

@@ -5,7 +5,7 @@
  * (nv_video_copy_out) into a gralloc block fetched from the framework's output pool
  * (BufferQueue when decoding to a Surface): HAL_PIXEL_FORMAT_YCBCR_420_888 -> NV12 or
  * HAL_PIXEL_FORMAT_YCBCR_P010 -> P010, LINEAR (minigbm gbm_mesa R8 carrier layout,
- * nvidia-prolapse/gralloc/minigbm/0004). Exception: an output pool on the plain gralloc
+ * gralloc/minigbm/0004). Exception: an output pool on the plain gralloc
  * allocator (no Surface: the client maps every block on the CPU, ByteBuffer/Image mode) gets
  * 8-bit pictures as HAL_PIXEL_FORMAT_YV12, written planar (see Component::Pool::fetch).
  * The copy's sync_file is waited for here before

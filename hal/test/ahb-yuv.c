@@ -2,7 +2,7 @@
  * conversion), the path a decoded video frame takes into Chrome (AImageReader PRIVATE + GPU_SAMPLED_IMAGE),
  * ANGLE (samplerExternalOES) and HWUI.
  *
- * The fake gralloc mirrors minigbm gbm_mesa with nvidia-prolapse/gralloc/minigbm/0004: an NV12/P010 buffer is
+ * The fake gralloc mirrors minigbm gbm_mesa with gralloc/minigbm/0004: an NV12/P010 buffer is
  * one LINEAR dma-buf (minigbm's R8 carrier), plane 0 at offset 0, byte pitch ALIGN(width * bytes, 256),
  * CbCr plane at pitch * ALIGN(height, 2) or later, moved by the gralloc wrapper's plane_layout() to the driver's
  * per-plane alignment (DISJOINT-plane memory requirements; NVIDIA 615: 64 KiB, NVK: 32 B) and the buffer sized to the

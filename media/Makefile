@@ -1,4 +1,4 @@
-# nvidia-prolapse/media — NVDEC hardware decoding for Android (Codec2 vendor HAL)
+# media/ — NVDEC hardware decoding for Android (Codec2 vendor HAL)
 #
 #   make test     -> host unit tests of the decoder core against the scripted nv_video stub
 #   make xmlgen   -> out/host/nvc2-xmlgen (links the GNU build of the nv_video backend: NV_VIDEO_LIB)

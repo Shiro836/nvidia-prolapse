@@ -20,7 +20,7 @@
  * Real GPU, host NVK; the device is selected by driverID (MESA_NVK), never by
  * a node path. Build/run (repository root):
  *   cc -std=c11 -Wall -Wextra -Werror -I<mesa>/include \
- *     nvidia-prolapse/driver-source/native/mesa/tests/nvk-memory-plane-layout.c -ldl \
+ *     mesa/tests/nvk-memory-plane-layout.c -ldl \
  *     -o nvk-memory-plane-layout
  *   LD_LIBRARY_PATH=<rust lib dir> ./nvk-memory-plane-layout <nvk-host>/src/nouveau/vulkan/libvulkan_nouveau.so
  */

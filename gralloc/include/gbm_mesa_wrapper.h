@@ -3,7 +3,7 @@
  * Source: https://github.com/waydroid/android_external_minigbm
  *         commit 16844babfbd83d7c206ca22256257cbf26ca7de1 ("gralloc: Handle PixelFormat::R_8"),
  *         path gbm_mesa_driver/gbm_mesa_wrapper.h
- * Local clone: build/minigbm. `make -C nvidia-prolapse/gralloc check-header` verifies that
+ * Local clone: build/minigbm. `make -C gralloc check-header` verifies that
  * everything below this block is byte-identical to the clone.
  * The header uses uint32_t/uint64_t without including <stdint.h> (upstream
  * as-is); consumers include <stdint.h> first.

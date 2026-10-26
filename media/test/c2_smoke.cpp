@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * Guest smoke test of the Codec2 NVDEC HAL through the public MediaCodec NDK on a
  * ByteBuffer output (no Surface), i.e. the path whose blocks are CPU-mapped: the HAL
- * fetches YV12/P010 gralloc blocks with CPU_READ (nvidia-prolapse/media/c2/NvC2Component.cpp
+ * fetches YV12/P010 gralloc blocks with CPU_READ (media/c2/NvC2Component.cpp
  * Component::Pool). Used for the seccomp measurement and the bionic end-to-end check.
  *
  *   c2_smoke <in.mp4>    -> "<mime>: <n> frames, <w>x<h>, YUV format <fmt>" and exit 0

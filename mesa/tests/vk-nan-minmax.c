@@ -20,11 +20,11 @@
  * The GPU is picked by vendor ID 0x10de (any NVIDIA driver: NVK or the proprietary ICD), never by
  * a node path; the driver is chosen with VK_DRIVER_FILES.
  *
- * Build/run (repository root; see tests/README.md "vk-nan-minmax"):
- *   glslangValidator -V nvidia-prolapse/driver-source/native/mesa/tests/vk-nan-minmax.comp \
- *     --vn vk_nan_minmax_spv -o build/gta-carpaint/test/vk-nan-minmax.spv.h
- *   cc -std=c11 -Wall -Wextra -Werror -Ibuild/gta-carpaint/test \
- *     nvidia-prolapse/driver-source/native/mesa/tests/vk-nan-minmax.c -lvulkan -lm -o build/gta-carpaint/test/vk-nan-minmax
+ * Build/run (repository root; see mesa/tests/README.md "vk-nan-minmax"):
+ *   glslangValidator -V mesa/tests/vk-nan-minmax.comp \
+ *     --vn vk_nan_minmax_spv -o build/mesa-tests/vk-nan-minmax.spv.h
+ *   cc -std=c11 -Wall -Wextra -Werror -Ibuild/mesa-tests \
+ *     mesa/tests/vk-nan-minmax.c -lvulkan -lm -o build/mesa-tests/vk-nan-minmax
  */
 #include <math.h>
 #include <stdint.h>

@@ -12,7 +12,7 @@
  *   nv12  LINEAR NV12 dma-buf, pitch ALIGN(width, 256), CbCr at pitch*even(height)
  *   p010  LINEAR P010 dma-buf, same layout at 2 bytes/sample (10-bit pictures only)
  *   yv12  Android YV12 blocks, exactly the target the Codec2 component's CPU/ByteBuffer
- *         pool builds (nvidia-prolapse/media/c2/NvC2Component.cpp Component::Pool):
+ *         pool builds (media/c2/NvC2Component.cpp Component::Pool):
  *         Y stride ALIGN(width,16), Cr at Y stride*height, Cb after Cr, one dma-buf.
  *         The pool answers an NV12 picture with NV_VIDEO_FORMAT_YUV420P, as the component does.
  *

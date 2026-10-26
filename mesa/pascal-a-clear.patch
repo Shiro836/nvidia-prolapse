@@ -45,7 +45,7 @@ index 0000000000000000000000000000000000000000..60b9df30fe18433cf2c30cce3f29b37d
 +++ b/src/nouveau/vulkan/nvk_pascal_a.h
 @@ -0,0 +1,63 @@
 +/*
-+ * Copyright © 2026 waydroid-nvidia-prolapse contributors
++ * Copyright © 2026 nvidia-prolapse contributors
 + * SPDX-License-Identifier: MIT
 + */
 +#ifndef NVK_PASCAL_A_H

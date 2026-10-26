@@ -1,4 +1,4 @@
-# Vendor Codec2 HAL: NVDEC decoders (nvidia-prolapse/media). Same class/user/groups/priority as
+# Vendor Codec2 HAL: NVDEC decoders (media/). Same class/user/groups/priority as
 # frameworks/av media/codec2/hidl/services/android.hardware.media.c2@1.2-default-service.rc
 # (android-13); the binary lives on /odm (linkerconfig "vendor" section), its libraries in
 # /vendor_extra/lib64 (vendor default namespace search path).

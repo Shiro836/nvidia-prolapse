@@ -280,7 +280,7 @@ static char g_vk_error[1024];
  * Deliberately neither VK_KHR_external_semaphore_fd nor
  * VK_KHR_external_fence_fd: this device can neither import a SYNC_FD wait nor
  * export a sync_fd, so NVIDIA's queue-timeline defect D1 cannot reach it
- * (nvidia-prolapse/hal/AHB-CONTRACT.md §8.2 "Which devices"; README). */
+ * (hal/AHB-CONTRACT.md §8.2 "Which devices"; README). */
 static const char *const nvg_device_exts[] = {
 	VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
 	VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,

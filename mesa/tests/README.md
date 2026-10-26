@@ -201,7 +201,7 @@ context buffer 0x1b9600 B, alignment 0x1000.
 
 ## vk-nan-minmax.c (FMax/FMin/FClamp with a NaN operand under ANGLE; GTA SA black car paint)
 
-    T=build/gta-carpaint/test; mkdir -p $T
+    T=build/mesa-tests; mkdir -p $T
     glslangValidator -V mesa/tests/vk-nan-minmax.comp \
       --vn vk_nan_minmax_spv -o $T/vk-nan-minmax.spv.h
     cc -std=c11 -Wall -Wextra -Werror -I$T mesa/tests/vk-nan-minmax.c \

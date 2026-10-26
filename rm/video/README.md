@@ -216,5 +216,5 @@ shows as serialisation across concurrent sessions, not as a wrong picture.
 | gallery av1_svt / av1_aom / av1_grain (BBB 1080p, `build/video-gallery`) | as above at 1920x1080 | 150 each |
 | aom_superres (`--superres-mode=1 --superres-denominator=12`) | key frame bit-exact; inter frames → `E_UNSUPPORTED` ("AV1 superres on inter frames", engine error_status 0xb/0xd, needs a stock capture) | 1 of 10 |
 
-Descriptor level vs stock captures (`tools/av1/compare_stock.py`): pic_s, +0x244 word, tile info,
+Descriptor level vs stock captures (`dump_jobs` in `video/src/av1/tests.rs`): pic_s, +0x244 word, tile info,
 global motion, film-grain buffer, CDF buffer selection, colMV/segment buffer selection 37/37 each.

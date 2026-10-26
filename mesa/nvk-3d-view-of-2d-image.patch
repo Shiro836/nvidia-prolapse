@@ -9,7 +9,7 @@ image of depth 1 (same memory layout), with a one-time warning naming the
 invalid usage. Any other 3D view of a non-3D image (multisampled, more than one
 layer, 1D) fails with a logged reason and VK_ERROR_UNKNOWN, as nvk_image.c does
 for invalid image parameters, instead of reaching nil's assert.
-Reproducer: native/mesa/tests/nvk-3d-view-of-2d-image.c.
+Reproducer: mesa/tests/nvk-3d-view-of-2d-image.c.
 
 --- a/src/nouveau/vulkan/nvk_image_view.c
 +++ b/src/nouveau/vulkan/nvk_image_view.c

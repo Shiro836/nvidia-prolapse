@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * nvc2 decoder core: the codec-agnostic state machine between a framework front
  * (the Codec2 component in ../c2) and the nv_video decode ABI
- * (driver-source/native/video/nv_video.h). No Android dependency, so it is unit-tested
+ * (rm/video/nv_video.h). No Android dependency, so it is unit-tested
  * on the host against a stubbed nv_video (../test).
  *
  * Contract with the front:
