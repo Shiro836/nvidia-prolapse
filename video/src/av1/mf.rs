@@ -66,7 +66,7 @@ pub fn select(
     }
     for (j, &k) in cands.iter().take(3).enumerate() {
         mf.mf_type[j] = (k + 1) as u8;
-        let r = recs[k].unwrap();
+        let r = recs[k].expect("a candidate passed usable(), which needs its record");
         let dist = get_relative_dist(seq, h.order_hint, r.order_hint);
         if h.use_ref_frame_mvs && dist.abs() <= MAX_OFFSET {
             mf.use_temporal[j] = true;

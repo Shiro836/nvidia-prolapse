@@ -776,7 +776,12 @@ impl Decoder {
                                 }
                             }
                             match target {
-                                Some(i) => self.dpb[i].as_mut().unwrap().long_term_idx = Some(idx),
+                                Some(i) => {
+                                    self.dpb[i]
+                                        .as_mut()
+                                        .expect("find_short returns an occupied entry, kept above")
+                                        .long_term_idx = Some(idx);
+                                }
                                 None => {
                                     return bitstream(format!(
                                         "MMCO3 on missing PicNum {cur_pic_num} - ({d} + 1)"

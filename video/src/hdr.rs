@@ -107,9 +107,7 @@ pub fn parse_unit(codec: u32, unit: &[u8]) -> VResult<HdrStaticMetadata> {
                 let Some(body) = payload.get(used..) else {
                     return bitstream("AV1 metadata OBU: metadata_type past the payload");
                 };
-                let metadata_type = u32::try_from(metadata_type).map_err(|_| {
-                    VideoError::Bitstream("AV1 metadata OBU: metadata_type overflow".into())
-                })?;
+                let metadata_type = crate::fit::<u32, _>(metadata_type, "metadata_type")?;
                 match metadata_type {
                     1 => m.merge(HdrStaticMetadata {
                         mastering: None,
