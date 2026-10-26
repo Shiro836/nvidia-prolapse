@@ -43,8 +43,8 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
 - No `transmute`. Byte views of wire structs go through `zerocopy` derives (`FromBytes`, `IntoBytes`,
   `KnownLayout`, `Immutable`); pointer casts use `.cast()`, `.cast_mut()`, `ptr::from_ref`. The one
   exception is a `dlsym` result turned into its declared function-pointer type, which std offers no
-  other way to do: one helper per crate, `#[expect]` with a reason, and a SAFETY comment naming the
-  symbol's C signature and the header that declares it.
+  other way to do: one helper per crate, whose doc says why, with a SAFETY comment naming the symbol's
+  C signature and the header that declares it.
 - No `static mut`. Globals are `OnceLock`/`LazyLock`/atomics, and only when the interface forces global
   state (a C entry point with no context argument).
 - `unsafe` added for speed needs a measurement in the commit message (before/after, idle GPU, workload).
