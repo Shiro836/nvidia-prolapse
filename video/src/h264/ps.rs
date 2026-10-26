@@ -5,6 +5,8 @@
 //! `factors[zigzag[i]]`; the stock NEW_H264 builder at ELF 0x3c460 copies them verbatim to
 //! setup+0x200).
 use super::super::{VResult, bits::BitReader, bitstream, unsupported};
+use crate::fit;
+use nv_rm_core::conv::low_u8;
 
 /// 4x4 zig-zag (frame) scan: coded index → raster index (Table 8-13).
 pub const ZIGZAG_4X4: [u8; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
@@ -35,14 +37,14 @@ const DEFAULT_8X8_INTER: [u8; 64] = [
 fn raster4(zz: &[u8; 16]) -> [u8; 16] {
     let mut r = [0; 16];
     for i in 0..16 {
-        r[ZIGZAG_4X4[i] as usize] = zz[i];
+        r[usize::from(ZIGZAG_4X4[i])] = zz[i];
     }
     r
 }
 fn raster8(zz: &[u8; 64]) -> [u8; 64] {
     let mut r = [0; 64];
     for i in 0..64 {
-        r[ZIGZAG_8X8[i] as usize] = zz[i];
+        r[usize::from(ZIGZAG_8X8[i])] = zz[i];
     }
     r
 }
@@ -78,7 +80,7 @@ fn scaling_list<const N: usize>(r: &mut BitReader, zigzag: &[u8]) -> VResult<Opt
             }
         }
         let v = if next == 0 { last } else { next };
-        out[zigzag[j] as usize] = v as u8;
+        out[usize::from(zigzag[j])] = fit(v, "ScalingList")?;
         last = v;
     }
     Ok(Some(out))
@@ -187,7 +189,7 @@ impl Sps {
         1 << (self.log2_max_frame_num_minus4 + 4)
     }
     pub fn frame_height_in_mbs(&self) -> u32 {
-        (2 - self.frame_mbs_only as u32) * self.pic_height_in_map_units
+        (2 - u32::from(self.frame_mbs_only)) * self.pic_height_in_map_units
     }
     pub fn width(&self) -> u32 {
         self.pic_width_in_mbs * 16
@@ -213,7 +215,7 @@ fn hrd(r: &mut BitReader) -> VResult<()> {
         r.ue()?;
         r.skip(1)?;
     }
-    r.skip(20)
+    Ok(r.skip(20)?)
 }
 
 fn vui(r: &mut BitReader) -> VResult<Vui> {
@@ -271,9 +273,9 @@ fn vui(r: &mut BitReader) -> VResult<Vui> {
 pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
     let mut r = BitReader::new(rbsp);
     r.skip(8)?; // NAL header
-    let profile_idc = r.u(8)? as u8;
-    let constraint_flags = r.u(8)? as u8;
-    let level_idc = r.u(8)? as u8;
+    let profile_idc = low_u8(r.u(8)?);
+    let constraint_flags = low_u8(r.u(8)?);
+    let level_idc = low_u8(r.u(8)?);
     let id = r.ue_max(31, "seq_parameter_set_id")?;
     let mut s = Sps {
         profile_idc,
@@ -352,10 +354,10 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
     s.direct_8x8_inference = r.flag()?;
     if r.flag()? {
         let (cx, cy) = match (s.chroma_format_idc, s.separate_colour_plane) {
-            (0, _) | (3, true) => (1, 2 - s.frame_mbs_only as u32),
-            (1, _) => (2, 2 * (2 - s.frame_mbs_only as u32)),
-            (2, _) => (2, 2 - s.frame_mbs_only as u32),
-            _ => (1, 2 - s.frame_mbs_only as u32),
+            (0, _) | (3, true) => (1, 2 - u32::from(s.frame_mbs_only)),
+            (1, _) => (2, 2 * (2 - u32::from(s.frame_mbs_only))),
+            (2, _) => (2, 2 - u32::from(s.frame_mbs_only)),
+            _ => (1, 2 - u32::from(s.frame_mbs_only)),
         };
         let (l, rr, t, b) = (r.ue()?, r.ue()?, r.ue()?, r.ue()?);
         // CropUnitX/Y * frame_crop_*_offset (7.4.2.1.1, eq. 7-19..7-22); offsets are ue(v) up to
@@ -421,7 +423,7 @@ pub fn parse_pps(rbsp: &[u8], sps_lookup: impl Fn(u32) -> Option<Sps>) -> VResul
     let weighted_pred = r.flag()?;
     let weighted_bipred_idc = r.u(2)?;
     let pic_init_qp_minus26 = r.se_range(
-        -(26 + 6 * sps.bit_depth_luma_minus8 as i32),
+        -(26 + 6 * fit::<i32, _>(sps.bit_depth_luma_minus8, "bit_depth_luma_minus8")?),
         25,
         "pic_init_qp_minus26",
     )?;
@@ -451,8 +453,8 @@ pub fn parse_pps(rbsp: &[u8], sps_lookup: impl Fn(u32) -> Option<Sps>) -> VResul
     if r.more_rbsp_data() {
         p.transform_8x8_mode = r.flag()?;
         if r.flag()? {
-            let n =
-                6 + if sps.chroma_format_idc != 3 { 2 } else { 6 } * p.transform_8x8_mode as usize;
+            let n = 6 + if sps.chroma_format_idc != 3 { 2 } else { 6 }
+                * usize::from(p.transform_8x8_mode);
             // 7.4.2.2: fall-back rule A when the SPS carries no matrices, rule B otherwise.
             let fallback = sps.seq_scaling_matrix_present.then_some(&sps.scaling);
             p.scaling = scaling_matrices(&mut r, n, fallback)?;

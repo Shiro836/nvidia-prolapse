@@ -75,7 +75,7 @@ pub fn select(
                 mf.mfmv_offset[j][rr] =
                     get_relative_dist(seq, r.order_hint, r.ref_hints[rr]) as i16;
                 mf.mfmv_side[j][rr] =
-                    (get_relative_dist(seq, r.ref_hints[rr], r.order_hint) > 0) as i8;
+                    i8::from(get_relative_dist(seq, r.ref_hints[rr], r.order_hint) > 0);
             }
         }
     }

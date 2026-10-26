@@ -4,7 +4,9 @@
 //! parsed by the engine itself (`sw_hdr_skip_length` tells it what the driver consumed).
 use super::ps::{Pps, Sps, StRps, st_ref_pic_set};
 use crate::bits::BitReader;
+use crate::fit;
 use crate::{VResult, bitstream, unsupported};
+use nv_rm_core::conv::usize_from_u32;
 
 pub const SLICE_B: u32 = 0;
 pub const SLICE_P: u32 = 1;
@@ -95,7 +97,7 @@ pub fn parse_slice_header<'a>(
     if h.dependent {
         return Ok(h);
     }
-    r.skip(pps.num_extra_slice_header_bits as usize)?;
+    r.skip(usize_from_u32(pps.num_extra_slice_header_bits))?;
     h.slice_type = r.ue_max(2, "slice_type")?;
     if pps.output_flag_present {
         h.pic_output = r.flag()?;
@@ -118,13 +120,13 @@ pub fn parse_slice_header<'a>(
             if n == 0 {
                 return bitstream("short_term_ref_pic_set_sps_flag with no SPS sets");
             }
-            let idx = r.u(ceil_log2(n as u32))? as usize;
+            let idx = usize_from_u32(r.u(ceil_log2(fit(n, "num_short_term_ref_pic_sets")?))?);
             if idx >= n {
                 return bitstream("short_term_ref_pic_set_idx out of range");
             }
             h.rps = sps.st_rps[idx].clone();
         }
-        h.st_rps_bits = (r.pos() - p) as u32;
+        h.st_rps_bits = fit(r.pos() - p, "st_ref_pic_set bits")?;
         if sps.long_term_ref_pics_present {
             let num_lt_sps = if sps.num_long_term_ref_pics_sps > 0 {
                 r.ue()?
@@ -139,7 +141,7 @@ pub fn parse_slice_header<'a>(
                 );
             }
         }
-        h.rps_syntax_bits = (r.pos() - start) as u32;
+        h.rps_syntax_bits = fit(r.pos() - start, "slice RPS syntax bits")?;
     }
     Ok(h)
 }

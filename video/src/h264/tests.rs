@@ -4,6 +4,7 @@
 //! directory in `NVDEC_STOCK_EVIDENCE`; run with `cargo test -- --ignored`.
 use super::*;
 use crate::bits::split_annexb;
+use nv_rm_core::conv::usize_from_u32;
 
 pub(crate) struct StockFrame {
     pub app: u32,
@@ -365,7 +366,12 @@ fn scaling_list_fallback_rules() {
     let ue = |v: u32| {
         let x = v + 1;
         let n = 32 - x.leading_zeros();
-        format!("{}{:0w$b}", "0".repeat(n as usize - 1), x, w = n as usize)
+        format!(
+            "{}{:0w$b}",
+            "0".repeat(usize_from_u32(n) - 1),
+            x,
+            w = usize_from_u32(n)
+        )
     };
     bits += "01100111"; // NAL header SPS
     bits += &format!("{:08b}{:08b}{:08b}", 100, 0, 40);

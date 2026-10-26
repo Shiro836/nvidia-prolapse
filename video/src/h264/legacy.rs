@@ -74,8 +74,8 @@ pub fn build(
         mbs.saturating_mul(10000).min(ep.gptimer_limit),
     );
     put32(&mut d, 0x58, sps.log2_max_poc_lsb_minus4);
-    put32(&mut d, 0x5c, sps.delta_pic_order_always_zero as u32);
-    put32(&mut d, 0x60, sps.frame_mbs_only as u32);
+    put32(&mut d, 0x5c, u32::from(sps.delta_pic_order_always_zero));
+    put32(&mut d, 0x60, u32::from(sps.frame_mbs_only));
     put32(&mut d, 0x64, sps.pic_width_in_mbs);
     put32(&mut d, 0x68, sps.frame_height_in_mbs());
     put32(
@@ -83,31 +83,35 @@ pub fn build(
         0x6c,
         (lay.tile_format & 3) | (lay.gob_height & 7) << 2,
     );
-    put32(&mut d, 0x70, pps.entropy_coding_mode as u32);
+    put32(&mut d, 0x70, u32::from(pps.entropy_coding_mode));
     put32(
         &mut d,
         0x74,
-        pps.bottom_field_pic_order_in_frame_present as u32,
+        u32::from(pps.bottom_field_pic_order_in_frame_present),
     );
     put32(&mut d, 0x78, pps.num_ref_idx_l0_default_active_minus1);
     put32(&mut d, 0x7c, pps.num_ref_idx_l1_default_active_minus1);
-    put32(&mut d, 0x80, pps.deblocking_filter_control_present as u32);
-    put32(&mut d, 0x84, pps.redundant_pic_cnt_present as u32);
-    put32(&mut d, 0x88, pps.transform_8x8_mode as u32);
+    put32(
+        &mut d,
+        0x80,
+        u32::from(pps.deblocking_filter_control_present),
+    );
+    put32(&mut d, 0x84, u32::from(pps.redundant_pic_cnt_present));
+    put32(&mut d, 0x88, u32::from(pps.transform_8x8_mode));
     put32(&mut d, 0x8c, lay.pitch_luma);
     put32(&mut d, 0x90, lay.pitch_chroma);
     put32(&mut d, 0x98, lay.luma_bot_offset);
     put32(&mut d, 0xa4, lay.chroma_bot_offset);
     put32(&mut d, 0xac, lay.hist_size);
     let s5 = |v: i32| (v as u32) & 0x1f;
-    let w = mbaff_frame as u32
-        | (sps.direct_8x8_inference as u32) << 1
-        | (pps.weighted_pred as u32) << 2
-        | (pps.constrained_intra_pred as u32) << 3
-        | (inp.ref_pic as u32) << 4
-        | (inp.field_pic as u32) << 5
-        | (inp.bottom_field as u32) << 6
-        | (inp.second_field as u32) << 7
+    let w = u32::from(mbaff_frame)
+        | u32::from(sps.direct_8x8_inference) << 1
+        | u32::from(pps.weighted_pred) << 2
+        | u32::from(pps.constrained_intra_pred) << 3
+        | u32::from(inp.ref_pic) << 4
+        | u32::from(inp.field_pic) << 5
+        | u32::from(inp.bottom_field) << 6
+        | u32::from(inp.second_field) << 7
         | (sps.log2_max_frame_num_minus4 & 0xf) << 8
         | (sps.chroma_format_idc & 3) << 12
         | (sps.pic_order_cnt_type & 3) << 14
@@ -117,9 +121,9 @@ pub fn build(
     put32(&mut d, 0xb0, w);
     let w = (pps.weighted_bipred_idc & 3)
         | (inp.surface_id & 0x7f) << 2
-        | (inp.cur_slot as u32 & 0x1f) << 9
+        | (u32::from(inp.cur_slot) & 0x1f) << 9
         | (inp.frame_num & 0xffff) << 14
-        | (ep.output_layout as u32) << 31;
+        | u32::from(ep.output_layout) << 31;
     put32(&mut d, 0xb4, w);
     put32(&mut d, 0xb8, inp.poc[0] as u32);
     put32(&mut d, 0xbc, inp.poc[1] as u32);

@@ -49,6 +49,7 @@
 //! raw `slice_pic_order_cnt_lsb` (no MSB tracking); the DPB is a FIFO of
 //! `sps_max_dec_pic_buffering[0]` entries; SPS/PPS NAL units update the
 //! descriptor immediately, so a picture still pending flush sees them.
+use nv_rm_core::conv::usize_from_u32;
 
 use nv_rm_core::Error;
 pub use nv_rm_sys::nvdec_drv::{NVDEC_HEVC_PIC_S_SIZE, NvdecHevcPicS};
@@ -126,7 +127,7 @@ impl<'a> BitReader<'a> {
         if n > 32 {
             return contract(format!("u({n}) wider than 32 bits"));
         }
-        let end = self.pos + n as usize;
+        let end = self.pos + usize_from_u32(n);
         if end > self.data.len() * 8 {
             return contract(format!(
                 "bitstream truncated: need bits {}..{end}, have {}",
@@ -1182,7 +1183,7 @@ impl Parser {
             self.history
                 .push((curr_pic_idx, hdr.slice_pic_order_cnt_lsb));
         }
-        if self.history.len() >= sps.sps_max_dec_pic_buffering as usize {
+        if self.history.len() >= usize_from_u32(sps.sps_max_dec_pic_buffering) {
             self.history.remove(0);
         }
         Ok(())
@@ -1273,8 +1274,8 @@ pub fn parse_hevc(bitstream: &[u8]) -> Result<HevcParsed> {
     };
     p.out.width = crop(s.pic_width_in_luma_samples, left, right, "width")?;
     p.out.height = crop(s.pic_height_in_luma_samples, top, bottom, "height")?;
-    p.out.luma_w = s.pic_width_in_luma_samples as usize;
-    p.out.luma_h = s.pic_height_in_luma_samples as usize;
+    p.out.luma_w = usize_from_u32(s.pic_width_in_luma_samples);
+    p.out.luma_h = usize_from_u32(s.pic_height_in_luma_samples);
     Ok(p.out)
 }
 
@@ -1469,7 +1470,9 @@ ssm 2112 96
                 (offset_of!(P, $f) * 8, size_of_val(&P::default().$f) * 8)
             };
         }
-        let bits = |unit: usize, f: BitField| (unit * 8 + f.shift as usize, f.width as usize);
+        let bits = |unit: usize, f: BitField| {
+            (unit * 8 + usize_from_u32(f.shift), usize_from_u32(f.width))
+        };
         let (enc, r#gen) = (offset_of!(P, encryption_bits), offset_of!(P, general_bits));
         let (s0, s1) = (offset_of!(P, sps_bits0), offset_of!(P, sps_bits1));
         let (p0, p1) = (offset_of!(P, pps_bits0), offset_of!(P, pps_bits1));

@@ -15,27 +15,101 @@
 //! drivers/media/platform/verisilicon/hantro_g2_vp9_dec.c hantro_g2_vp9_dec_done
 //! for the same mapping onto libvpx counts).
 use crate::nvdec_vp9_tables as t;
-use nv_rm_core::{Error, Result};
+use nv_rm_core::conv::{low_u8, usize_from_u32};
 use nv_rm_sys::nvdec_drv::{CoefCounts, CoefProbs, Pod, Vp9EntropyCounts, Vp9EntropyProbs};
 
-fn bad(msg: impl Into<String>) -> Error {
-    Error::Contract(format!("VP9: {}", msg.into()))
+/// Why the VP9 front end rejected a packet or frame.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Vp9Error {
+    /// The input does not start with an IVF header for VP90.
+    #[error("VP9: input is not an IVF VP90 file")]
+    NotIvf,
+    /// An IVF frame header announces more bytes than the file holds.
+    #[error("VP9: truncated IVF frame at byte {offset} ({size} bytes announced)")]
+    TruncatedIvfFrame {
+        /// File offset of the frame payload.
+        offset: usize,
+        /// Announced payload size.
+        size: usize,
+    },
+    /// A packet of zero bytes.
+    #[error("VP9: empty packet")]
+    EmptyPacket,
+    /// A superframe index (Annex B) whose frame sizes exceed the packet.
+    #[error("VP9: superframe index overruns packet (frame {frame}, {size} bytes)")]
+    SuperframeOverrun {
+        /// Index of the frame in the superframe.
+        frame: usize,
+        /// Its size from the index.
+        size: usize,
+    },
+    /// The uncompressed header (6.2) reads past the frame.
+    #[error("VP9: uncompressed header overruns frame")]
+    HeaderOverrun,
+    /// `frame_marker` is not 2 (6.2).
+    #[error("VP9: frame marker")]
+    FrameMarker,
+    /// Profile 1 or 3 (4:2:2/4:4:0/4:4:4).
+    #[error("VP9: profile {0} unsupported (4:2:0 profiles 0 and 2 only)")]
+    Profile(u32),
+    /// `show_existing_frame` names a slot that holds no frame.
+    #[error("VP9: show_existing_frame of an empty slot ({0})")]
+    ShowEmptySlot(usize),
+    /// `frame_sync_code` is not 0x49 0x83 0x42 (6.2.1).
+    #[error("VP9: frame sync code")]
+    SyncCode,
+    /// `color_space` CS_RGB (only in profiles 1 and 3).
+    #[error("VP9: RGB colour space unsupported in profile {0}")]
+    RgbColourSpace(u32),
+    /// An inter frame references a slot that holds no frame.
+    #[error("VP9: inter frame references an empty slot ({0})")]
+    EmptyReference(usize),
+    /// `header_size_in_bytes` is 0 (6.2: a conformant frame has a compressed header).
+    #[error("VP9: compressed header size 0")]
+    CompressedHeaderSizeZero,
+    /// The compressed header extends past the frame.
+    #[error("VP9: compressed header overruns frame ({size} bytes at byte {offset})")]
+    CompressedHeaderOverrun {
+        /// Its start in the frame.
+        offset: usize,
+        /// Its size from the uncompressed header.
+        size: usize,
+    },
+    /// The compressed header (6.3) has no bytes.
+    #[error("VP9: empty compressed header")]
+    EmptyCompressedHeader,
+    /// The bool decoder's marker bit (9.2.1) is set.
+    #[error("VP9: compressed header marker bit set")]
+    CompressedMarker,
+    /// Backward adaptation (8.4.2) of a frame that needs it, without the engine's counts.
+    #[error("VP9: adaptation needs the engine counts")]
+    MissingCounts,
 }
+
+/// The RM-backend callers of the VP9 front end report its errors as broken input contracts.
+impl From<Vp9Error> for nv_rm_core::Error {
+    fn from(e: Vp9Error) -> Self {
+        Self::Contract(e.to_string())
+    }
+}
+
+/// `Result` of the VP9 front end.
+pub type Result<T> = std::result::Result<T, Vp9Error>;
 
 /// Frames of an IVF file (32-byte header, 12-byte frame headers).
 pub fn ivf_frames(data: &[u8]) -> Result<Vec<&[u8]>> {
     if data.len() < 32 || &data[0..4] != b"DKIF" || &data[8..12] != b"VP90" {
-        return Err(bad("input is not an IVF VP90 file"));
+        return Err(Vp9Error::NotIvf);
     }
-    let header = u16::from_le_bytes([data[6], data[7]]) as usize;
-    let mut pos = header;
+    let mut pos = usize::from(u16::from_le_bytes([data[6], data[7]]));
     let mut out = Vec::new();
-    while pos + 12 <= data.len() {
-        let size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+    while let Some(&[s0, s1, s2, s3, ..]) = data.get(pos..).filter(|rest| rest.len() >= 12) {
+        let size = usize_from_u32(u32::from_le_bytes([s0, s1, s2, s3]));
         pos += 12;
-        let frame = data
-            .get(pos..pos + size)
-            .ok_or_else(|| bad("truncated IVF frame"))?;
+        let frame = pos
+            .checked_add(size)
+            .and_then(|end| data.get(pos..end))
+            .ok_or(Vp9Error::TruncatedIvfFrame { offset: pos, size })?;
         out.push(frame);
         pos += size;
     }
@@ -46,30 +120,34 @@ pub fn ivf_frames(data: &[u8]) -> Result<Vec<&[u8]>> {
 /// returned as is.
 pub fn split_superframe(data: &[u8]) -> Result<Vec<&[u8]>> {
     let Some(&last) = data.last() else {
-        return Err(bad("empty packet"));
+        return Err(Vp9Error::EmptyPacket);
     };
     if last & 0xe0 != 0xc0 {
         return Ok(vec![data]);
     }
-    let frames = (last & 7) as usize + 1;
-    let mag = ((last >> 3) & 3) as usize + 1;
+    let frames = usize::from(last & 7) + 1;
+    let mag = usize::from((last >> 3) & 3) + 1;
     let index = 2 + mag * frames;
-    if data.len() < index || data[data.len() - index] != last {
+    let Some(index_start) = data.len().checked_sub(index) else {
+        return Ok(vec![data]);
+    };
+    if data[index_start] != last {
         return Ok(vec![data]);
     }
-    let mut pos = data.len() - index + 1;
+    // The index ends in the marker byte again, so the size bytes are in bounds.
+    let sizes = &data[index_start + 1..data.len() - 1];
     let mut off = 0usize;
     let mut out = Vec::new();
-    for _ in 0..frames {
-        let mut size = 0usize;
-        for b in 0..mag {
-            size |= (data[pos + b] as usize) << (8 * b);
-        }
-        pos += mag;
-        let frame = data
-            .get(off..off + size)
-            .ok_or_else(|| bad("superframe index overruns packet"))?;
-        out.push(frame);
+    for (frame, bytes) in sizes.chunks_exact(mag).enumerate() {
+        let size = bytes
+            .iter()
+            .rev()
+            .fold(0usize, |size, &b| size << 8 | usize::from(b));
+        let piece = off
+            .checked_add(size)
+            .and_then(|end| data.get(off..end))
+            .ok_or(Vp9Error::SuperframeOverrun { frame, size })?;
+        out.push(piece);
         off += size;
     }
     Ok(out)
@@ -82,13 +160,10 @@ struct BitReader<'a> {
 
 impl BitReader<'_> {
     fn bit(&mut self) -> Result<u32> {
-        let byte = *self
-            .data
-            .get(self.pos / 8)
-            .ok_or_else(|| bad("uncompressed header overruns frame"))?;
+        let byte = *self.data.get(self.pos / 8).ok_or(Vp9Error::HeaderOverrun)?;
         let b = (byte >> (7 - self.pos % 8)) & 1;
         self.pos += 1;
-        Ok(b as u32)
+        Ok(u32::from(b))
     }
     fn f(&mut self, n: u32) -> Result<u32> {
         let mut v = 0;
@@ -115,16 +190,16 @@ struct BoolDecoder<'a> {
 impl<'a> BoolDecoder<'a> {
     fn new(data: &'a [u8]) -> Result<Self> {
         if data.is_empty() {
-            return Err(bad("empty compressed header"));
+            return Err(Vp9Error::EmptyCompressedHeader);
         }
         let mut d = Self {
             data,
             bit: 8,
-            value: data[0] as u32,
+            value: u32::from(data[0]),
             range: 255,
         };
         if d.read(128) != 0 {
-            return Err(bad("compressed header marker bit set"));
+            return Err(Vp9Error::CompressedMarker);
         }
         Ok(d)
     }
@@ -134,10 +209,10 @@ impl<'a> BoolDecoder<'a> {
             .get(self.bit / 8)
             .map_or(0, |byte| (byte >> (7 - self.bit % 8)) & 1);
         self.bit += 1;
-        b as u32
+        u32::from(b)
     }
     fn read(&mut self, p: u8) -> u32 {
-        let split = 1 + (((self.range - 1) * p as u32) >> 8);
+        let split = 1 + (((self.range - 1) * u32::from(p)) >> 8);
         let bit = if self.value < split {
             self.range = split;
             0
@@ -171,7 +246,7 @@ impl<'a> BoolDecoder<'a> {
                     (v << 1) - 65 + self.read(128)
                 }) + 64
             };
-            *p = inv_remap_prob(delp as usize, *p);
+            *p = inv_remap_prob(usize_from_u32(delp), *p);
         }
     }
     fn mv_update(&mut self, p: &mut u8) {
@@ -192,8 +267,8 @@ fn inv_recenter_nonneg(v: i32, m: i32) -> i32 {
 }
 
 fn inv_remap_prob(delta: usize, prob: u8) -> u8 {
-    let v = t::INV_MAP_TABLE[delta.min(254)] as i32;
-    let m = prob as i32 - 1;
+    let v = i32::from(t::INV_MAP_TABLE[delta.min(254)]);
+    let m = i32::from(prob) - 1;
     if (m << 1) <= 255 {
         (1 + inv_recenter_nonneg(v, m)) as u8
     } else {
@@ -450,19 +525,17 @@ impl Vp9State {
         let mut r = BitReader { data, pos: 0 };
         let mut h = FrameHeader::default();
         if r.f(2)? != 2 {
-            return Err(bad("frame marker"));
+            return Err(Vp9Error::FrameMarker);
         }
         let profile = r.bit()? | r.bit()? << 1;
         if profile != 0 && profile != 2 {
-            return Err(bad(format!(
-                "profile {profile} unsupported (4:2:0 profiles 0 and 2 only)"
-            )));
+            return Err(Vp9Error::Profile(profile));
         }
         h.show_existing_frame = r.bit()? != 0;
         if h.show_existing_frame {
-            h.frame_to_show = r.f(3)? as usize;
+            h.frame_to_show = usize_from_u32(r.f(3)?);
             if self.slots[h.frame_to_show].surface.is_none() {
-                return Err(bad("show_existing_frame of an empty slot"));
+                return Err(Vp9Error::ShowEmptySlot(h.frame_to_show));
             }
             return Ok(h);
         }
@@ -471,7 +544,7 @@ impl Vp9State {
         h.error_resilient = r.bit()? != 0;
         let sync = |r: &mut BitReader| -> Result<()> {
             if r.f(24)? != 0x498342 {
-                return Err(bad("frame sync code"));
+                return Err(Vp9Error::SyncCode);
             }
             Ok(())
         };
@@ -485,9 +558,7 @@ impl Vp9State {
             };
             let cs = r.f(3)?;
             if cs == 7 {
-                return Err(bad(format!(
-                    "RGB colour space unsupported in profile {profile}"
-                )));
+                return Err(Vp9Error::RgbColourSpace(profile));
             }
             let range = r.bit()?;
             Ok((cs, range != 0, bit_depth))
@@ -523,13 +594,13 @@ impl Vp9State {
                     // studio range, 8-bit (spec 7.2, refresh_frame_flags follows).
                     (self.color, self.bit_depth) = ((1, false), 8);
                 }
-                h.refresh_frame_flags = r.f(8)? as u8;
+                h.refresh_frame_flags = low_u8(r.f(8)?);
                 frame_size(&mut r, &mut h)?;
                 render_size(&mut r)?;
             } else {
-                h.refresh_frame_flags = r.f(8)? as u8;
+                h.refresh_frame_flags = low_u8(r.f(8)?);
                 for i in 0..3 {
-                    h.ref_frame_idx[i] = r.f(3)? as usize;
+                    h.ref_frame_idx[i] = usize_from_u32(r.f(3)?);
                     h.sign_bias[1 + i] = r.bit()? as u8;
                 }
                 let mut found = false;
@@ -547,14 +618,14 @@ impl Vp9State {
                 render_size(&mut r)?;
                 for i in 0..3 {
                     if self.slots[h.ref_frame_idx[i]].surface.is_none() {
-                        return Err(bad("inter frame references an empty slot"));
+                        return Err(Vp9Error::EmptyReference(h.ref_frame_idx[i]));
                     }
                 }
                 h.allow_high_precision_mv = r.bit()? != 0;
                 h.interp_filter = if r.bit()? != 0 {
                     SWITCHABLE
                 } else {
-                    LITERAL_TO_FILTER[r.f(2)? as usize]
+                    LITERAL_TO_FILTER[usize_from_u32(r.f(2)?)]
                 };
             }
         }
@@ -564,7 +635,7 @@ impl Vp9State {
         } else {
             h.frame_parallel = true;
         }
-        h.frame_context_idx = r.f(2)? as usize;
+        h.frame_context_idx = usize_from_u32(r.f(2)?);
         if h.is_intra() || h.error_resilient {
             self.setup_past_independence(&h);
             h.frame_context_idx = 0;
@@ -574,8 +645,8 @@ impl Vp9State {
             h.sign_bias = [0; 4];
         }
         // loop_filter_params
-        h.filter_level = r.f(6)? as u8;
-        h.sharpness = r.f(3)? as u8;
+        h.filter_level = low_u8(r.f(6)?);
+        h.sharpness = low_u8(r.f(3)?);
         h.mode_ref_delta_enabled = r.bit()? != 0;
         if h.mode_ref_delta_enabled && r.bit()? != 0 {
             for d in self.ref_deltas.iter_mut() {
@@ -590,7 +661,7 @@ impl Vp9State {
             }
         }
         // quantization_params
-        h.base_q_idx = r.f(8)? as u8;
+        h.base_q_idx = low_u8(r.f(8)?);
         let mut dq = || -> Result<i8> { Ok(if r.bit()? != 0 { r.s(4)? as i8 } else { 0 }) };
         h.delta_q_y_dc = dq()?;
         h.delta_q_uv_dc = dq()?;
@@ -608,12 +679,12 @@ impl Vp9State {
             seg.update_map = r.bit()? != 0;
             if seg.update_map {
                 for p in seg.tree_probs.iter_mut() {
-                    *p = if r.bit()? != 0 { r.f(8)? as u8 } else { 255 };
+                    *p = if r.bit()? != 0 { low_u8(r.f(8)?) } else { 255 };
                 }
                 seg.temporal_update = r.bit()? != 0;
                 for p in seg.pred_probs.iter_mut() {
                     *p = if seg.temporal_update && r.bit()? != 0 {
-                        r.f(8)? as u8
+                        low_u8(r.f(8)?)
                     } else {
                         255
                     };
@@ -658,14 +729,17 @@ impl Vp9State {
         if h.log2_tile_rows != 0 {
             h.log2_tile_rows += r.bit()?;
         }
-        h.header_size = r.f(16)? as usize;
+        h.header_size = usize_from_u32(r.f(16)?);
         if h.header_size == 0 {
-            return Err(bad("compressed header size 0"));
+            return Err(Vp9Error::CompressedHeaderSizeZero);
         }
         h.uncompressed_size = r.pos.div_ceil(8);
         let comp = data
             .get(h.uncompressed_size..h.uncompressed_size + h.header_size)
-            .ok_or_else(|| bad("compressed header overruns frame"))?;
+            .ok_or(Vp9Error::CompressedHeaderOverrun {
+                offset: h.uncompressed_size,
+                size: h.header_size,
+            })?;
         if !h.is_intra() {
             // setup_compound_reference_mode (libvpx vp9_setup_compound_reference_mode).
             let s = h.sign_bias;
@@ -705,7 +779,7 @@ impl Vp9State {
                 d.diff_update(p);
             }
         }
-        let max_tx = [0, 1, 2, 3, 3][h.tx_mode as usize];
+        let max_tx = [0, 1, 2, 3, 3][usize::from(h.tx_mode)];
         for tx in 0..=max_tx {
             if d.read(128) != 0 {
                 for plane in fc.coef[tx].iter_mut() {
@@ -882,7 +956,7 @@ impl Vp9State {
         surface: usize,
     ) -> Result<()> {
         if !h.error_resilient && !h.frame_parallel {
-            let c = counts.ok_or_else(|| bad("adaptation needs the engine counts"))?;
+            let c = counts.ok_or(Vp9Error::MissingCounts)?;
             let pre = self.contexts[h.frame_context_idx];
             adapt_coef(
                 &mut self.fc,
@@ -915,7 +989,7 @@ impl Vp9State {
 }
 
 fn get_prob(num: u32, den: u32) -> u8 {
-    let p = ((num as u64 * 256 + (den as u64 >> 1)) / den as u64) as u32;
+    let p = ((u64::from(num) * 256 + (u64::from(den) >> 1)) / u64::from(den)) as u32;
     p.clamp(1, 255) as u8
 }
 
@@ -924,7 +998,7 @@ fn merge_probs(pre: u8, ct: [u32; 2], count_sat: u32, max_update: u32) -> u8 {
     let prob = if den == 0 { 128 } else { get_prob(ct[0], den) };
     let count = den.min(count_sat);
     let factor = max_update * count / count_sat;
-    ((pre as u32 * (256 - factor) + prob as u32 * factor + 128) >> 8) as u8
+    ((u32::from(pre) * (256 - factor) + u32::from(prob) * factor + 128) >> 8) as u8
 }
 
 const COUNT_TO_UPDATE_FACTOR: [u32; 21] = [
@@ -936,9 +1010,9 @@ fn mode_mv_merge(pre: u8, ct: [u32; 2]) -> u8 {
     if den == 0 {
         return pre;
     }
-    let factor = COUNT_TO_UPDATE_FACTOR[den.min(20) as usize];
+    let factor = COUNT_TO_UPDATE_FACTOR[usize_from_u32(den.min(20))];
     let prob = get_prob(ct[0], den);
-    ((pre as u32 * (256 - factor) + prob as u32 * factor + 128) >> 8) as u8
+    ((u32::from(pre) * (256 - factor) + u32::from(prob) * factor + 128) >> 8) as u8
 }
 
 /// libvpx vpx_tree_merge_probs over a tree in libvpx index form.

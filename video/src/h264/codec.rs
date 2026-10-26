@@ -14,6 +14,7 @@ use crate::{
     Allocator, BuildContext, CODEC_H264, CodecDecoder, DecodeJob, Job, NvdecGen,
     PictureInfo as SessionInfo, SurfaceLayout, VResult, VideoError, bits,
 };
+use nv_rm_core::conv::usize_from_u32;
 use nv_rm_core::push::method;
 use std::collections::VecDeque;
 
@@ -115,9 +116,11 @@ impl CodecDecoder for H264Decoder {
         Ok(())
     }
     fn surfaces_needed(&self, data: &[u8]) -> VResult<usize> {
-        Ok(bits::split_annexb(data)
-            .iter()
-            .any(|n| matches!(n.nal[0] & 0x1f, 1 | 5)) as usize)
+        Ok(usize::from(
+            bits::split_annexb(data)
+                .iter()
+                .any(|n| matches!(n.nal[0] & 0x1f, 1 | 5)),
+        ))
     }
     fn push_unit(&mut self, data: &[u8]) -> VResult<()> {
         self.units.push_back(data.to_vec());
@@ -191,7 +194,7 @@ impl CodecDecoder for H264Decoder {
             reloc(&mut w, 0x410, da + SLICE_OFFSETS);
         }
         for (i, s) in job.slot_surfaces.iter().enumerate() {
-            let s = s.map_or(cur, |s| ctx.surfaces[s as usize]);
+            let s = s.map_or(cur, |s| ctx.surfaces[usize_from_u32(s)]);
             reloc(&mut w, 0x430 + 4 * i as u32, s.luma);
             reloc(&mut w, 0x474 + 4 * i as u32, s.chroma);
         }
@@ -228,11 +231,11 @@ impl CodecDecoder for H264Decoder {
         self.dec
             .referenced_surfaces()
             .into_iter()
-            .map(|s| s as usize)
+            .map(usize_from_u32)
             .collect()
     }
     fn bump_ready(&self, pending: usize) -> bool {
-        pending > self.reorder as usize
+        pending > usize_from_u32(self.reorder)
     }
     fn flush(&mut self) {
         self.dec.flush();

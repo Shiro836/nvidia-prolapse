@@ -120,18 +120,18 @@ fn put16(d: &mut [u8], o: usize, v: u16) {
 pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
     let (sps, pps) = (inp.sps, inp.pps);
     let mut d = vec![0u8; SETUP_SIZE + SCALING_SIZE];
-    let layout_bit = (ep.output_layout as u32) << 25;
+    let layout_bit = u32::from(ep.output_layout) << 25;
     for (i, e) in inp.dpb.iter().enumerate() {
         let o = 0x40 + 16 * i;
         let Some(e) = e else {
-            let s = inp.empty_slot as u32;
+            let s = u32::from(inp.empty_slot);
             put32(&mut d, o, (s & 0x7f) | (s & 0x1f) << 7 | layout_bit);
             continue;
         };
-        let s = e.slot.map_or(0x7f, |s| s as u32);
-        let mark = 1 + e.long_term as u32;
-        let mut w = (s & 0x7f) | (s & 0x1f) << 7 | (e.state as u32 & 3) << 12;
-        w |= (e.long_term as u32) << 14 | (e.non_existing as u32) << 15;
+        let s = e.slot.map_or(0x7f, u32::from);
+        let mark = 1 + u32::from(e.long_term);
+        let mut w = (s & 0x7f) | (s & 0x1f) << 7 | (u32::from(e.state) & 3) << 12;
+        w |= u32::from(e.long_term) << 14 | u32::from(e.non_existing) << 15;
         if e.state & 1 != 0 {
             w |= mark << 17;
         }
@@ -156,10 +156,10 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
         mbs.saturating_mul(10000).min(ep.gptimer_limit),
     );
     put32(&mut d, 0x1c4, inp.bitstream_len);
-    let w1cc = (inp.cur_slot as u32 & 0x1f)
+    let w1cc = (u32::from(inp.cur_slot) & 0x1f)
         | (inp.surface_id & 0x1f) << 5
         | 1 << 10
-        | (ep.output_layout as u32) << 15
+        | u32::from(ep.output_layout) << 15
         | 1 << 18;
     put32(&mut d, 0x1cc, w1cc);
     let pitch16 = (((ep.pitch(sps) + 15) >> 4) & 0xfff) as u16;
@@ -175,8 +175,8 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
             | (sps.frame_height_in_mbs() & 0x3ff) << 18
             | (sps.chroma_format_idc & 3) << 28,
     );
-    let b = |v: bool| v as u64;
-    let m = |v: i32, mask: u64| (v as u32 as u64) & mask;
+    let b = |v: bool| u64::from(v);
+    let m = |v: i32, mask: u64| u64::from(v as u32) & mask;
     let fl = m(sps.log2_max_frame_num_minus4 as i32, 0xf)
         | m(sps.log2_max_poc_lsb_minus4 as i32, 0xf) << 4
         | m(sps.pic_order_cnt_type as i32, 3) << 8
@@ -201,17 +201,18 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
     let coarse = sps.direct_8x8_inference && sps.frame_mbs_only;
     let per_mb: u32 = if coarse { 4 } else { 16 };
     let row = (sps.pic_width_in_mbs * per_mb * 8).div_ceil(256) & 0x3ff;
-    let w1e6 =
-        row as u16 | ((!coarse) as u16) << 10 | (sps.qpprime_y_zero_transform_bypass as u16) << 11;
+    let w1e6 = row as u16
+        | u16::from(!coarse) << 10
+        | u16::from(sps.qpprime_y_zero_transform_bypass) << 11;
     put16(&mut d, 0x1e6, w1e6);
     put16(&mut d, 0x1e8, inp.frame_num as u16);
-    d[0x1ea] = inp.field_pic as u8
-        | (inp.bottom_field as u8) << 1
-        | (inp.second_field as u8) << 2
-        | (inp.ref_pic as u8) << 3
-        | (inp.intra_pic as u8) << 4;
+    d[0x1ea] = u8::from(inp.field_pic)
+        | u8::from(inp.bottom_field) << 1
+        | u8::from(inp.second_field) << 2
+        | u8::from(inp.ref_pic) << 3
+        | u8::from(inp.intra_pic) << 4;
     if inp.field_pic {
-        let p = inp.poc[inp.bottom_field as usize] as u32;
+        let p = inp.poc[usize::from(inp.bottom_field)] as u32;
         put32(&mut d, 0x1ec, p);
         put32(&mut d, 0x1f0, p);
     } else {
@@ -238,5 +239,5 @@ pub fn build(inp: &DescInput, ep: &EngineParams) -> Vec<u8> {
 /// `SET_CONTROL_PARAMS` for NEW_H264 as stock emits it: codec 3, gptimer/err-conceal/mbtimer
 /// enables (0x52053) with the error-concealment reference in bits 7-11.
 pub fn control_params(err_conceal_slot: u8) -> u32 {
-    0x52053 | ((err_conceal_slot as u32 & 0x1f) << 7)
+    0x52053 | ((u32::from(err_conceal_slot) & 0x1f) << 7)
 }

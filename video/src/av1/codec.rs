@@ -7,6 +7,7 @@
 //! creation, so the four default q-context tables live in four constant buffers and an LRU index that
 //! stock would have filled with defaults is aliased to the constant buffer (the engine never writes a
 //! read buffer, so saving that index as a context stays valid).
+use nv_rm_core::conv::{u64_from_usize, usize_from_u32};
 
 use super::{Av1Codec, Av1Out, CDF_BUFFER_SIZE, CDF_BUFFERS, DPB_SLOTS, PictureJob, desc};
 use crate::{
@@ -23,15 +24,8 @@ fn align(v: u64, a: u64) -> u64 {
 }
 /// AV1_TEMPORAL_MV_BUF_SIZE / AV1_SEGMENT_ID_BUF_SIZE (nvdec_drv.h).
 fn mv_seg_sizes(w: u32, h: u32) -> (u64, u64) {
-    let sb64 = align(w as u64, 128) * align(h as u64, 128) / 4096;
+    let sb64 = align(u64::from(w), 128) * align(u64::from(h), 128) / 4096;
     (align(sb64 * 256, 4096), align(sb64 * 128, 4096))
-}
-
-fn err(e: super::obu::Av1Error) -> VideoError {
-    match e {
-        super::obu::Av1Error::Unsupported(w) => VideoError::Unsupported(format!("AV1: {w}")),
-        e => VideoError::Bitstream(format!("AV1: {e}")),
-    }
 }
 
 /// Where the pictures of a DPB slot live.
@@ -86,9 +80,9 @@ impl Av1Decoder {
         } else {
             codec_config
         };
-        for o in super::obu::split_obus(obus).map_err(err)? {
+        for o in super::obu::split_obus(obus)? {
             if o.obu_type == super::obu::OBU_SEQUENCE_HEADER {
-                c.parser.seq = Some(super::header::SequenceHeader::parse(o.payload).map_err(err)?);
+                c.parser.seq = Some(super::header::SequenceHeader::parse(o.payload)?);
             }
         }
         let grain_capable = c
@@ -137,7 +131,7 @@ impl Av1Decoder {
             width: w,
             height: h,
             crop: [0, 0, w, h],
-            bit_depth: seq.bit_depth as u32,
+            bit_depth: u32::from(seq.bit_depth),
             color_primaries: 2,
             transfer: 2,
             matrix: 2,
@@ -148,15 +142,15 @@ impl Av1Decoder {
 
     fn cdf_addr(&self, idx: usize) -> u64 {
         match self.cdf_alias[idx] {
-            Some(q) => self.cdf_default[q as usize],
-            None => self.cdf + (idx * CDF_BUFFER_SIZE) as u64,
+            Some(q) => self.cdf_default[usize::from(q)],
+            None => self.cdf + u64_from_usize(idx * CDF_BUFFER_SIZE),
         }
     }
 }
 
 /// Count the frames a temporal unit decodes (OBU_FRAME / OBU_FRAME_HEADER without show_existing_frame).
 fn frames_in_unit(data: &[u8]) -> VResult<usize> {
-    let obus = super::obu::split_obus(data).map_err(err)?;
+    let obus = super::obu::split_obus(data)?;
     let mut n = 0;
     for o in obus {
         if matches!(
@@ -189,9 +183,9 @@ impl CodecDecoder for Av1Decoder {
         self.cdf = alloc.vram(CDF_BUFFERS * CDF_BUFFER_SIZE)?;
         let mut b = vec![0u8; CDF_BUFFER_SIZE];
         for q in 0..4u8 {
-            self.cdf_default[q as usize] = alloc.vram(CDF_BUFFER_SIZE)?;
+            self.cdf_default[usize::from(q)] = alloc.vram(CDF_BUFFER_SIZE)?;
             super::write_default_cdfs(q, &mut b);
-            alloc.write(self.cdf_default[q as usize], 0, &b)?;
+            alloc.write(self.cdf_default[usize::from(q)], 0, &b)?;
         }
         let (mv, seg) = mv_seg_sizes(max_width, max_height);
         self.mv_size = mv;
@@ -215,7 +209,7 @@ impl CodecDecoder for Av1Decoder {
         Ok(())
     }
     fn next_job(&mut self) -> VResult<Option<Job>> {
-        let Some(out) = self.c.next_out().map_err(err)? else {
+        let Some(out) = self.c.next_out()? else {
             return Ok(None);
         };
         let seq = self
@@ -224,7 +218,7 @@ impl CodecDecoder for Av1Decoder {
             .seq
             .clone()
             .ok_or_else(|| VideoError::Bitstream("AV1: no sequence header".into()))?;
-        if seq.bit_depth as u32 != self.bit_depth
+        if u32::from(seq.bit_depth) != self.bit_depth
             || seq.mono_chrome
             || !(seq.subsampling_x && seq.subsampling_y)
         {
@@ -233,8 +227,8 @@ impl CodecDecoder for Av1Decoder {
                  (8- or 10-bit 4:2:0, session created with the stream's bit depth)",
                 seq.bit_depth,
                 seq.mono_chrome,
-                seq.subsampling_x as u8,
-                seq.subsampling_y as u8,
+                u8::from(seq.subsampling_x),
+                u8::from(seq.subsampling_y),
                 self.bit_depth
             )));
         }
@@ -380,17 +374,17 @@ impl CodecDecoder for Av1Decoder {
         r(&mut w, 0x404, da);
         r(&mut w, 0x408, ctx.bitstream);
         for k in 0..7u32 {
-            let sr = ref_surface(k as usize);
+            let sr = ref_surface(usize_from_u32(k));
             r(&mut w, 0x430 + 4 * k, sr.luma);
             r(&mut w, 0x474 + 4 * k, sr.chroma);
         }
         r(&mut w, 0x414, self.pool);
-        r(&mut w, 0x424, da + desc::DESC_STATUS as u64);
+        r(&mut w, 0x424, da + u64_from_usize(desc::DESC_STATUS));
         method(&mut w, 4, 0x40c, &[ctx.picture_index]);
-        r(&mut w, 0x4cc, da + desc::DESC_TILE_INFO as u64);
-        r(&mut w, 0x660, da + desc::DESC_GLOBAL_MOTION as u64);
-        r(&mut w, 0x664, da + desc::DESC_FILM_GRAIN as u64);
-        let slot_va = |sl: usize| self.pool + sl as u64 * self.slot_size;
+        r(&mut w, 0x4cc, da + u64_from_usize(desc::DESC_TILE_INFO));
+        r(&mut w, 0x660, da + u64_from_usize(desc::DESC_GLOBAL_MOTION));
+        r(&mut w, 0x664, da + u64_from_usize(desc::DESC_FILM_GRAIN));
+        let slot_va = |sl: usize| self.pool + u64_from_usize(sl) * self.slot_size;
         r(
             &mut w,
             0x648,
@@ -402,7 +396,7 @@ impl CodecDecoder for Av1Decoder {
             r(
                 &mut w,
                 0x650 + 4 * k,
-                j.colmv_reads[k as usize].map_or(self.pool, slot_va),
+                j.colmv_reads[usize_from_u32(k)].map_or(self.pool, slot_va),
             );
         }
         r(&mut w, 0x65c, slot_va(j.slot));

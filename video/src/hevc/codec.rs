@@ -17,6 +17,7 @@ use crate::{
     Allocator, BuildContext, CODEC_HEVC, CodecDecoder, DecodeJob, Job, NvdecGen, PictureInfo,
     SurfaceLayout, VResult, VideoError, bits,
 };
+use nv_rm_core::conv::usize_from_u32;
 use nv_rm_core::push::method;
 use std::collections::{HashMap, VecDeque};
 
@@ -150,9 +151,11 @@ impl CodecDecoder for HevcDecoder {
         Ok(())
     }
     fn surfaces_needed(&self, data: &[u8]) -> VResult<usize> {
-        Ok(bits::split_annexb(data)
-            .iter()
-            .any(|n| (n.nal[0] >> 1) & 0x3f < 32) as usize)
+        Ok(usize::from(
+            bits::split_annexb(data)
+                .iter()
+                .any(|n| (n.nal[0] >> 1) & 0x3f < 32),
+        ))
     }
     fn push_unit(&mut self, data: &[u8]) -> VResult<()> {
         self.units.push_back(data.to_vec());
@@ -222,9 +225,9 @@ impl CodecDecoder for HevcDecoder {
             let s = self.surface_of.get(&id).ok_or_else(|| {
                 VideoError::Invalid(format!("HEVC reference picture {id} has no surface"))
             })?;
-            slot_surface[slot as usize] = ctx.surfaces[*s];
+            slot_surface[usize::from(slot)] = ctx.surfaces[*s];
         }
-        slot_surface[j.slot as usize] = cur;
+        slot_surface[usize::from(j.slot)] = cur;
         self.surface_of.insert(j.pic_id, ctx.current);
         self.live.push(j.pic_id);
         let da = ctx.descriptor;
@@ -278,7 +281,7 @@ impl CodecDecoder for HevcDecoder {
             .collect()
     }
     fn bump_ready(&self, pending: usize) -> bool {
-        pending > self.reorder as usize
+        pending > usize_from_u32(self.reorder)
     }
     fn flush(&mut self) {
         self.dec.flush();

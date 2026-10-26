@@ -567,7 +567,7 @@ impl Decoder {
             pic,
             poc,
             msb,
-            display_key: ((self.epoch as i64) << 32) + key as i64,
+            display_key: (i64::from(self.epoch) << 32) + i64::from(key),
             info,
         }))
     }
@@ -665,10 +665,10 @@ impl Decoder {
         let mut slot_surfaces = [None; MAX_SLOTS];
         for r in self.dpb.iter().flatten() {
             if let (Some(s), Some(surf)) = (r.slot, r.surface) {
-                slot_surfaces[s as usize] = Some(surf);
+                slot_surfaces[usize::from(s)] = Some(surf);
             }
         }
-        slot_surfaces[slot as usize] = Some(surface);
+        slot_surfaces[usize::from(slot)] = Some(surface);
         let job = PictureJob {
             app_id,
             setup,

@@ -5,6 +5,7 @@
 //! Field positions come from NVIDIA's MIT `nvdec_drv.h` (`nvdec_av1_pic_s`), computed with a C compiler
 //! (bit offset, width). Values follow the AV1 spec semantics; where the value convention is NVDEC-specific
 //! (constants, packing, enum remaps) it was matched against stock descriptors captured on an RTX 5090.
+use nv_rm_core::conv::usize_from_u32;
 
 use super::header::{FrameHeader, GM_IDENTITY, SequenceHeader, TileRange, get_relative_dist};
 
@@ -237,7 +238,7 @@ pub struct PicInputs<'a> {
 /// gptimer_timeout_value = max(frame size in 16x16 macroblocks, 8100) * 10000 (stock rule shared by all
 /// codecs; 81,000,000 at 640x360, 81,600,000 at 1920x1080).
 fn gptimer(w: u32, h: u32) -> u64 {
-    ((w.div_ceil(16) * h.div_ceil(16)).max(8100) as u64 * 10_000).min(u32::MAX as u64)
+    (u64::from((w.div_ceil(16) * h.div_ceil(16)).max(8100)) * 10_000).min(u64::from(u32::MAX))
 }
 
 pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
@@ -247,95 +248,123 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
     let g = &h.film_grain;
     if i.apply_grain {
         put(p, f::FG_APPLY, 1);
-        put(p, f::FG_OVERLAP, g.overlap_flag as u64);
-        put(p, f::FG_CLIP, g.clip_to_restricted_range as u64);
-        put(p, f::FG_CSFL, g.chroma_scaling_from_luma as u64);
-        put(p, f::FG_NUM_Y_B, (g.num_y_points > 0) as u64);
-        put(p, f::FG_NUM_CB_B, (g.num_cb_points > 0) as u64);
-        put(p, f::FG_NUM_CR_B, (g.num_cr_points > 0) as u64);
-        put(p, f::FG_SCALING_SHIFT, g.grain_scaling_minus_8 as u64 + 8);
-        put(p, f::FG_SEED, g.grain_seed as u64);
-        put(p, f::FG_CB_OFFSET, (g.cb_offset as i64 - 256) as u64);
-        put(p, f::FG_CR_OFFSET, (g.cr_offset as i64 - 256) as u64);
-        put(p, f::FG_CB_MULT, (g.cb_mult as i64 - 128) as u64);
-        put(p, f::FG_CB_LUMA_MULT, (g.cb_luma_mult as i64 - 128) as u64);
-        put(p, f::FG_CR_MULT, (g.cr_mult as i64 - 128) as u64);
-        put(p, f::FG_CR_LUMA_MULT, (g.cr_luma_mult as i64 - 128) as u64);
+        put(p, f::FG_OVERLAP, u64::from(g.overlap_flag));
+        put(p, f::FG_CLIP, u64::from(g.clip_to_restricted_range));
+        put(p, f::FG_CSFL, u64::from(g.chroma_scaling_from_luma));
+        put(p, f::FG_NUM_Y_B, u64::from(g.num_y_points > 0));
+        put(p, f::FG_NUM_CB_B, u64::from(g.num_cb_points > 0));
+        put(p, f::FG_NUM_CR_B, u64::from(g.num_cr_points > 0));
+        put(
+            p,
+            f::FG_SCALING_SHIFT,
+            u64::from(g.grain_scaling_minus_8) + 8,
+        );
+        put(p, f::FG_SEED, u64::from(g.grain_seed));
+        put(p, f::FG_CB_OFFSET, (i64::from(g.cb_offset) - 256) as u64);
+        put(p, f::FG_CR_OFFSET, (i64::from(g.cr_offset) - 256) as u64);
+        put(p, f::FG_CB_MULT, (i64::from(g.cb_mult) - 128) as u64);
+        put(
+            p,
+            f::FG_CB_LUMA_MULT,
+            (i64::from(g.cb_luma_mult) - 128) as u64,
+        );
+        put(p, f::FG_CR_MULT, (i64::from(g.cr_mult) - 128) as u64);
+        put(
+            p,
+            f::FG_CR_LUMA_MULT,
+            (i64::from(g.cr_luma_mult) - 128) as u64,
+        );
     }
     put(p, f::GPTIMER, gptimer(h.upscaled_width, h.frame_height));
-    put(p, f::STREAM_LEN, i.stream_len as u64);
+    put(p, f::STREAM_LEN, u64::from(i.stream_len));
     // +0x54 = 0xffff only on blackwell_b classes: stock stores it at ELF 0x40a48 inside the
     // `caps & 0x1ec00000` block of the AV1 builder (objdump, 2026-10-15); Ada av1 traces: 0.
     if i.blackwell_b {
         put(p, f::RESERVED12, 0xffff);
     }
-    put(p, f::USE_128, s.use_128x128_superblock as u64);
+    put(p, f::USE_128, u64::from(s.use_128x128_superblock));
     put(p, f::CHROMA_FORMAT, 1);
-    put(p, f::BIT_DEPTH, s.bit_depth as u64);
-    put(p, f::EN_FILTER_INTRA, s.enable_filter_intra as u64);
-    put(p, f::EN_INTRA_EDGE, s.enable_intra_edge_filter as u64);
-    put(p, f::EN_INTERINTRA, s.enable_interintra_compound as u64);
-    put(p, f::EN_MASKED, s.enable_masked_compound as u64);
-    put(p, f::EN_DUAL_FILTER, s.enable_dual_filter as u64);
-    put(p, f::EN_JNT, s.enable_jnt_comp as u64);
+    put(p, f::BIT_DEPTH, u64::from(s.bit_depth));
+    put(p, f::EN_FILTER_INTRA, u64::from(s.enable_filter_intra));
+    put(p, f::EN_INTRA_EDGE, u64::from(s.enable_intra_edge_filter));
+    put(p, f::EN_INTERINTRA, u64::from(s.enable_interintra_compound));
+    put(p, f::EN_MASKED, u64::from(s.enable_masked_compound));
+    put(p, f::EN_DUAL_FILTER, u64::from(s.enable_dual_filter));
+    put(p, f::EN_JNT, u64::from(s.enable_jnt_comp));
     // Stock sets enable_cdef only when the frame actually filters (some strength non-zero).
     let cdef_active = (0..1usize << h.cdef_bits)
         .any(|k| h.cdef_y_pri[k] | h.cdef_y_sec[k] | h.cdef_uv_pri[k] | h.cdef_uv_sec[k] != 0);
-    put(p, f::EN_CDEF, (s.enable_cdef && cdef_active) as u64);
-    put(p, f::EN_FGS, i.apply_grain as u64);
-    put(p, f::FRAME_TYPE, h.frame_type as u64);
-    put(p, f::SHOW_FRAME, h.show_frame as u64);
-    put(p, f::DISABLE_CDF_UPDATE, h.disable_cdf_update as u64);
-    put(p, f::SCREEN_CONTENT, h.allow_screen_content_tools as u64);
-    put(p, f::FORCE_INT_MV, h.force_integer_mv as u64);
+    put(p, f::EN_CDEF, u64::from(s.enable_cdef && cdef_active));
+    put(p, f::EN_FGS, u64::from(i.apply_grain));
+    put(p, f::FRAME_TYPE, u64::from(h.frame_type));
+    put(p, f::SHOW_FRAME, u64::from(h.show_frame));
+    put(p, f::DISABLE_CDF_UPDATE, u64::from(h.disable_cdf_update));
+    put(
+        p,
+        f::SCREEN_CONTENT,
+        u64::from(h.allow_screen_content_tools),
+    );
+    put(p, f::FORCE_INT_MV, u64::from(h.force_integer_mv));
     if h.use_superres {
-        put(p, f::SCALE_DENOM_M9, h.superres_denom as u64 - 9);
+        put(p, f::SCALE_DENOM_M9, u64::from(h.superres_denom) - 9);
     }
-    put(p, f::ALLOW_INTRABC, h.allow_intrabc as u64);
-    put(p, f::ALLOW_HP_MV, h.allow_high_precision_mv as u64);
-    put(p, f::INTERP_FILTER, h.interpolation_filter as u64);
-    put(p, f::SWITCHABLE_MOTION, h.is_motion_mode_switchable as u64);
-    put(p, f::USE_REF_MVS, h.use_ref_frame_mvs as u64);
-    put(p, f::REFRESH_CTX, !h.disable_frame_end_update_cdf as u64);
-    put(p, f::DQ_PRESENT, h.delta_q_present as u64);
-    put(p, f::DQ_RES, h.delta_q_res as u64);
-    put(p, f::DLF_PRESENT, h.delta_lf_present as u64);
-    put(p, f::DLF_RES, h.delta_lf_res as u64);
-    put(p, f::DLF_MULTI, h.delta_lf_multi as u64);
-    put(p, f::CODED_LOSSLESS, h.coded_lossless as u64);
+    put(p, f::ALLOW_INTRABC, u64::from(h.allow_intrabc));
+    put(p, f::ALLOW_HP_MV, u64::from(h.allow_high_precision_mv));
+    put(p, f::INTERP_FILTER, u64::from(h.interpolation_filter));
+    put(
+        p,
+        f::SWITCHABLE_MOTION,
+        u64::from(h.is_motion_mode_switchable),
+    );
+    put(p, f::USE_REF_MVS, u64::from(h.use_ref_frame_mvs));
+    put(
+        p,
+        f::REFRESH_CTX,
+        u64::from(!h.disable_frame_end_update_cdf),
+    );
+    put(p, f::DQ_PRESENT, u64::from(h.delta_q_present));
+    put(p, f::DQ_RES, u64::from(h.delta_q_res));
+    put(p, f::DLF_PRESENT, u64::from(h.delta_lf_present));
+    put(p, f::DLF_RES, u64::from(h.delta_lf_res));
+    put(p, f::DLF_MULTI, u64::from(h.delta_lf_multi));
+    put(p, f::CODED_LOSSLESS, u64::from(h.coded_lossless));
     put(
         p,
         f::TILE_ENABLED,
-        (h.tile.tile_cols * h.tile.tile_rows > 1) as u64,
+        u64::from(h.tile.tile_cols * h.tile.tile_rows > 1),
     );
-    put(p, f::SUPERRES_SCALED, h.use_superres as u64);
-    put(p, f::TILE_COLS, h.tile.tile_cols as u64);
-    put(p, f::TILE_ROWS, h.tile.tile_rows as u64);
-    put(p, f::CTX_UPDATE_TILE, h.tile.context_update_tile_id as u64);
-    put(p, f::CDEF_DAMPING_M3, h.cdef_damping_minus_3 as u64);
-    put(p, f::CDEF_BITS, h.cdef_bits as u64);
+    put(p, f::SUPERRES_SCALED, u64::from(h.use_superres));
+    put(p, f::TILE_COLS, u64::from(h.tile.tile_cols));
+    put(p, f::TILE_ROWS, u64::from(h.tile.tile_rows));
+    put(
+        p,
+        f::CTX_UPDATE_TILE,
+        u64::from(h.tile.context_update_tile_id),
+    );
+    put(p, f::CDEF_DAMPING_M3, u64::from(h.cdef_damping_minus_3));
+    put(p, f::CDEF_BITS, u64::from(h.cdef_bits));
     // DRV enum: 0 ONLY_4X4, 3 LARGEST, 4 SELECT; reference mode 0 SINGLE, 2 SELECT.
-    put(p, f::TX_MODE, [0u64, 3, 4][h.tx_mode as usize]);
+    put(p, f::TX_MODE, [0u64, 3, 4][usize::from(h.tx_mode)]);
     put(p, f::REF_MODE, if h.reference_select { 2 } else { 0 });
     if h.skip_mode_present {
         put(p, f::SKIP_MODE, 1);
-        put(p, f::SKIP_REF0, h.skip_mode_frame[0] as u64);
-        put(p, f::SKIP_REF1, h.skip_mode_frame[1] as u64);
+        put(p, f::SKIP_REF0, u64::from(h.skip_mode_frame[0]));
+        put(p, f::SKIP_REF1, u64::from(h.skip_mode_frame[1]));
     }
-    put(p, f::ALLOW_WARP, h.allow_warped_motion as u64);
-    put(p, f::REDUCED_TX, h.reduced_tx_set as u64);
+    put(p, f::ALLOW_WARP, u64::from(h.allow_warped_motion));
+    put(p, f::REDUCED_TX, u64::from(h.reduced_tx_set));
     // Any reference whose size differs from the coded frame size is a scaled reference (spec 7.11.3.3).
     let scaled = !h.frame_is_intra
         && i.refs
             .iter()
             .any(|r| r.width != h.frame_width || r.height != h.frame_height);
-    put(p, f::REF_SCALING, scaled as u64);
-    put(p, f::UPSCALED_W, h.upscaled_width as u64);
+    put(p, f::REF_SCALING, u64::from(scaled));
+    put(p, f::UPSCALED_W, u64::from(h.upscaled_width));
     // Superres (spec 7.16): per-plane xStep and initialSubpelX; without superres stock writes 14 / 14 / 0 / 0.
     if h.use_superres {
         let (luma_step, luma_x) = superres_step(h.frame_width, h.upscaled_width, 0);
         let (chroma_step, chroma_x) =
-            superres_step(h.frame_width, h.upscaled_width, s.subsampling_x as u32);
+            superres_step(h.frame_width, h.upscaled_width, u32::from(s.subsampling_x));
         put(p, f::LUMA_STEP, luma_step as u64);
         put(p, f::CHROMA_STEP, chroma_step as u64);
         put(p, f::LUMA_SUBPEL_X, luma_x as u64);
@@ -344,26 +373,26 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
         put(p, f::LUMA_STEP, 14);
         put(p, f::CHROMA_STEP, 14);
     }
-    put(p, f::BASE_Q, h.base_q_idx as u64);
-    put(p, f::DQ_Y_DC, h.delta_q_y_dc as u8 as u64);
-    put(p, f::DQ_U_DC, h.delta_q_u_dc as u8 as u64);
-    put(p, f::DQ_V_DC, h.delta_q_v_dc as u8 as u64);
-    put(p, f::DQ_U_AC, h.delta_q_u_ac as u8 as u64);
-    put(p, f::DQ_V_AC, h.delta_q_v_ac as u8 as u64);
+    put(p, f::BASE_Q, u64::from(h.base_q_idx));
+    put(p, f::DQ_Y_DC, u64::from(h.delta_q_y_dc as u8));
+    put(p, f::DQ_U_DC, u64::from(h.delta_q_u_dc as u8));
+    put(p, f::DQ_V_DC, u64::from(h.delta_q_v_dc as u8));
+    put(p, f::DQ_U_AC, u64::from(h.delta_q_u_ac as u8));
+    put(p, f::DQ_V_AC, u64::from(h.delta_q_v_ac as u8));
     let (qy, qu, qv) = if h.using_qmatrix {
         (h.qm_y, h.qm_u, h.qm_v)
     } else {
         (15, 15, 15)
     };
-    put(p, f::QM_Y, qy as u64);
-    put(p, f::QM_U, qu as u64);
-    put(p, f::QM_V, qv as u64);
+    put(p, f::QM_Y, u64::from(qy));
+    put(p, f::QM_U, u64::from(qu));
+    put(p, f::QM_V, u64::from(qv));
     let (mut yp, mut up, mut ys, mut us) = (0u64, 0u64, 0u64, 0u64);
     for k in 0..8 {
-        yp |= (h.cdef_y_pri[k] as u64) << (4 * k);
-        up |= (h.cdef_uv_pri[k] as u64) << (4 * k);
-        ys |= (h.cdef_y_sec[k] as u64) << (2 * k);
-        us |= (h.cdef_uv_sec[k] as u64) << (2 * k);
+        yp |= u64::from(h.cdef_y_pri[k]) << (4 * k);
+        up |= u64::from(h.cdef_uv_pri[k]) << (4 * k);
+        ys |= u64::from(h.cdef_y_sec[k]) << (2 * k);
+        us |= u64::from(h.cdef_uv_sec[k]) << (2 * k);
     }
     put(p, f::CDEF_Y_PRI, yp);
     put(p, f::CDEF_UV_PRI, up);
@@ -371,8 +400,12 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
     put(p, f::CDEF_UV_SEC, us);
     if h.segmentation_enabled {
         put(p, f::SEG_ENABLED, 1);
-        put(p, f::SEG_UPDATE_MAP, h.segmentation_update_map as u64);
-        put(p, f::SEG_TEMPORAL, h.segmentation_temporal_update as u64);
+        put(p, f::SEG_UPDATE_MAP, u64::from(h.segmentation_update_map));
+        put(
+            p,
+            f::SEG_TEMPORAL,
+            u64::from(h.segmentation_temporal_update),
+        );
         let mut sign = 0u64;
         for seg in 0..8 {
             for feat in 0..8 {
@@ -389,37 +422,37 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
                 put(
                     p,
                     (f::SEG_DATA + 16 * (seg * 8 + feat), 16),
-                    v as u16 as u64,
+                    u64::from(v as u16),
                 );
             }
             if h.feature_enabled[seg][0] && h.feature_data[seg][0] < 0 {
                 sign |= 1 << seg;
             }
         }
-        put(p, f::SEG_LAST_ACTIVE, h.last_active_seg_id as u64);
-        put(p, f::SEG_PRESKIP, h.seg_id_pre_skip as u64);
+        put(p, f::SEG_LAST_ACTIVE, u64::from(h.last_active_seg_id));
+        put(p, f::SEG_PRESKIP, u64::from(h.seg_id_pre_skip));
         put(p, f::SEG_QUANT_SIGN, sign);
     }
-    put(p, f::SEG_PREV_FLAG, i.prev_segment_ids as u64);
-    put(p, f::LF_LEVEL0, h.loop_filter_level[0] as u64);
-    put(p, f::LF_LEVEL1, h.loop_filter_level[1] as u64);
-    put(p, f::LF_LEVEL_U, h.loop_filter_level[2] as u64);
-    put(p, f::LF_LEVEL_V, h.loop_filter_level[3] as u64);
-    put(p, f::LF_SHARPNESS, h.loop_filter_sharpness as u64);
+    put(p, f::SEG_PREV_FLAG, u64::from(i.prev_segment_ids));
+    put(p, f::LF_LEVEL0, u64::from(h.loop_filter_level[0]));
+    put(p, f::LF_LEVEL1, u64::from(h.loop_filter_level[1]));
+    put(p, f::LF_LEVEL_U, u64::from(h.loop_filter_level[2]));
+    put(p, f::LF_LEVEL_V, u64::from(h.loop_filter_level[3]));
+    put(p, f::LF_SHARPNESS, u64::from(h.loop_filter_sharpness));
     // pic_s has no loop_filter_delta_enabled bit: the deltas are passed only when enabled (spec 7.14.4).
     if h.loop_filter_delta_enabled {
         for k in 0..8 {
             put(
                 p,
                 (f::LF_REF_DELTAS + 8 * k, 8),
-                h.loop_filter_ref_deltas[k] as u8 as u64,
+                u64::from(h.loop_filter_ref_deltas[k] as u8),
             );
         }
         for k in 0..2 {
             put(
                 p,
                 (f::LF_MODE_DELTAS + 8 * k, 8),
-                h.loop_filter_mode_deltas[k] as u8 as u64,
+                u64::from(h.loop_filter_mode_deltas[k] as u8),
             );
         }
     }
@@ -427,18 +460,18 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
     put(
         p,
         f::LR_TYPE,
-        (rt[0] & 3) as u64 | ((rt[1] & 3) as u64) << 2 | ((rt[2] & 3) as u64) << 4,
+        u64::from(rt[0] & 3) | u64::from(rt[1] & 3) << 2 | u64::from(rt[2] & 3) << 4,
     );
     let uses_lr = rt.iter().any(|&t| t != 0);
     let lr_size = if uses_lr {
-        let y = 1 + h.lr_unit_shift as u64;
-        let uv = y - h.lr_uv_shift as u64;
+        let y = 1 + u64::from(h.lr_unit_shift);
+        let uv = y - u64::from(h.lr_uv_shift);
         y | uv << 2 | uv << 4
     } else {
         0x3f
     };
     put(p, f::LR_UNIT_SIZE, lr_size);
-    let stride = (i.pitch / 16) as u64;
+    let stride = u64::from(i.pitch / 16);
     // Current frame: the CUVID width is the upscaled width when superres is on, but the picture
     // descriptor carries the coded (pre-superres) width — stock libnvcuvid 615.78.08 on a
     // superres inter frame writes 213 for a 320-wide upscaled 213-coded picture, and the
@@ -451,29 +484,35 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
         }
         let r = &i.refs[k];
         put_frame_info(p, base, r.width, r.height, stride);
-        let xs = (((r.width as u64) << 14) + (h.frame_width as u64 / 2)) / h.frame_width as u64;
-        let ys = (((r.height as u64) << 14) + (h.frame_height as u64 / 2)) / h.frame_height as u64;
+        let xs = ((u64::from(r.width) << 14) + (u64::from(h.frame_width) / 2))
+            / u64::from(h.frame_width);
+        let ys = ((u64::from(r.height) << 14) + (u64::from(h.frame_height) / 2))
+            / u64::from(h.frame_height);
         put(p, (base + 96, 16), xs);
         put(p, (base + 112, 16), ys);
-        put(p, (base + 128, 1), h.ref_frame_sign_bias[k] as u64);
-        put(p, (base + 129, 2), h.gm_type[k + 1] as u64);
+        put(p, (base + 128, 1), u64::from(h.ref_frame_sign_bias[k]));
+        put(p, (base + 129, 2), u64::from(h.gm_type[k + 1]));
         let off = get_relative_dist(i.seq, h.order_hint, r.order_hint);
-        put(p, (base + 144, 16), off as i16 as u16 as u64);
-        put(p, (base + 160, 16), (-off) as i16 as u16 as u64);
+        put(p, (base + 144, 16), u64::from(off as i16 as u16));
+        put(p, (base + 160, 16), u64::from((-off) as i16 as u16));
     }
     for j in 0..3 {
-        put(p, (f::USE_TEMPORAL0.0 + j, 1), i.mf.use_temporal[j] as u64);
-        put(p, (f::MF1_TYPE.0 + 3 * j, 3), i.mf.mf_type[j] as u64);
+        put(
+            p,
+            (f::USE_TEMPORAL0.0 + j, 1),
+            u64::from(i.mf.use_temporal[j]),
+        );
+        put(p, (f::MF1_TYPE.0 + 3 * j, 3), u64::from(i.mf.mf_type[j]));
         for k in 0..7 {
             put(
                 p,
                 (f::MFMV_OFFSET + 16 * (j * 7 + k), 16),
-                i.mf.mfmv_offset[j][k] as u16 as u64,
+                u64::from(i.mf.mfmv_offset[j][k] as u16),
             );
             put(
                 p,
                 (f::MFMV_SIDE + 8 * (j * 7 + k), 8),
-                i.mf.mfmv_side[j][k] as u8 as u64,
+                u64::from(i.mf.mfmv_side[j][k] as u8),
             );
         }
     }
@@ -490,7 +529,7 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
     // plane GOB kinds `luma | chroma << 2` (8-bit 9, 10-bit 2) and bits 19.. = the surface-format code
     // (0 / 3), the same pair VP9 and HEVC carry; see `crate::plane_kind_bits`.
     if i.blackwell_b {
-        let bd = s.bit_depth as u32;
+        let bd = u32::from(s.bit_depth);
         let kinds = crate::plane_kind_bits(crate::bytes_per_sample(bd));
         put(
             p,
@@ -502,8 +541,8 @@ pub fn build_pic_s(i: &PicInputs) -> [u8; PIC_S_SIZE] {
 }
 
 fn put_frame_info(p: &mut [u8], base: usize, w: u32, h: u32, stride: u64) {
-    put(p, (base, 16), w as u64);
-    put(p, (base + 16, 16), h as u64);
+    put(p, (base, 16), u64::from(w));
+    put(p, (base + 16, 16), u64::from(h));
     put(p, (base + 32, 16), stride);
     put(p, (base + 48, 16), stride);
 }
@@ -512,7 +551,10 @@ fn put_frame_info(p: &mut [u8], base: usize, w: u32, h: u32, stride: u64) {
 pub fn build_tile_info(h: &FrameHeader, tiles: &[TileRange], out: &mut [u8]) {
     let t = &h.tile;
     for (n, tr) in tiles.iter().enumerate().take(MAX_TILES) {
-        let (row, col) = (n / t.tile_cols as usize, n % t.tile_cols as usize);
+        let (row, col) = (
+            n / usize_from_u32(t.tile_cols),
+            n % usize_from_u32(t.tile_cols),
+        );
         let e = &mut out[n * TILE_INFO_ENTRY..(n + 1) * TILE_INFO_ENTRY];
         e.fill(0);
         e[0] = (t.col_start_sb[col + 1] - t.col_start_sb[col]) as u8;
@@ -546,7 +588,7 @@ pub fn build_global_motion(h: &FrameHeader, out: &mut [u8]) {
 }
 
 fn resolve_divisor(d: i64) -> (i64, i64) {
-    let n = 63 - (d.unsigned_abs()).leading_zeros() as i64; // FloorLog2(|d|)
+    let n = 63 - i64::from((d.unsigned_abs()).leading_zeros()); // FloorLog2(|d|)
     let e = d.abs() - (1i64 << n);
     let f = if n > 8 {
         (e + (1i64 << (n - 9))) >> (n - 8)
@@ -570,7 +612,7 @@ fn round2signed(x: i64, n: i64) -> i64 {
 
 /// Spec 7.11.3.6 setup_shear: returns (alpha, beta, gamma, delta) or None when the model is not valid.
 pub fn setup_shear(m: &[i32; 6]) -> Option<[i16; 4]> {
-    let m: [i64; 6] = m.map(|v| v as i64);
+    let m: [i64; 6] = m.map(i64::from);
     if m[2] <= 0 {
         return None;
     }
@@ -597,8 +639,8 @@ pub fn pic_ext_244(width: u32) -> u32 {
 /// Spec 7.16 upscaling: (stepX, initialSubpelX) for one plane.
 fn superres_step(frame_width: u32, upscaled_width: u32, sub_x: u32) -> (i64, i64) {
     let round2 = |x: u32, n: u32| if n == 0 { x } else { (x + (1 << (n - 1))) >> n };
-    let down = round2(frame_width, sub_x) as i64;
-    let up = round2(upscaled_width, sub_x) as i64;
+    let down = i64::from(round2(frame_width, sub_x));
+    let up = i64::from(round2(upscaled_width, sub_x));
     let step = ((down << 14) + up / 2) / up;
     let err = up * step - (down << 14);
     let init = ((-((up - down) << 13)) + up / 2) / up + (1 << 7) - err / 2;

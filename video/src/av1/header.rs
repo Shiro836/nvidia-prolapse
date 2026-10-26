@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! AV1 sequence header, uncompressed frame header and tile group parsing, plus the reference state the
 //! frame header depends on (spec 5.5, 5.9, 5.11.1, 7.20, 7.21). Written from the AV1 specification.
+use nv_rm_core::conv::{low_u8, low_u16, usize_from_u32};
 
 use super::obu::{Av1Error, BitReader, Result};
 
@@ -84,7 +85,7 @@ impl SequenceHeader {
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut r = BitReader::new(data);
         let mut s = SequenceHeader {
-            seq_profile: r.f(3)? as u8,
+            seq_profile: low_u8(r.f(3)?),
             ..Default::default()
         };
         s.still_picture = r.flag()?;
@@ -523,16 +524,16 @@ impl ParserState {
         idx[0] = last_frame_idx;
         idx[3] = gold_frame_idx;
         let mut used = [false; NUM_REF_FRAMES];
-        used[last_frame_idx as usize] = true;
-        used[gold_frame_idx as usize] = true;
+        used[usize::from(last_frame_idx)] = true;
+        used[usize::from(gold_frame_idx)] = true;
 
         let cur = 1i32 << (seq.order_hint_bits - 1);
         let mut shifted = [0i32; NUM_REF_FRAMES];
         for i in 0..NUM_REF_FRAMES {
             shifted[i] = cur + get_relative_dist(seq, self.refs[i].order_hint, cur_order_hint);
         }
-        let mut latest = shifted[last_frame_idx as usize];
-        let mut earliest = shifted[gold_frame_idx as usize];
+        let mut latest = shifted[usize::from(last_frame_idx)];
+        let mut earliest = shifted[usize::from(gold_frame_idx)];
 
         // ALTREF
         let mut r: i8 = -1;
@@ -627,14 +628,14 @@ impl ParserState {
         } else {
             h.show_existing_frame = r.flag()?;
             if h.show_existing_frame {
-                h.frame_to_show_map_idx = r.f(3)? as u8;
+                h.frame_to_show_map_idx = low_u8(r.f(3)?);
                 if seq.decoder_model_info_present && !seq.equal_picture_interval {
                     r.f(seq.frame_presentation_time_length_minus_1 + 1)?;
                 }
                 if seq.frame_id_numbers_present {
                     r.f(id_len)?;
                 }
-                let slot = self.refs[h.frame_to_show_map_idx as usize];
+                let slot = self.refs[usize::from(h.frame_to_show_map_idx)];
                 h.frame_type = slot.frame_type;
                 h.refresh_frame_flags = if h.frame_type == KEY_FRAME { 0xff } else { 0 };
                 h.film_grain = slot.film_grain;
@@ -642,7 +643,7 @@ impl ParserState {
                 h.header_bytes = r.bit_pos().div_ceil(8);
                 return Ok(h);
             }
-            h.frame_type = r.f(2)? as u8;
+            h.frame_type = low_u8(r.f(2)?);
             h.frame_is_intra = h.frame_type == INTRA_ONLY_FRAME || h.frame_type == KEY_FRAME;
             h.show_frame = r.flag()?;
             if h.show_frame && seq.decoder_model_info_present && !seq.equal_picture_interval {
@@ -695,7 +696,7 @@ impl ParserState {
         };
         h.order_hint = r.f(seq.order_hint_bits)?;
         if !(h.frame_is_intra || h.error_resilient_mode) {
-            h.primary_ref_frame = r.f(3)? as u8;
+            h.primary_ref_frame = low_u8(r.f(3)?);
         }
         if seq.decoder_model_info_present && r.flag()? {
             for op in &seq.operating_points {
@@ -712,7 +713,7 @@ impl ParserState {
             if h.frame_type == SWITCH_FRAME || (h.frame_type == KEY_FRAME && h.show_frame) {
                 0xff
             } else {
-                r.f(8)? as u8
+                low_u8(r.f(8)?)
             };
         if (!h.frame_is_intra || h.refresh_frame_flags != 0xff)
             && h.error_resilient_mode
@@ -742,14 +743,14 @@ impl ParserState {
                 false
             };
             if short {
-                let last_frame_idx = r.f(3)? as u8;
-                let gold_frame_idx = r.f(3)? as u8;
+                let last_frame_idx = low_u8(r.f(3)?);
+                let gold_frame_idx = low_u8(r.f(3)?);
                 h.ref_frame_idx =
                     self.set_frame_refs(last_frame_idx, gold_frame_idx, h.order_hint)?;
             }
             for i in 0..REFS_PER_FRAME {
                 if !short {
-                    h.ref_frame_idx[i] = r.f(3)? as u8;
+                    h.ref_frame_idx[i] = low_u8(r.f(3)?);
                 }
                 if seq.frame_id_numbers_present {
                     r.f(seq.delta_frame_id_length_minus_2 + 2)?;
@@ -760,7 +761,7 @@ impl ParserState {
                 let mut found = false;
                 for i in 0..REFS_PER_FRAME {
                     if r.flag()? {
-                        let s = self.refs[h.ref_frame_idx[i] as usize];
+                        let s = self.refs[usize::from(h.ref_frame_idx[i])];
                         h.upscaled_width = s.upscaled_width;
                         h.frame_width = h.upscaled_width;
                         h.frame_height = s.frame_height;
@@ -786,7 +787,7 @@ impl ParserState {
             h.interpolation_filter = if h.is_filter_switchable {
                 4
             } else {
-                r.f(2)? as u8
+                low_u8(r.f(2)?)
             };
             h.is_motion_mode_switchable = r.flag()?;
             h.use_ref_frame_mvs = if h.error_resilient_mode || !seq.enable_ref_frame_mvs {
@@ -795,7 +796,7 @@ impl ParserState {
                 r.flag()?
             };
             for i in 0..REFS_PER_FRAME {
-                let hint = self.refs[h.ref_frame_idx[i] as usize].order_hint;
+                let hint = self.refs[usize::from(h.ref_frame_idx[i])].order_hint;
                 h.order_hints[i] = hint;
                 h.ref_frame_sign_bias[i] =
                     seq.enable_order_hint && get_relative_dist(&seq, hint, h.order_hint) > 0;
@@ -818,7 +819,7 @@ impl ParserState {
                     [[0i16; 8]; 8],
                 )
             } else {
-                let s = &self.refs[h.ref_frame_idx[h.primary_ref_frame as usize] as usize];
+                let s = &self.refs[usize::from(h.ref_frame_idx[h.primary_ref_frame as usize])];
                 (
                     s.gm_params,
                     s.lf_ref_deltas,
@@ -836,9 +837,9 @@ impl ParserState {
         }
         self.tile_info(&seq, &mut r, &mut h)?;
         // quantization_params()
-        h.base_q_idx = r.f(8)? as u8;
+        h.base_q_idx = low_u8(r.f(8)?);
         let read_dq =
-            |r: &mut BitReader| -> Result<i8> { Ok(if r.flag()? { r.su(7)? as i8 } else { 0 }) };
+            |r: &mut BitReader| -> Result<i8> { Ok(if r.flag()? { r.su_i8(7)? } else { 0 }) };
         h.delta_q_y_dc = read_dq(&mut r)?;
         if seq.num_planes() > 1 {
             let diff_uv = if seq.separate_uv_delta_q {
@@ -858,12 +859,12 @@ impl ParserState {
         }
         h.using_qmatrix = r.flag()?;
         if h.using_qmatrix {
-            h.qm_y = r.f(4)? as u8;
-            h.qm_u = r.f(4)? as u8;
+            h.qm_y = low_u8(r.f(4)?);
+            h.qm_u = low_u8(r.f(4)?);
             h.qm_v = if !seq.separate_uv_delta_q {
                 h.qm_u
             } else {
-                r.f(4)? as u8
+                low_u8(r.f(4)?)
             };
         }
         // segmentation_params()
@@ -918,14 +919,14 @@ impl ParserState {
             h.delta_q_present = r.flag()?;
         }
         if h.delta_q_present {
-            h.delta_q_res = r.f(2)? as u8;
+            h.delta_q_res = low_u8(r.f(2)?);
         }
         if h.delta_q_present {
             if !h.allow_intrabc {
                 h.delta_lf_present = r.flag()?;
             }
             if h.delta_lf_present {
-                h.delta_lf_res = r.f(2)? as u8;
+                h.delta_lf_res = low_u8(r.f(2)?);
                 h.delta_lf_multi = r.flag()?;
             }
         }
@@ -949,24 +950,24 @@ impl ParserState {
             h.loop_filter_ref_deltas = DEFAULT_LF_REF_DELTAS;
             h.loop_filter_mode_deltas = [0; 2];
         } else {
-            h.loop_filter_level[0] = r.f(6)? as u8;
-            h.loop_filter_level[1] = r.f(6)? as u8;
+            h.loop_filter_level[0] = low_u8(r.f(6)?);
+            h.loop_filter_level[1] = low_u8(r.f(6)?);
             if seq.num_planes() > 1 && (h.loop_filter_level[0] != 0 || h.loop_filter_level[1] != 0)
             {
-                h.loop_filter_level[2] = r.f(6)? as u8;
-                h.loop_filter_level[3] = r.f(6)? as u8;
+                h.loop_filter_level[2] = low_u8(r.f(6)?);
+                h.loop_filter_level[3] = low_u8(r.f(6)?);
             }
-            h.loop_filter_sharpness = r.f(3)? as u8;
+            h.loop_filter_sharpness = low_u8(r.f(3)?);
             h.loop_filter_delta_enabled = r.flag()?;
             if h.loop_filter_delta_enabled && r.flag()? {
                 for i in 0..8 {
                     if r.flag()? {
-                        h.loop_filter_ref_deltas[i] = r.su(7)? as i8;
+                        h.loop_filter_ref_deltas[i] = r.su_i8(7)?;
                     }
                 }
                 for i in 0..2 {
                     if r.flag()? {
-                        h.loop_filter_mode_deltas[i] = r.su(7)? as i8;
+                        h.loop_filter_mode_deltas[i] = r.su_i8(7)?;
                     }
                 }
             }
@@ -975,14 +976,14 @@ impl ParserState {
         if h.coded_lossless || h.allow_intrabc || !seq.enable_cdef {
             h.cdef_damping_minus_3 = 0;
         } else {
-            h.cdef_damping_minus_3 = r.f(2)? as u8;
-            h.cdef_bits = r.f(2)? as u8;
+            h.cdef_damping_minus_3 = low_u8(r.f(2)?);
+            h.cdef_bits = low_u8(r.f(2)?);
             for i in 0..(1usize << h.cdef_bits) {
-                h.cdef_y_pri[i] = r.f(4)? as u8;
-                h.cdef_y_sec[i] = r.f(2)? as u8;
+                h.cdef_y_pri[i] = low_u8(r.f(4)?);
+                h.cdef_y_sec[i] = low_u8(r.f(2)?);
                 if seq.num_planes() > 1 {
-                    h.cdef_uv_pri[i] = r.f(4)? as u8;
-                    h.cdef_uv_sec[i] = r.f(2)? as u8;
+                    h.cdef_uv_pri[i] = low_u8(r.f(4)?);
+                    h.cdef_uv_sec[i] = low_u8(r.f(2)?);
                 }
             }
         }
@@ -991,7 +992,7 @@ impl ParserState {
             const REMAP: [u8; 4] = [0, 3, 1, 2];
             let (mut uses_lr, mut uses_chroma_lr) = (false, false);
             for i in 0..seq.num_planes() {
-                let t = REMAP[r.f(2)? as usize];
+                let t = REMAP[usize_from_u32(r.f(2)?)];
                 h.frame_restoration_type[i] = t;
                 if t != 0 {
                     uses_lr = true;
@@ -1002,15 +1003,15 @@ impl ParserState {
             }
             if uses_lr {
                 if seq.use_128x128_superblock {
-                    h.lr_unit_shift = r.f(1)? as u8 + 1;
+                    h.lr_unit_shift = low_u8(r.f(1)?) + 1;
                 } else {
-                    h.lr_unit_shift = r.f(1)? as u8;
+                    h.lr_unit_shift = low_u8(r.f(1)?);
                     if h.lr_unit_shift != 0 {
-                        h.lr_unit_shift += r.f(1)? as u8;
+                        h.lr_unit_shift += low_u8(r.f(1)?);
                     }
                 }
                 if seq.subsampling_x && seq.subsampling_y && uses_chroma_lr {
-                    h.lr_uv_shift = r.f(1)? as u8;
+                    h.lr_uv_shift = low_u8(r.f(1)?);
                 }
             }
         }
@@ -1202,7 +1203,7 @@ impl ParserState {
         let (mut fwd, mut bwd) = (-1i32, -1i32);
         let (mut fwd_hint, mut bwd_hint) = (0, 0);
         for i in 0..REFS_PER_FRAME {
-            let rh = self.refs[h.ref_frame_idx[i] as usize].order_hint;
+            let rh = self.refs[usize::from(h.ref_frame_idx[i])].order_hint;
             if get_relative_dist(seq, rh, h.order_hint) < 0 {
                 if fwd < 0 || get_relative_dist(seq, rh, fwd_hint) > 0 {
                     fwd = i as i32;
@@ -1224,7 +1225,7 @@ impl ParserState {
         }
         let (mut sfwd, mut sfwd_hint) = (-1i32, 0);
         for i in 0..REFS_PER_FRAME {
-            let rh = self.refs[h.ref_frame_idx[i] as usize].order_hint;
+            let rh = self.refs[usize::from(h.ref_frame_idx[i])].order_hint;
             if get_relative_dist(seq, rh, fwd_hint) < 0
                 && (sfwd < 0 || get_relative_dist(seq, rh, sfwd_hint) > 0)
             {
@@ -1253,53 +1254,53 @@ impl ParserState {
             h.film_grain = FilmGrainParams::default();
             return Ok(());
         }
-        g.grain_seed = r.f(16)? as u16;
+        g.grain_seed = low_u16(r.f(16)?);
         g.update_grain = if h.frame_type == INTER_FRAME {
             r.flag()?
         } else {
             true
         };
         if !g.update_grain {
-            let idx = r.f(3)? as usize;
+            let idx = usize_from_u32(r.f(3)?);
             let seed = g.grain_seed;
             g = self.refs[idx].film_grain;
             g.grain_seed = seed;
             h.film_grain = g;
             return Ok(());
         }
-        g.num_y_points = r.f(4)? as u8;
+        g.num_y_points = low_u8(r.f(4)?);
         if g.num_y_points > 14 {
             return Err(Av1Error::Invalid("num_y_points"));
         }
         for i in 0..g.num_y_points as usize {
-            g.point_y_value[i] = r.f(8)? as u8;
-            g.point_y_scaling[i] = r.f(8)? as u8;
+            g.point_y_value[i] = low_u8(r.f(8)?);
+            g.point_y_scaling[i] = low_u8(r.f(8)?);
         }
         g.chroma_scaling_from_luma = if seq.mono_chrome { false } else { r.flag()? };
         if !(seq.mono_chrome
             || g.chroma_scaling_from_luma
             || (seq.subsampling_x && seq.subsampling_y && g.num_y_points == 0))
         {
-            g.num_cb_points = r.f(4)? as u8;
+            g.num_cb_points = low_u8(r.f(4)?);
             if g.num_cb_points > 10 {
                 return Err(Av1Error::Invalid("num_cb_points"));
             }
             for i in 0..g.num_cb_points as usize {
-                g.point_cb_value[i] = r.f(8)? as u8;
-                g.point_cb_scaling[i] = r.f(8)? as u8;
+                g.point_cb_value[i] = low_u8(r.f(8)?);
+                g.point_cb_scaling[i] = low_u8(r.f(8)?);
             }
-            g.num_cr_points = r.f(4)? as u8;
+            g.num_cr_points = low_u8(r.f(4)?);
             if g.num_cr_points > 10 {
                 return Err(Av1Error::Invalid("num_cr_points"));
             }
             for i in 0..g.num_cr_points as usize {
-                g.point_cr_value[i] = r.f(8)? as u8;
-                g.point_cr_scaling[i] = r.f(8)? as u8;
+                g.point_cr_value[i] = low_u8(r.f(8)?);
+                g.point_cr_scaling[i] = low_u8(r.f(8)?);
             }
         }
-        g.grain_scaling_minus_8 = r.f(2)? as u8;
-        g.ar_coeff_lag = r.f(2)? as u8;
-        let lag = g.ar_coeff_lag as usize;
+        g.grain_scaling_minus_8 = low_u8(r.f(2)?);
+        g.ar_coeff_lag = low_u8(r.f(2)?);
+        let lag = usize::from(g.ar_coeff_lag);
         let num_pos_luma = 2 * lag * (lag + 1);
         let num_pos_chroma = if g.num_y_points > 0 {
             num_pos_luma + 1
@@ -1308,30 +1309,30 @@ impl ParserState {
         };
         if g.num_y_points > 0 {
             for i in 0..num_pos_luma {
-                g.ar_coeffs_y_plus_128[i] = r.f(8)? as u8;
+                g.ar_coeffs_y_plus_128[i] = low_u8(r.f(8)?);
             }
         }
         if g.chroma_scaling_from_luma || g.num_cb_points > 0 {
             for i in 0..num_pos_chroma {
-                g.ar_coeffs_cb_plus_128[i] = r.f(8)? as u8;
+                g.ar_coeffs_cb_plus_128[i] = low_u8(r.f(8)?);
             }
         }
         if g.chroma_scaling_from_luma || g.num_cr_points > 0 {
             for i in 0..num_pos_chroma {
-                g.ar_coeffs_cr_plus_128[i] = r.f(8)? as u8;
+                g.ar_coeffs_cr_plus_128[i] = low_u8(r.f(8)?);
             }
         }
-        g.ar_coeff_shift_minus_6 = r.f(2)? as u8;
-        g.grain_scale_shift = r.f(2)? as u8;
+        g.ar_coeff_shift_minus_6 = low_u8(r.f(2)?);
+        g.grain_scale_shift = low_u8(r.f(2)?);
         if g.num_cb_points > 0 {
-            g.cb_mult = r.f(8)? as u8;
-            g.cb_luma_mult = r.f(8)? as u8;
-            g.cb_offset = r.f(9)? as u16;
+            g.cb_mult = low_u8(r.f(8)?);
+            g.cb_luma_mult = low_u8(r.f(8)?);
+            g.cb_offset = low_u16(r.f(9)?);
         }
         if g.num_cr_points > 0 {
-            g.cr_mult = r.f(8)? as u8;
-            g.cr_luma_mult = r.f(8)? as u8;
-            g.cr_offset = r.f(9)? as u16;
+            g.cr_mult = low_u8(r.f(8)?);
+            g.cr_luma_mult = low_u8(r.f(8)?);
+            g.cr_offset = low_u16(r.f(9)?);
         }
         g.overlap_flag = r.flag()?;
         g.clip_to_restricted_range = r.flag()?;
@@ -1344,7 +1345,7 @@ impl ParserState {
         if h.show_existing_frame {
             if h.frame_type == KEY_FRAME {
                 // 7.21: load the shown key frame's state, then refresh every slot with it.
-                let s = self.refs[h.frame_to_show_map_idx as usize];
+                let s = self.refs[usize::from(h.frame_to_show_map_idx)];
                 for slot in self.refs.iter_mut() {
                     *slot = s;
                 }
@@ -1401,9 +1402,9 @@ fn compute_image_size(h: &mut FrameHeader) {
 /// get_qindex(ignoreDeltaQ = 1, segmentId) (spec 7.12.2).
 pub fn qindex(h: &FrameHeader, seg: usize) -> i32 {
     if h.segmentation_enabled && h.feature_enabled[seg][0] {
-        (h.base_q_idx as i32 + h.feature_data[seg][0] as i32).clamp(0, 255)
+        (i32::from(h.base_q_idx) + i32::from(h.feature_data[seg][0])).clamp(0, 255)
     } else {
-        h.base_q_idx as i32
+        i32::from(h.base_q_idx)
     }
 }
 
@@ -1418,7 +1419,7 @@ fn read_global_param(
     let (mut abs_bits, mut prec_bits) = (12u32, 15u32);
     if idx < 2 {
         if t == GM_TRANSLATION {
-            let hp = !h.allow_high_precision_mv as u32;
+            let hp = u32::from(!h.allow_high_precision_mv);
             abs_bits = 9 - hp;
             prec_bits = 3 - hp;
         } else {
@@ -1476,7 +1477,7 @@ pub fn parse_tile_group(
                 end: base + payload.len() as u32,
             });
         } else {
-            let tsb = t.tile_size_bytes as usize;
+            let tsb = usize_from_u32(t.tile_size_bytes);
             let b = payload
                 .get(pos..pos + tsb)
                 .ok_or(Av1Error::Truncated("tile_size_minus_1"))?;

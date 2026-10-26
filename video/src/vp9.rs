@@ -26,6 +26,7 @@ use super::{
     VideoError,
 };
 use crate::nvdec_vp9::{FrameHeader, KEY_FRAME, Vp9State, split_superframe, tile_sizes};
+use nv_rm_core::conv::u64_from_usize;
 use nv_rm_core::push::method;
 use nv_rm_sys::nvdec_drv::{Pod, Vp9Dims, Vp9EntropyCounts, Vp9PicS};
 use std::collections::VecDeque;
@@ -41,10 +42,6 @@ const FILTER_OFF: u64 = 0x1_0000;
 const OFF_4DC: u64 = 0xd5_c800;
 const SEG_SIZE: usize = 0x8_0000;
 const COLMV_SIZE: usize = 0x100_0000;
-
-fn bitstream_error(e: nv_rm_core::Error) -> VideoError {
-    VideoError::Bitstream(format!("VP9: {e}"))
-}
 
 /// Per-job private data the session hands back in `build` / `finish`.
 struct Pending {
@@ -192,12 +189,12 @@ impl Vp9Decoder {
         }
         p.current = dims(h.width, h.height);
         let res_change = !key && self.last_decoded.is_some_and(|s| s != (h.width, h.height));
-        p.flags = key as u8
-            | (self.prev_key as u8) << 1
-            | (res_change as u8) << 2
-            | (h.error_resilient as u8) << 3
-            | (self.prev_show as u8) << 4
-            | (h.intra_only as u8) << 5;
+        p.flags = u8::from(key)
+            | u8::from(self.prev_key) << 1
+            | u8::from(res_change) << 2
+            | u8::from(h.error_resilient) << 3
+            | u8::from(self.prev_show) << 4
+            | u8::from(h.intra_only) << 5;
         // Sign bias / compound refs only when not key|error-resilient|intra-only
         // (stock flags & 0x29; libvpx zeroes sign bias there as well).
         if p.flags & 0x29 == 0 {
@@ -214,26 +211,26 @@ impl Vp9Decoder {
         p.qp_y_dc = h.delta_q_y_dc;
         p.qp_ch_ac = h.delta_q_uv_ac;
         p.qp_ch_dc = h.delta_q_uv_dc;
-        p.lossless = h.lossless as i8;
+        p.lossless = i8::from(h.lossless);
         p.transform_mode = h.tx_mode as i8;
-        p.allow_high_precision_mv = h.allow_high_precision_mv as i8;
+        p.allow_high_precision_mv = i8::from(h.allow_high_precision_mv);
         p.mcomp_filter_type = engine_interp_filter(h);
         p.comp_pred_mode = h.reference_mode as i8;
         p.log2_tile_columns = h.log2_tile_cols as i8;
         p.log2_tile_rows = h.log2_tile_rows as i8;
         let seg = &self.st.seg;
-        p.segment_enabled = seg.enabled as u8;
+        p.segment_enabled = u8::from(seg.enabled);
         // FFmpeg vp9.c:733-738: update/temporal cleared when segmentation off.
-        p.segment_map_update = (seg.enabled && seg.update_map) as u8;
-        p.segment_map_temporal_update = (seg.enabled && seg.temporal_update) as u8;
-        p.segment_feature_mode = seg.abs_delta as u8;
+        p.segment_map_update = u8::from(seg.enabled && seg.update_map);
+        p.segment_map_temporal_update = u8::from(seg.enabled && seg.temporal_update);
+        p.segment_feature_mode = u8::from(seg.abs_delta);
         for i in 0..8 {
             for j in 0..4 {
-                p.segment_feature_enable[i][j] = seg.feature_enabled[i][j] as u8;
+                p.segment_feature_enable[i][j] = u8::from(seg.feature_enabled[i][j]);
                 p.segment_feature_data[i][j] = seg.feature_data[i][j];
             }
         }
-        p.mode_ref_lf_enabled = h.mode_ref_delta_enabled as i8;
+        p.mode_ref_lf_enabled = i8::from(h.mode_ref_delta_enabled);
         p.mb_ref_lf_delta = self.st.ref_deltas;
         p.mb_mode_lf_delta = self.st.mode_deltas;
         // Stock +0xeb: plane GOB kinds `luma | chroma << 2` (stock `plane_bits_90`): 9 for 8-bit,
@@ -316,7 +313,7 @@ impl CodecDecoder for Vp9Decoder {
         Ok(())
     }
     fn surfaces_needed(&self, data: &[u8]) -> VResult<usize> {
-        let frames = split_superframe(data).map_err(bitstream_error)?;
+        let frames = split_superframe(data)?;
         let mut n = 0;
         for f in frames {
             let profile = Self::profile(f)?;
@@ -336,7 +333,7 @@ impl CodecDecoder for Vp9Decoder {
         Ok(n)
     }
     fn push_unit(&mut self, data: &[u8]) -> VResult<()> {
-        for f in split_superframe(data).map_err(bitstream_error)? {
+        for f in split_superframe(data)? {
             self.frames.push_back(f.to_vec());
         }
         Ok(())
@@ -348,7 +345,7 @@ impl CodecDecoder for Vp9Decoder {
         if frame.len() == 1 && frame[0] == 0 {
             return self.next_job(); // libvpx skips 1-byte zero frames
         }
-        let h = self.st.parse(&frame).map_err(bitstream_error)?;
+        let h = self.st.parse(&frame)?;
         if self.st.bit_depth != self.bit_depth {
             return Err(VideoError::Unsupported(format!(
                 "VP9 {}-bit frame in a {}-bit session",
@@ -454,13 +451,13 @@ impl CodecDecoder for Vp9Decoder {
             r(&mut w, 0x430 + 4 * i as u32, s(si).luma);
             r(&mut w, 0x474 + 4 * i as u32, s(si).chroma);
         }
-        r(&mut w, 0x424, da + STATUS as u64);
+        r(&mut w, 0x424, da + u64_from_usize(STATUS));
         method(&mut w, 4, 0x40c, &[ctx.picture_index]); // PICTURE_INDEX
-        r(&mut w, 0x5d0, da + TILES as u64);
-        r(&mut w, 0x5c0, da + PROBS as u64);
-        r(&mut w, 0x5c4, da + COUNTS as u64);
-        let sega = |k: usize| self.seg + (k * SEG_SIZE) as u64;
-        let mva = |k: usize| self.colmv + (k * COLMV_SIZE) as u64;
+        r(&mut w, 0x5d0, da + u64_from_usize(TILES));
+        r(&mut w, 0x5c0, da + u64_from_usize(PROBS));
+        r(&mut w, 0x5c4, da + u64_from_usize(COUNTS));
+        let sega = |k: usize| self.seg + u64_from_usize(k * SEG_SIZE);
+        let mva = |k: usize| self.colmv + u64_from_usize(k * COLMV_SIZE);
         r(&mut w, 0x5c8, sega(self.seg_flip));
         r(&mut w, 0x5cc, sega(1 - self.seg_flip));
         // colMV parity by picture counter (stock method 0x40c parity).
@@ -503,9 +500,7 @@ impl CodecDecoder for Vp9Decoder {
         self.prev_key = h.frame_type == KEY_FRAME;
         self.prev_show = h.show_frame;
         self.last_decoded = Some((h.width, h.height));
-        self.st
-            .finish_frame(&h, counts.as_ref(), current)
-            .map_err(bitstream_error)
+        Ok(self.st.finish_frame(&h, counts.as_ref(), current)?)
     }
     fn referenced(&self) -> Vec<usize> {
         self.st.referenced().collect()
@@ -592,7 +587,7 @@ mod tests {
             ..Default::default()
         };
         for lit in 0..4u8 {
-            h.interp_filter = crate::nvdec_vp9::LITERAL_TO_FILTER[lit as usize];
+            h.interp_filter = crate::nvdec_vp9::LITERAL_TO_FILTER[usize::from(lit)];
             assert_eq!(engine_interp_filter(&h), lit as i8, "literal {lit}");
         }
         h.interp_filter = crate::nvdec_vp9::SWITCHABLE;

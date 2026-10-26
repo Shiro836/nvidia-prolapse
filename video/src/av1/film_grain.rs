@@ -22,34 +22,37 @@ impl Rng {
         let bit = (r ^ (r >> 1) ^ (r >> 3) ^ (r >> 12)) & 1;
         let r = (r >> 1) | (bit << 15);
         self.0 = r;
-        ((r >> (16 - bits)) & ((1 << bits) - 1)) as usize
+        usize::from((r >> (16 - bits)) & ((1 << bits) - 1))
     }
 }
 
 fn scaling_lut(num: u8, value: &[u8], scaling: &[u8], lut: &mut [u8]) {
-    let n = num as usize;
+    let n = usize::from(num);
     if n == 0 {
         lut[..256].fill(0);
         return;
     }
     lut[..value[0] as usize].fill(scaling[0]);
     for i in 0..n - 1 {
-        let dy = scaling[i + 1] as i32 - scaling[i] as i32;
-        let dx = value[i + 1] as i32 - value[i] as i32;
+        let dy = i32::from(scaling[i + 1]) - i32::from(scaling[i]);
+        let dx = i32::from(value[i + 1]) - i32::from(value[i]);
         let delta = dy * ((65536 + (dx >> 1)) / dx);
         for x in 0..dx {
-            lut[value[i] as usize + x as usize] =
-                (scaling[i] as i32 + ((x * delta + 32768) >> 16)) as u8;
+            lut[usize::from(value[i]) + x as usize] =
+                (i32::from(scaling[i]) + ((x * delta + 32768) >> 16)) as u8;
         }
     }
-    lut[value[n - 1] as usize..256].fill(scaling[n - 1]);
+    lut[usize::from(value[n - 1])..256].fill(scaling[n - 1]);
 }
 
 /// Fill `out` (`FILM_GRAIN_MEMORY_SIZE` bytes) for one picture.
 pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
     out[..FILM_GRAIN_MEMORY_SIZE].fill(0);
-    let bd = seq.bit_depth as u32;
-    let (sx, sy) = (seq.subsampling_x as usize, seq.subsampling_y as usize);
+    let bd = u32::from(seq.bit_depth);
+    let (sx, sy) = (
+        usize::from(seq.subsampling_x),
+        usize::from(seq.subsampling_y),
+    );
     // Scaling LUTs (8-bit index).
     scaling_lut(
         g.num_y_points,
@@ -79,20 +82,20 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
     let center = 128i32 << (bd - 8);
     let (gmin, gmax) = (-center, (256i32 << (bd - 8)) - 1 - center);
     let mut luma = vec![[0i32; 82]; 73];
-    let shift = 12 - bd + g.grain_scale_shift as u32;
+    let shift = 12 - bd + u32::from(g.grain_scale_shift);
     let mut rng = Rng(g.grain_seed);
     for row in luma.iter_mut() {
         for v in row.iter_mut() {
             let x = if g.num_y_points > 0 {
-                GAUSSIAN_SEQUENCE[rng.next(11)] as i32
+                i32::from(GAUSSIAN_SEQUENCE[rng.next(11)])
             } else {
                 0
             };
             *v = round2(x, shift);
         }
     }
-    let ar_shift = g.ar_coeff_shift_minus_6 as u32 + 6;
-    let lag = g.ar_coeff_lag as i32;
+    let ar_shift = u32::from(g.ar_coeff_shift_minus_6) + 6;
+    let lag = i32::from(g.ar_coeff_lag);
     for y in 3..73 {
         for x in 3..82 - 3 {
             let (mut sum, mut pos) = (0i32, 0usize);
@@ -101,7 +104,7 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
                     if dr == 0 && dc == 0 {
                         break 'o;
                     }
-                    let c = g.ar_coeffs_y_plus_128[pos] as i32 - 128;
+                    let c = i32::from(g.ar_coeffs_y_plus_128[pos]) - 128;
                     sum += luma[(y + dr) as usize][(x + dc) as usize] * c;
                     pos += 1;
                 }
@@ -122,7 +125,7 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
         for row in p.iter_mut() {
             for v in row.iter_mut() {
                 let x = if n > 0 || g.chroma_scaling_from_luma {
-                    GAUSSIAN_SEQUENCE[rng.next(11)] as i32
+                    i32::from(GAUSSIAN_SEQUENCE[rng.next(11)])
                 } else {
                     0
                 };
@@ -135,8 +138,8 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
             let (mut s0, mut s1, mut pos) = (0i32, 0i32, 0usize);
             'o: for dr in -lag..=0 {
                 for dc in -lag..=lag {
-                    let c0 = g.ar_coeffs_cb_plus_128[pos] as i32 - 128;
-                    let c1 = g.ar_coeffs_cr_plus_128[pos] as i32 - 128;
+                    let c0 = i32::from(g.ar_coeffs_cb_plus_128[pos]) - 128;
+                    let c1 = i32::from(g.ar_coeffs_cr_plus_128[pos]) - 128;
                     if dr == 0 && dc == 0 {
                         if g.num_y_points > 0 {
                             let mut l = 0;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Annex-B NAL splitting, emulation-prevention removal and an RBSP bit reader (H.264 7.2/7.4.1,
 //! H.265 7.2/7.4.2, Exp-Golomb 9.1 / 9.2).
-use super::{VResult, bitstream};
+use nv_rm_core::conv::usize_from_u32;
 
 /// One NAL unit inside an Annex-B buffer: `start` is the offset of its start code
 /// (`00 00 01` or `00 00 00 01`), `nal` the escaped NAL bytes (header included, trailing
@@ -56,6 +56,58 @@ pub fn unescape(nal: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Why the RBSP bit reader stopped.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Error {
+    /// A read needs more bits than the NAL unit has left.
+    #[error("read past the end of a NAL unit (bit {at} of {len})")]
+    Truncated {
+        /// Bit position of the read.
+        at: usize,
+        /// Bits in the NAL unit.
+        len: usize,
+    },
+    /// A skip goes past the end of the NAL unit.
+    #[error("skip past the end of a NAL unit ({bits} bits at bit {at})")]
+    SkipPastEnd {
+        /// Bit position of the skip.
+        at: usize,
+        /// Bits skipped.
+        bits: usize,
+    },
+    /// More than 31 leading zero bits: the code does not fit 32 bits (H.264 9.1, H.265 9.2).
+    #[error("Exp-Golomb code longer than 32 bits")]
+    ExpGolombTooLong,
+    /// `u(n)` with n above 32.
+    #[error("u({0}) wider than 32 bits")]
+    WidthTooLarge(u32),
+    /// A `ue(v)` syntax element above its semantic maximum.
+    #[error("{field} = {value} exceeds {max}")]
+    AboveMax {
+        /// The syntax element.
+        field: &'static str,
+        /// Its decoded value.
+        value: u32,
+        /// The inclusive maximum.
+        max: u32,
+    },
+    /// An `se(v)` syntax element outside its semantic range.
+    #[error("{field} = {value} outside [{min}, {max}]")]
+    OutsideRange {
+        /// The syntax element.
+        field: &'static str,
+        /// Its decoded value.
+        value: i32,
+        /// The inclusive minimum.
+        min: i32,
+        /// The inclusive maximum.
+        max: i32,
+    },
+}
+
+/// `Result` of the bit reader.
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// MSB-first bit reader over an RBSP.
 pub struct BitReader<'a> {
     data: &'a [u8],
@@ -68,79 +120,92 @@ impl<'a> BitReader<'a> {
     pub fn pos(&self) -> usize {
         self.pos
     }
-    pub fn bits_left(&self) -> isize {
-        (self.data.len() * 8) as isize - self.pos as isize
-    }
-    pub fn u(&mut self, n: u32) -> VResult<u32> {
-        debug_assert!(n <= 32);
-        let mut v: u64 = 0;
+    /// `u(n)` (H.264 7.2 / H.265 7.2 `read_bits(n)`), `n <= 32`.
+    pub fn u(&mut self, n: u32) -> Result<u32> {
+        if n > 32 {
+            return Err(Error::WidthTooLarge(n));
+        }
+        let mut v: u32 = 0;
         for _ in 0..n {
-            let byte = match self.data.get(self.pos >> 3) {
-                Some(b) => *b,
-                None => return bitstream("read past the end of a NAL unit"),
+            let Some(&byte) = self.data.get(self.pos >> 3) else {
+                return Err(Error::Truncated {
+                    at: self.pos,
+                    len: self.data.len().saturating_mul(8),
+                });
             };
-            v = (v << 1) | ((byte >> (7 - (self.pos & 7))) & 1) as u64;
+            // n <= 32 bits: the shift never drops a set bit.
+            v = (v << 1) | u32::from((byte >> (7 - (self.pos & 7))) & 1);
             self.pos += 1;
         }
-        Ok(v as u32)
+        Ok(v)
     }
-    pub fn flag(&mut self) -> VResult<bool> {
+    pub fn flag(&mut self) -> Result<bool> {
         Ok(self.u(1)? != 0)
     }
-    pub fn skip(&mut self, n: usize) -> VResult<()> {
-        if self.pos + n > self.data.len() * 8 {
-            return bitstream("skip past the end of a NAL unit");
+    pub fn skip(&mut self, n: usize) -> Result<()> {
+        let end = self.pos.checked_add(n);
+        if end.is_none_or(|end| end.div_ceil(8) > self.data.len()) {
+            return Err(Error::SkipPastEnd {
+                at: self.pos,
+                bits: n,
+            });
         }
         self.pos += n;
         Ok(())
     }
-    pub fn ue(&mut self) -> VResult<u32> {
+    /// `ue(v)` (H.264 9.1, H.265 9.2): `2^zeros - 1 + read_bits(zeros)`, at most `2^32 - 2`.
+    pub fn ue(&mut self) -> Result<u32> {
         let mut zeros = 0;
         while !self.flag()? {
             zeros += 1;
             if zeros > 31 {
-                return bitstream("Exp-Golomb code longer than 32 bits");
+                return Err(Error::ExpGolombTooLong);
             }
         }
         if zeros == 0 {
             return Ok(0);
         }
-        Ok(((1u64 << zeros) - 1 + self.u(zeros)? as u64) as u32)
+        // zeros <= 31: (2^zeros - 1) + (2^zeros - 1) <= 2^32 - 2.
+        Ok((1u32 << zeros) - 1 + self.u(zeros)?)
     }
-    pub fn se(&mut self) -> VResult<i32> {
-        let k = self.ue()? as i64;
-        Ok(if k & 1 == 1 { (k + 1) / 2 } else { -(k / 2) } as i32)
+    /// `se(v)` (H.264 9.1.1, H.265 9.2.2): k -> (-1)^(k+1) * Ceil(k / 2), within `i32` for every
+    /// k of `ue(v)`.
+    pub fn se(&mut self) -> Result<i32> {
+        let k = self.ue()?;
+        let magnitude = k.div_ceil(2);
+        // Ceil((2^32 - 2) / 2) = 2^31 - 1: the magnitude always fits i32.
+        let magnitude = i32::try_from(magnitude).map_err(|_overflow| Error::ExpGolombTooLong)?;
+        Ok(if k & 1 == 1 { magnitude } else { -magnitude })
     }
     /// `ue(v)` checked against an inclusive maximum (named for the error).
-    pub fn ue_max(&mut self, max: u32, what: &str) -> VResult<u32> {
-        let v = self.ue()?;
-        if v > max {
-            return bitstream(format!("{what} = {v} exceeds {max}"));
+    pub fn ue_max(&mut self, max: u32, field: &'static str) -> Result<u32> {
+        let value = self.ue()?;
+        if value > max {
+            return Err(Error::AboveMax { field, value, max });
         }
-        Ok(v)
+        Ok(value)
     }
-    pub fn se_range(&mut self, min: i32, max: i32, what: &str) -> VResult<i32> {
-        let v = self.se()?;
-        if v < min || v > max {
-            return bitstream(format!("{what} = {v} outside [{min}, {max}]"));
+    pub fn se_range(&mut self, min: i32, max: i32, field: &'static str) -> Result<i32> {
+        let value = self.se()?;
+        if value < min || value > max {
+            return Err(Error::OutsideRange {
+                field,
+                value,
+                min,
+                max,
+            });
         }
-        Ok(v)
+        Ok(value)
     }
-    /// True while more RBSP data precedes the rbsp_stop_one_bit (7.2 more_rbsp_data()).
+    /// True while more RBSP data precedes the `rbsp_stop_one_bit` (7.2 `more_rbsp_data()`).
     pub fn more_rbsp_data(&self) -> bool {
-        let total = self.data.len() * 8;
-        if self.pos >= total {
-            return false;
-        }
-        // position of the last 1 bit in the buffer
-        let mut last = None;
-        for (i, &b) in self.data.iter().enumerate().rev() {
-            if b != 0 {
-                last = Some(i * 8 + 7 - b.trailing_zeros() as usize);
-                break;
-            }
-        }
-        matches!(last, Some(l) if self.pos < l)
+        // Position of the last 1 bit in the buffer.
+        let last = self
+            .data
+            .iter()
+            .rposition(|&b| b != 0)
+            .map(|i| i * 8 + 7 - usize_from_u32(self.data[i].trailing_zeros()));
+        last.is_some_and(|l| self.pos < l)
     }
 }
 

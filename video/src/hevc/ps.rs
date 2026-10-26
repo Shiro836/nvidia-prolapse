@@ -2,7 +2,9 @@
 //! HEVC parameter sets (H.265 7.3.2.2 SPS, 7.3.2.3 PPS, 7.3.4 scaling_list_data, 7.3.7
 //! st_ref_pic_set) with the derived values the descriptor needs.
 use crate::bits::BitReader;
+use crate::fit;
 use crate::{VResult, bitstream, unsupported};
+use nv_rm_core::conv::usize_from_u32;
 
 /// Short-term RPS after 7.4.8 derivation: deltas relative to the current POC.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,14 +32,17 @@ pub fn st_ref_pic_set(
     let inter = if idx != 0 { r.flag()? } else { false };
     if inter {
         let delta_idx = if in_slice {
-            r.ue_max(idx as u32 - 1, "delta_idx_minus1")? + 1
+            r.ue_max(fit::<u32, _>(idx, "RefRpsIdx")? - 1, "delta_idx_minus1")? + 1
         } else {
             1
         };
-        let ref_idx = idx - delta_idx as usize;
+        let ref_idx = idx - usize_from_u32(delta_idx);
         let rf = &sets[ref_idx];
         let sign = r.flag()?;
-        let abs = r.ue_max(1 << 15, "abs_delta_rps_minus1")? as i32 + 1;
+        let abs = fit::<i32, _>(
+            r.ue_max(1 << 15, "abs_delta_rps_minus1")?,
+            "abs_delta_rps_minus1",
+        )? + 1;
         let delta_rps = if sign { -abs } else { abs };
         let n = rf.num_delta_pocs();
         let mut used = vec![false; n + 1];
@@ -95,20 +100,29 @@ pub fn st_ref_pic_set(
         if s0.len() > 16 || s1.len() > 16 || s0.len() + s1.len() > 16 {
             return bitstream("st_ref_pic_set with more than 16 pictures");
         }
-        Ok((StRps { s0, s1 }, Some(n as u32)))
+        Ok((StRps { s0, s1 }, Some(fit(n, "NumDeltaPocs")?)))
     } else {
-        let n_neg = r.ue_max(16, "num_negative_pics")? as usize;
-        let n_pos = r.ue_max(16 - n_neg as u32, "num_positive_pics")? as usize;
+        let n_neg = usize_from_u32(r.ue_max(16, "num_negative_pics")?);
+        let n_pos = usize_from_u32(r.ue_max(
+            16 - fit::<u32, _>(n_neg, "num_negative_pics")?,
+            "num_positive_pics",
+        )?);
         let mut s0 = Vec::with_capacity(n_neg);
         let mut poc = 0;
         for _ in 0..n_neg {
-            poc -= r.ue_max(1 << 15, "delta_poc_s0_minus1")? as i32 + 1;
+            poc -= fit::<i32, _>(
+                r.ue_max(1 << 15, "delta_poc_s0_minus1")?,
+                "delta_poc_s0_minus1",
+            )? + 1;
             s0.push((poc, r.flag()?));
         }
         let mut s1 = Vec::with_capacity(n_pos);
         poc = 0;
         for _ in 0..n_pos {
-            poc += r.ue_max(1 << 15, "delta_poc_s1_minus1")? as i32 + 1;
+            poc += fit::<i32, _>(
+                r.ue_max(1 << 15, "delta_poc_s1_minus1")?,
+                "delta_poc_s1_minus1",
+            )? + 1;
             s1.push((poc, r.flag()?));
         }
         Ok((StRps { s0, s1 }, None))
@@ -171,8 +185,10 @@ impl ScalingList {
                 let pred_mode = r.flag()?;
                 let coef_num = if size == 0 { 16 } else { 64 };
                 if !pred_mode {
-                    let delta =
-                        r.ue_max((m / step) as u32, "scaling_list_pred_matrix_id_delta")? as usize;
+                    let delta = usize_from_u32(r.ue_max(
+                        fit(m / step, "matrixId")?,
+                        "scaling_list_pred_matrix_id_delta",
+                    )?);
                     if delta == 0 {
                         s.lists[size][m] = Self::default_for(size, m);
                         if size >= 2 {
@@ -190,7 +206,7 @@ impl ScalingList {
                     if size > 1 {
                         let dc = r.se_range(-7, 247, "scaling_list_dc_coef_minus8")? + 8;
                         next = dc;
-                        s.dc[size - 2][m] = dc as u8;
+                        s.dc[size - 2][m] = fit(dc, "scaling_list_dc_coef_minus8")?;
                     }
                     for i in 0..coef_num {
                         let d = r.se_range(-128, 127, "scaling_list_delta_coef")?;
@@ -198,7 +214,7 @@ impl ScalingList {
                         if next == 0 {
                             return bitstream("scaling list coefficient 0");
                         }
-                        s.lists[size][m][i] = next as u8;
+                        s.lists[size][m][i] = fit(next, "ScalingList")?;
                     }
                 }
                 m += step;
@@ -219,8 +235,12 @@ pub fn diag_scan(blk: usize) -> Vec<(usize, usize)> {
     let (mut x, mut y): (isize, isize) = (0, 0);
     while out.len() < blk * blk {
         while y >= 0 {
-            if (x as usize) < blk && (y as usize) < blk {
-                out.push((x as usize, y as usize));
+            // x, y >= 0 here (y by the loop condition, x only grows from 0).
+            if let (Ok(ux), Ok(uy)) = (usize::try_from(x), usize::try_from(y))
+                && ux < blk
+                && uy < blk
+            {
+                out.push((ux, uy));
             }
             y -= 1;
             x += 1;
@@ -289,7 +309,8 @@ fn profile_tier_level(r: &mut BitReader, max_sub_layers_minus1: u32) -> VResult<
     r.skip(8)?; // general_level_idc
     let mut prof = [false; 8];
     let mut lvl = [false; 8];
-    for i in 0..max_sub_layers_minus1 as usize {
+    let sub_layers = usize_from_u32(max_sub_layers_minus1);
+    for i in 0..sub_layers {
         prof[i] = r.flag()?;
         lvl[i] = r.flag()?;
     }
@@ -298,7 +319,7 @@ fn profile_tier_level(r: &mut BitReader, max_sub_layers_minus1: u32) -> VResult<
             r.skip(2)?;
         }
     }
-    for i in 0..max_sub_layers_minus1 as usize {
+    for i in 0..sub_layers {
         if prof[i] {
             r.skip(88)?;
         }
@@ -407,7 +428,7 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
             log2_min_pcm_cb + r.ue_max(2, "log2_diff_max_min_pcm_luma_coding_block_size")?;
         pcm_lf = r.flag()?;
     }
-    let n_sets = r.ue_max(64, "num_short_term_ref_pic_sets")? as usize;
+    let n_sets = usize_from_u32(r.ue_max(64, "num_short_term_ref_pic_sets")?);
     let mut st_rps = Vec::with_capacity(n_sets);
     for i in 0..n_sets {
         let (s, _) = st_ref_pic_set(r, i, &st_rps, false)?;
@@ -418,7 +439,7 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
     if long_term_ref_pics_present {
         num_long_term_ref_pics_sps = r.ue_max(32, "num_long_term_ref_pics_sps")?;
         for _ in 0..num_long_term_ref_pics_sps {
-            r.skip(log2_max_poc_lsb as usize + 1)?;
+            r.skip(usize_from_u32(log2_max_poc_lsb) + 1)?;
         }
     }
     let temporal_mvp = r.flag()?;

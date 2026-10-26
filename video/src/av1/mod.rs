@@ -38,7 +38,7 @@ pub fn write_default_cdfs(qctx: u8, out: &mut [u8]) {
     for p in cdf_defaults::PLACEMENTS {
         let t: &[u16] = match p.src {
             cdf_defaults::Src::Fixed(t) => t,
-            cdf_defaults::Src::PerQ(q) => q[qctx as usize],
+            cdf_defaults::Src::PerQ(q) => q[usize::from(qctx)],
         };
         for (r, row) in t.chunks_exact(p.vals).enumerate() {
             for (k, v) in row.iter().enumerate() {
@@ -204,7 +204,7 @@ impl Av1Codec {
                         self.parser
                             .parse_frame_header(o.payload, o.temporal_id, o.spatial_id)?;
                     if h.show_existing_frame {
-                        let slot = self.ref_map[h.frame_to_show_map_idx as usize]
+                        let slot = self.ref_map[usize::from(h.frame_to_show_map_idx)]
                             .ok_or(Av1Error::Invalid("show_existing_frame of an empty slot"))?;
                         self.show_existing(&h);
                         return Ok(Some(Av1Out::ShowExisting {
@@ -273,7 +273,7 @@ impl Av1Codec {
 
     fn show_existing(&mut self, h: &FrameHeader) {
         if h.frame_type == KEY_FRAME {
-            let s = self.ref_map[h.frame_to_show_map_idx as usize];
+            let s = self.ref_map[usize::from(h.frame_to_show_map_idx)];
             self.ref_map = [s; 8];
         }
         self.parser.update_refs(h);
@@ -311,11 +311,11 @@ impl Av1Codec {
         let mut ref_slots = [None; 7];
         if !h.frame_is_intra {
             for (r, &idx) in ref_slots.iter_mut().zip(&h.ref_frame_idx) {
-                *r = self.ref_map[idx as usize];
+                *r = self.ref_map[usize::from(idx)];
             }
         }
         let primary_slot = if h.primary_ref_frame != PRIMARY_REF_NONE {
-            ref_slots[h.primary_ref_frame as usize]
+            ref_slots[usize::from(h.primary_ref_frame)]
         } else {
             None
         };

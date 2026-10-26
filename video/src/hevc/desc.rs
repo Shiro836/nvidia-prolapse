@@ -176,21 +176,26 @@ pub fn build(
     b.set(
         6,
         1,
-        sps.scaling_list_enabled as u32,
+        u32::from(sps.scaling_list_enabled),
         "scaling_list_enabled_flag",
     )?;
-    b.set(7, 1, sps.amp as u32, "amp_enabled_flag")?;
-    b.set(8, 1, sps.sao as u32, "sample_adaptive_offset_enabled_flag")?;
+    b.set(7, 1, u32::from(sps.amp), "amp_enabled_flag")?;
+    b.set(
+        8,
+        1,
+        u32::from(sps.sao),
+        "sample_adaptive_offset_enabled_flag",
+    )?;
     b.set(
         27,
         1,
-        sps.temporal_mvp as u32,
+        u32::from(sps.temporal_mvp),
         "sps_temporal_mvp_enabled_flag",
     )?;
     b.set(
         28,
         1,
-        sps.strong_intra_smoothing as u32,
+        u32::from(sps.strong_intra_smoothing),
         "strong_intra_smoothing_enabled_flag",
     )?;
     put32(&mut d, 0x60, b.0);
@@ -198,13 +203,13 @@ pub fn build(
     b.set(
         0,
         1,
-        pps.dependent_slice_segments_enabled as u32,
+        u32::from(pps.dependent_slice_segments_enabled),
         "dependent_slice_segments_enabled_flag",
     )?;
     b.set(
         1,
         1,
-        pps.output_flag_present as u32,
+        u32::from(pps.output_flag_present),
         "output_flag_present_flag",
     )?;
     b.set(
@@ -216,13 +221,13 @@ pub fn build(
     b.set(
         5,
         1,
-        pps.sign_data_hiding as u32,
+        u32::from(pps.sign_data_hiding),
         "sign_data_hiding_enabled_flag",
     )?;
     b.set(
         6,
         1,
-        pps.cabac_init_present as u32,
+        u32::from(pps.cabac_init_present),
         "cabac_init_present_flag",
     )?;
     b.set(
@@ -243,16 +248,21 @@ pub fn build(
     b.set(
         22,
         1,
-        pps.constrained_intra_pred as u32,
+        u32::from(pps.constrained_intra_pred),
         "constrained_intra_pred_flag",
     )?;
     b.set(
         23,
         1,
-        pps.transform_skip as u32,
+        u32::from(pps.transform_skip),
         "transform_skip_enabled_flag",
     )?;
-    b.set(24, 1, pps.cu_qp_delta as u32, "cu_qp_delta_enabled_flag")?;
+    b.set(
+        24,
+        1,
+        u32::from(pps.cu_qp_delta),
+        "cu_qp_delta_enabled_flag",
+    )?;
     b.set(25, 2, pps.diff_cu_qp_delta_depth, "diff_cu_qp_delta_depth")?;
     put32(&mut d, 0x64, b.0);
     d[0x68] = pps.cb_qp_offset as i8 as u8;
@@ -263,22 +273,22 @@ pub fn build(
     b.set(
         0,
         1,
-        pps.slice_chroma_qp_offsets_present as u32,
+        u32::from(pps.slice_chroma_qp_offsets_present),
         "pps_slice_chroma_qp_offsets_present_flag",
     )?;
-    b.set(1, 1, pps.weighted_pred as u32, "weighted_pred_flag")?;
-    b.set(2, 1, pps.weighted_bipred as u32, "weighted_bipred_flag")?;
+    b.set(1, 1, u32::from(pps.weighted_pred), "weighted_pred_flag")?;
+    b.set(2, 1, u32::from(pps.weighted_bipred), "weighted_bipred_flag")?;
     b.set(
         3,
         1,
-        pps.transquant_bypass as u32,
+        u32::from(pps.transquant_bypass),
         "transquant_bypass_enabled_flag",
     )?;
-    b.set(4, 1, pps.tiles.is_some() as u32, "tiles_enabled_flag")?;
+    b.set(4, 1, u32::from(pps.tiles.is_some()), "tiles_enabled_flag")?;
     b.set(
         5,
         1,
-        pps.entropy_coding_sync as u32,
+        u32::from(pps.entropy_coding_sync),
         "entropy_coding_sync_enabled_flag",
     )?;
     if let Some(t) = &pps.tiles {
@@ -290,35 +300,40 @@ pub fn build(
         .tiles
         .as_ref()
         .is_none_or(|t| t.loop_filter_across_tiles);
-    b.set(16, 1, lfat as u32, "loop_filter_across_tiles_enabled_flag")?;
+    b.set(
+        16,
+        1,
+        u32::from(lfat),
+        "loop_filter_across_tiles_enabled_flag",
+    )?;
     b.set(
         17,
         1,
-        pps.loop_filter_across_slices as u32,
+        u32::from(pps.loop_filter_across_slices),
         "pps_loop_filter_across_slices_enabled_flag",
     )?;
     b.set(
         18,
         1,
-        pps.deblocking_control_present as u32,
+        u32::from(pps.deblocking_control_present),
         "deblocking_filter_control_present_flag",
     )?;
     b.set(
         19,
         1,
-        pps.deblocking_override_enabled as u32,
+        u32::from(pps.deblocking_override_enabled),
         "deblocking_filter_override_enabled_flag",
     )?;
     b.set(
         20,
         1,
-        pps.deblocking_disabled as u32,
+        u32::from(pps.deblocking_disabled),
         "pps_deblocking_filter_disabled_flag",
     )?;
     b.set(
         21,
         1,
-        pps.lists_modification_present as u32,
+        u32::from(pps.lists_modification_present),
         "lists_modification_present_flag",
     )?;
     b.set(
@@ -330,7 +345,7 @@ pub fn build(
     b.set(
         25,
         1,
-        pps.slice_header_extension_present as u32,
+        u32::from(pps.slice_header_extension_present),
         "slice_segment_header_extension_present_flag",
     )?;
     put32(&mut d, 0x6c, b.0);
@@ -346,8 +361,8 @@ pub fn build(
     for (i, v) in st.diff.iter().enumerate() {
         put16(&mut d, 0x94 + 2 * i, *v as u16);
     }
-    d[0xb4] = st.idr as u8;
-    d[0xb5] = st.irap as u8;
+    d[0xb4] = u8::from(st.idr);
+    d[0xb5] = u8::from(st.irap);
     d[0xb6] = st.curr_slot;
     d[0xb7] = 0; // pattern_id: stock never writes it
     put16(&mut d, 0xb8, st.sw_hdr_skip_length);
@@ -358,7 +373,7 @@ pub fn build(
     b.set(
         0,
         1,
-        sps.separate_colour_plane as u32,
+        u32::from(sps.separate_colour_plane),
         "separate_colour_plane_flag",
     )?;
     b.set(
@@ -378,7 +393,7 @@ pub fn build(
     b.set(
         27,
         1,
-        sps.long_term_ref_pics_present as u32,
+        u32::from(sps.long_term_ref_pics_present),
         "long_term_ref_pics_present_flag",
     )?;
     put32(&mut d, 0xd4, b.0);
@@ -389,7 +404,7 @@ pub fn build(
     put32(&mut d, 0xf0, si.filter.flt_above);
     put32(&mut d, 0xf4, si.filter.sao_above);
     // v3: slice_ec_mv_type = 1 (co-located), slice_ec_slice_type bit 5 for pictures without refs.
-    put32(&mut d, 0x100, 4 | (((nrf == 0) as u32) << 5));
+    put32(&mut d, 0x100, 4 | (u32::from(nrf == 0) << 5));
     put32(&mut d, 0x104, si.filter.slice_edge);
     // Tail beyond the public struct (stock ELF 0x3e44f): 0x11a byte, 0x11c, 0x120.
     d[0x11a] = si.tail_11a;

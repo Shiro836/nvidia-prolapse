@@ -11,6 +11,7 @@
 //! RPS keeps; `curr_pic_idx`, the init lists and `RefDiffPicOrderCnts` use these slots (the
 //! stock allocation observed in an 8-bit capture). The session binds each slot
 //! to a surface (LUMA/CHROMA_OFFSET pairs) and colocated-MV area.
+use nv_rm_core::conv::usize_from_u32;
 pub mod codec;
 pub mod desc;
 pub mod ps;
@@ -167,12 +168,12 @@ impl Decoder {
             match t {
                 33 => {
                     let s = ps::parse_sps(&unescape(nal))?;
-                    let id = s.id as usize;
+                    let id = usize_from_u32(s.id);
                     self.sps[id] = Some(s);
                 }
                 34 => {
                     let p = ps::parse_pps(&unescape(nal))?;
-                    let id = p.id as usize;
+                    let id = usize_from_u32(p.id);
                     self.pps[id] = Some(p);
                 }
                 36 => self.first_in_cvs = true, // end_of_seq: next picture is an IRAP with NoRaslOutputFlag
@@ -181,8 +182,8 @@ impl Decoder {
                     let mut hdr = parse_slice_header(
                         &rbsp,
                         t,
-                        |i| self.pps[i as usize].as_ref(),
-                        |i| self.sps[i as usize].as_ref(),
+                        |i| self.pps[usize_from_u32(i)].as_ref(),
+                        |i| self.sps[usize_from_u32(i)].as_ref(),
                     )?;
                     if hdr.first_slice_segment_in_pic {
                         if !slices.is_empty() {
@@ -231,10 +232,10 @@ impl Decoder {
 
     fn picture(&mut self, t: u8, tid: u8, slices: &[SliceNal]) -> Result<PictureJob, PicErr> {
         let h0 = &slices[0].hdr;
-        let Some(pps) = self.pps[h0.pps_id as usize].clone() else {
+        let Some(pps) = self.pps[usize_from_u32(h0.pps_id)].clone() else {
             return bs_err("missing PPS");
         };
-        let Some(sps) = self.sps[pps.sps_id as usize].clone() else {
+        let Some(sps) = self.sps[usize_from_u32(pps.sps_id)].clone() else {
             return bs_err("missing SPS");
         };
         let idr = t == 19 || t == 20;
@@ -328,7 +329,7 @@ impl Decoder {
             let Ok(v16) = i16::try_from(v) else {
                 return bs_err(format!("POC distance {v} exceeds 16 bits"));
             };
-            diff[d.slot as usize] = v16;
+            diff[usize::from(d.slot)] = v16;
         }
         let mut bs = Vec::new();
         for s in slices {
@@ -352,7 +353,7 @@ impl Decoder {
             .opaque
             .unwrap_or(StockOpaque::observed(sps.bit_depth_luma));
         let setup = desc::build(&sps, &pps, &st, &self.inputs, op).map_err(PicErr::V)?;
-        let err_idx = if total > 0 { list0[0] as u32 } else { 0 };
+        let err_idx = if total > 0 { u32::from(list0[0]) } else { 0 };
         let id = self.next_id;
         self.next_id += 1;
         let refs = self.dpb.iter().map(|d| (d.slot, d.id)).collect();

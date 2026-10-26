@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 use super::*;
+use nv_rm_core::conv::u64_from_usize;
 
 /// SHA-1 prefixes (12 hex) of the stock default CDF buffers per q-context, from captures of stock
 /// libnvcuvid 615.71.09 (`cdf_read_sha1` of default-CDF frames).
@@ -14,7 +15,7 @@ fn sha1_hex(data: &[u8]) -> String {
     // Minimal SHA-1 (tests only).
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
     let mut m = data.to_vec();
-    let bl = (data.len() as u64) * 8;
+    let bl = (u64_from_usize(data.len())) * 8;
     m.push(0x80);
     while m.len() % 64 != 56 {
         m.push(0);
@@ -63,7 +64,7 @@ fn default_cdfs_match_stock_hashes() {
         write_default_cdfs(q, &mut b);
         assert_eq!(
             &sha1_hex(&b)[..12],
-            STOCK_DEFAULT_CDF_SHA1[q as usize],
+            STOCK_DEFAULT_CDF_SHA1[usize::from(q)],
             "qctx {q}"
         );
     }
@@ -160,7 +161,7 @@ fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
     impl Allocator for Mock {
         fn vram(&mut self, size: usize) -> VResult<u64> {
             let va = self.0;
-            self.0 += (size as u64).next_multiple_of(1 << 16);
+            self.0 += (u64_from_usize(size)).next_multiple_of(1 << 16);
             Ok(va)
         }
         fn write(&mut self, _va: u64, _offset: usize, _data: &[u8]) -> VResult<()> {
@@ -169,8 +170,8 @@ fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
     }
     let tus = obu::ivf_frames(ivf).unwrap();
     let (w, h) = (
-        u16::from_le_bytes([ivf[12], ivf[13]]) as u32,
-        u16::from_le_bytes([ivf[14], ivf[15]]) as u32,
+        u32::from(u16::from_le_bytes([ivf[12], ivf[13]])),
+        u32::from(u16::from_le_bytes([ivf[14], ivf[15]])),
     );
     let mut dec = codec::Av1Decoder::new(w, h, 8, tus[0]).unwrap();
     dec.allocate(&mut Mock(1 << 32), w, h).unwrap();
@@ -178,8 +179,8 @@ fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
     let total = dec.dpb_size() + 2 + extra;
     let surfaces: Vec<SurfaceRef> = (0..total as u64)
         .map(|i| SurfaceRef {
-            luma: (2 << 32) + i * layout.size as u64,
-            chroma: (2 << 32) + i * layout.size as u64 + layout.chroma_offset,
+            luma: (2 << 32) + i * u64_from_usize(layout.size),
+            chroma: (2 << 32) + i * u64_from_usize(layout.size) + layout.chroma_offset,
         })
         .collect();
     // Last decode that wrote each session surface: Some(grain applied).
@@ -209,7 +210,7 @@ fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
                 Job::ShowExisting { surface, .. } => {
                     let g = written[surface].expect("show_existing of an unwritten surface");
                     run.show_existing += 1;
-                    run.show_existing_grain += g as usize;
+                    run.show_existing_grain += usize::from(g);
                     held.push(surface);
                 }
                 Job::Decode(job) => {
@@ -236,7 +237,11 @@ fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
                         .map(|x| x[1]);
                     let grain = display.is_some();
                     if let Some(va) = display {
-                        assert_eq!(va as u64, surfaces[cur].luma >> 8, "unit {n}: 0x428 target");
+                        assert_eq!(
+                            u64::from(va),
+                            surfaces[cur].luma >> 8,
+                            "unit {n}: 0x428 target"
+                        );
                     }
                     dec.finish(&job, cur, None).unwrap();
                     written[cur] = Some(grain);
@@ -246,7 +251,7 @@ fn simulate_session(ivf: &[u8], extra: usize) -> SessionRun {
                         held.push(cur);
                     } else {
                         run.hidden += 1;
-                        run.hidden_grain += grain as usize;
+                        run.hidden_grain += usize::from(grain);
                     }
                 }
             }

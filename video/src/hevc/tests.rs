@@ -180,7 +180,7 @@ fn compare_with_stock_stream(name: &str, stream_name: &str, by_index: bool) -> V
             if vcl && next_vcl {
                 let next = &nals[i + 1];
                 let payload = next.nal.as_ptr() as usize - au.as_ptr() as usize;
-                extra += (payload - next.start == 4) as u32;
+                extra += u32::from(payload - next.start == 4);
             }
         }
         if extra > 0 {
@@ -222,7 +222,7 @@ fn compare_with_stock_stream(name: &str, stream_name: &str, by_index: bool) -> V
         // CUVID cross-checks: NumPocTotalCurr (+416), NumBitsForShortTermRPSInSlice (+408), POC (+432).
         assert_eq!(
             rd32(p, 416),
-            job.setup[0x70] as u32,
+            u32::from(job.setup[0x70]),
             "{name} AU {k} NumPocTotalCurr"
         );
         assert_eq!(
@@ -336,7 +336,7 @@ impl W {
     fn bytes(&self) -> Vec<u8> {
         let mut b = vec![0u8; self.0.len().div_ceil(8) + 1];
         for (i, &x) in self.0.iter().enumerate() {
-            b[i / 8] |= (x as u8) << (7 - i % 8);
+            b[i / 8] |= u8::from(x) << (7 - i % 8);
         }
         b
     }

@@ -16,7 +16,6 @@
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
     clippy::as_conversions,
-    clippy::cast_lossless,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
@@ -47,7 +46,6 @@
     clippy::unreadable_literal,
     clippy::unused_self,
     clippy::unwrap_used,
-    clippy::wildcard_enum_match_arm,
     missing_debug_implementations,
     missing_docs,
     unreachable_pub,
@@ -72,8 +70,11 @@
         reason = "pre-standard code; cleanup tracked"
     )
 )]
+use nv_rm_core::conv::usize_from_u32;
+
 pub mod av1;
 pub mod bits;
+mod error;
 pub mod h264;
 pub mod hdr;
 pub mod hevc;
@@ -83,6 +84,9 @@ pub mod nvdec_hevc;
 pub mod nvdec_vp9;
 mod nvdec_vp9_tables;
 pub mod vp9;
+
+pub(crate) use error::fit;
+pub use error::{OutOfRange, VResult, VideoError, bitstream, too_large, unsupported};
 
 /// ABI version reported in [`NvVideoDeviceInfo`]. v2 adds `nv_video_picture_hdr`
 /// (HDR static metadata), the "displayable pictures this unit produced" return of
@@ -97,114 +101,6 @@ pub const CODEC_AV1: u32 = 4;
 pub const FORMAT_NV12: u32 = 1;
 pub const FORMAT_P010: u32 = 2;
 pub const FORMAT_YUV420P: u32 = 3;
-
-/// nv_video error classes (NvVideoError). Every variant carries the reason
-/// that nv_video_last_error() reports.
-#[derive(Debug)]
-pub enum VideoError {
-    Invalid(String),
-    Unsupported(String),
-    Bitstream(String),
-    NoMemory(String),
-    DeviceLost(String),
-    Again(String),
-    /// A random access point (key frame / IDR) that this session cannot decode at its
-    /// size: the caller drains the session, creates one of at least `width` x `height`
-    /// and submits the same unit to it (NV_VIDEO_E_RESIZE).
-    Resize {
-        width: u32,
-        height: u32,
-        reason: String,
-    },
-}
-
-impl VideoError {
-    pub fn code(&self) -> i32 {
-        match self {
-            Self::Invalid(_) => -1,
-            Self::Unsupported(_) => -2,
-            Self::Bitstream(_) => -3,
-            Self::NoMemory(_) => -4,
-            Self::DeviceLost(_) => -5,
-            Self::Again(_) => -6,
-            Self::Resize { .. } => -7,
-        }
-    }
-    pub fn message(&self) -> &str {
-        match self {
-            Self::Invalid(m)
-            | Self::Unsupported(m)
-            | Self::Bitstream(m)
-            | Self::NoMemory(m)
-            | Self::DeviceLost(m)
-            | Self::Again(m)
-            | Self::Resize { reason: m, .. } => m,
-        }
-    }
-}
-
-impl std::fmt::Display for VideoError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.message())
-    }
-}
-
-/// RM/channel failures inside a session are device-level: the session must be
-/// destroyed (NV_VIDEO_E_DEVICE_LOST).
-impl From<nv_rm_core::Error> for VideoError {
-    fn from(e: nv_rm_core::Error) -> Self {
-        Self::DeviceLost(e.to_string())
-    }
-}
-
-pub type VResult<T> = std::result::Result<T, VideoError>;
-
-/// A picture larger than the session's maximum. At a random access point that starts a
-/// new reference chain (H.264 IDR, HEVC IRAP, VP9 key frame, AV1 shown key frame) a
-/// session of the new size decodes the stream from there on, so the caller re-creates
-/// the session ([`VideoError::Resize`]) the way FFmpeg re-creates its hardware decoder
-/// when the coded size changes (libavcodec/decode.c:1227 `ff_hwaccel_uninit` in
-/// `ff_get_format`, reached from h264_slice.c:920, hevc/hevcdec.c:725, vp9.c:254,
-/// av1dec.c:664). Anywhere else the references live in this session: refused.
-pub fn too_large(
-    codec: &str,
-    width: u32,
-    height: u32,
-    max: (u32, u32),
-    random_access: bool,
-) -> VideoError {
-    let what = format!(
-        "{codec} picture {width}x{height} larger than the session max {}x{}",
-        max.0, max.1
-    );
-    if random_access {
-        VideoError::Resize {
-            width,
-            height,
-            reason: format!("{what}: re-create the session at the new size"),
-        }
-    } else {
-        VideoError::Unsupported(format!(
-            "{what} on a picture that is not a random access point (references stay in this \
-             session)"
-        ))
-    }
-}
-
-/// `Err(VideoError::Unsupported)` with `m`, for the codec paths' early returns.
-///
-/// # Errors
-/// Always.
-pub fn unsupported<T>(m: impl Into<String>) -> VResult<T> {
-    Err(VideoError::Unsupported(m.into()))
-}
-/// `Err(VideoError::Bitstream)` with `m`, for the parsers' early returns.
-///
-/// # Errors
-/// Always.
-pub fn bitstream<T>(m: impl Into<String>) -> VResult<T> {
-    Err(VideoError::Bitstream(m.into()))
-}
 
 /// NVDEC classes, newest first: (class, chip family, stock capability bit, tested on hardware by this
 /// library). The bit is the generation bit stock libnvcuvid 615.71.09 sets in its decoder capability word
@@ -396,7 +292,7 @@ impl SurfaceLayout {
         let luma_rows = max_height.next_multiple_of(64);
         let chroma_rows = max_height.div_ceil(2).next_multiple_of(64);
         let chroma_offset = u64::from(pitch) * u64::from(luma_rows);
-        let size = (chroma_offset as usize + pitch as usize * chroma_rows as usize)
+        let size = (chroma_offset as usize + pitch as usize * usize_from_u32(chroma_rows))
             .next_multiple_of(1 << 16);
         Self {
             pitch,

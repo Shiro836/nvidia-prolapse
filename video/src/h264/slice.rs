@@ -4,6 +4,7 @@
 //! frame_num, reference marking and the picture-level flags.
 use super::super::{VResult, bits::BitReader, bitstream, unsupported};
 use super::ps::{Pps, Sps};
+use nv_rm_core::conv::{low_u8, usize_from_u32};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SliceType {
@@ -105,8 +106,8 @@ pub fn parse_slice_header(
 ) -> VResult<SliceHeader> {
     let mut r = BitReader::new(rbsp);
     let hdr = r.u(8)?;
-    let nal_unit_type = (hdr & 0x1f) as u8;
-    let nal_ref_idc = ((hdr >> 5) & 3) as u8;
+    let nal_unit_type = low_u8(hdr & 0x1f);
+    let nal_ref_idc = low_u8((hdr >> 5) & 3);
     let first_mb_in_slice = r.ue()?;
     let st = r.ue_max(9, "slice_type")?;
     let slice_type = [
@@ -115,7 +116,7 @@ pub fn parse_slice_header(
         SliceType::I,
         SliceType::Sp,
         SliceType::Si,
-    ][(st % 5) as usize];
+    ][usize_from_u32(st % 5)];
     let pps_id = r.ue_max(255, "pic_parameter_set_id")?;
     let Some((sps, pps)) = sps_of(pps_id) else {
         return bitstream(format!(
