@@ -283,12 +283,19 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo deny check
-cargo +nightly-2026-10-24 miri test -p <crates without syscalls>
+cargo +nightly-2026-10-24 miri test -p <crate> <unsafe modules the change touches>
 ```
 
 plus the component's own checks (ABI/symbol tests on both Android targets, fuzz smoke, differential and
-hot-path timing tests for ports). The Miri line is empty until a workspace has `forbid(unsafe_code)`
-logic crates; an empty Miri line means §1 is not done, not that the gate passed.
+hot-path timing tests for ports).
+
+Miri is spent where `unsafe` is. Per change it runs the syscall-free tests of every module the change
+touches that contains `unsafe` (accessors, the FFI guard, slot and sync-memory atomics driven over heap
+buffers; tests that need a real device are `#[cfg_attr(miri, ignore = "…")]`). A `forbid(unsafe_code)`
+crate cannot cause UB itself, so its full Miri run (all tests, incl. whole-stream decodes) is part of the
+weekly and pre-release checks and of any change that adds or bumps a dependency containing `unsafe`, not
+of every change. An empty per-change Miri line is correct only when the change touches no module with
+`unsafe`.
 
 ## Existing code
 
