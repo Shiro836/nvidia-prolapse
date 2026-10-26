@@ -185,6 +185,15 @@ static void verify_runtime(int allow_stock_driver, enum nv_expect_driver expect)
     fclose(file);
 }
 int main(int argc, char **argv) {
+    /* The fd checks count the whole process. Mesa's shader disk cache writes each entry on its own nice-19
+     * "disk$" threads (src/util/disk_cache.c:90-93, src/util/u_queue.c:258) and holds a <hash>.tmp descriptor
+     * from open to close (src/util/disk_cache_os.c:883-972, disk_cache_write_item_to_disk), unordered with
+     * those counts. The explicit disable also covers a cache at an explicit path (disk_cache_os.c:1182).
+     * Lines: Mesa 26.2.5 with this repository's Mesa patches applied. Set before any Mesa library loads. */
+    if (setenv("MESA_SHADER_CACHE_DISABLE", "true", 1) != 0) {
+        perror("setenv MESA_SHADER_CACHE_DISABLE");
+        return 2;
+    }
     const char *driver = NULL, *generator_path = NULL, *transform_path = NULL;
     int loader = 0, allow_stock_driver = 0, negative = 0, icd = 0;
     enum nv_expect_driver expect = NV_EXPECT_PROLAPSE;

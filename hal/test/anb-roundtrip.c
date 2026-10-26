@@ -246,6 +246,15 @@ static struct hostbuf hostbuf(VkDeviceSize size, VkBufferUsageFlags usage) {
 #define H 256u
 
 int main(int argc, char **argv) {
+    /* The fd checks count the whole process. Mesa's shader disk cache writes each entry on its own nice-19
+     * "disk$" threads (src/util/disk_cache.c:90-93, src/util/u_queue.c:258) and holds a <hash>.tmp descriptor
+     * from open to close (src/util/disk_cache_os.c:883-972, disk_cache_write_item_to_disk), unordered with
+     * those counts. The explicit disable also covers a cache at an explicit path (disk_cache_os.c:1182).
+     * Lines: Mesa 26.2.5 with this repository's Mesa patches applied. Set before any Mesa library loads. */
+    if (setenv("MESA_SHADER_CACHE_DISABLE", "true", 1) != 0) {
+        perror("setenv MESA_SHADER_CACHE_DISABLE");
+        return 2;
+    }
     const char *halpath = argc > 1 ? argv[1] : "out/host/vulkan.nvidia.so";
     int linear = 0;
     int allow_synchronous_submit = 0, bounded = 0;

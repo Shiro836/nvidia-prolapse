@@ -8,8 +8,10 @@ stopped by its own pid; nothing else is signalled.
 
 modes (anb-roundtrip):
   cache    a fresh MESA_SHADER_CACHE_DIR per run: Mesa's disk$ writer threads
-           (nice 19) hold <hash>.tmp descriptors while the test counts fds
-  nocache  MESA_SHADER_CACHE_DISABLE=true: the control for `cache`
+           (nice 19) would hold <hash>.tmp descriptors while the test counts
+           fds; the fd-counting tests disable the cache themselves, so this
+           mode checks that they still do
+  nocache  MESA_SHADER_CACHE_DISABLE=true from outside: the control for `cache`
   watcher  warm cache; the nvk-rm-foreign thread is switched to SCHED_IDLE as
            soon as it exists, which widens the window in which it still owns an
            imported sync_file duplicate after the client's wait returned
@@ -111,7 +113,9 @@ def main():
                         print(f"run {i}: {' '.join(p99)}", flush=True)
                     continue
                 rc, failed, other = run_anb(args.mode, Path(cache_root), args.rust_profile)
-                for key in failed + (["other"] if other else []):
+                # A non-zero exit without a matched check (e.g. setup failed) is a failure too.
+                unexplained = [f"exit {rc}"] if rc and not (failed or other) else []
+                for key in failed + (["other"] if other else []) + unexplained:
                     counts[key] = counts.get(key, 0) + 1
                 if rc or failed or other:
                     print(f"run {i}: rc={rc} {failed} {other[:2]}", flush=True)

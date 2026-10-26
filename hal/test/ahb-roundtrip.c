@@ -430,6 +430,15 @@ static uint32_t count_color(const uint8_t *p, uint8_t r, uint8_t g, uint8_t b, u
 /* ------------------------------------------------------------------ main */
 
 int main(int argc, char **argv) {
+    /* The fd checks count the whole process. Mesa's shader disk cache writes each entry on its own nice-19
+     * "disk$" threads (src/util/disk_cache.c:90-93, src/util/u_queue.c:258) and holds a <hash>.tmp descriptor
+     * from open to close (src/util/disk_cache_os.c:883-972, disk_cache_write_item_to_disk), unordered with
+     * those counts. The explicit disable also covers a cache at an explicit path (disk_cache_os.c:1182).
+     * Lines: Mesa 26.2.5 with this repository's Mesa patches applied. Set before any Mesa library loads. */
+    if (setenv("MESA_SHADER_CACHE_DISABLE", "true", 1) != 0) {
+        perror("setenv MESA_SHADER_CACHE_DISABLE");
+        return 2;
+    }
     const char *halpath = argc > 1 ? argv[1] : "out/host/vulkan.nvidia.so";
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--api") && i + 1 < argc) api10 = !strcmp(argv[++i], "1.0");
