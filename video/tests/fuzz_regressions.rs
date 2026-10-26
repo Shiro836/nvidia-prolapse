@@ -34,3 +34,12 @@ fn hdr_nal_without_payload() {
     replay(drivers::hdr_metadata, "hdr_metadata-nal_without_payload");
     replay(drivers::hdr_metadata, "hdr_metadata-empty_nal");
 }
+
+/// H.264 SPS frame cropping offsets whose product with CropUnitX/Y (7.4.2.1.1) overflows `u32`:
+/// the multiplication panicked under overflow checks (release builds keep them).
+#[test]
+fn h264_crop_offsets_overflow() {
+    replay(drivers::h264_headers, "h264_headers-crop_left_overflow");
+    replay(drivers::h264_headers, "h264_headers-crop_top_overflow");
+    replay(drivers::decoder, "decoder-h264_crop_bottom_overflow");
+}

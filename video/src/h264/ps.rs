@@ -358,8 +358,20 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
             _ => (1, 2 - s.frame_mbs_only as u32),
         };
         let (l, rr, t, b) = (r.ue()?, r.ue()?, r.ue()?, r.ue()?);
-        s.crop = (l * cx, rr * cx, t * cy, b * cy);
-        if s.crop.0 + s.crop.1 >= s.width() || s.crop.2 + s.crop.3 >= s.height() {
+        // CropUnitX/Y * frame_crop_*_offset (7.4.2.1.1, eq. 7-19..7-22); offsets are ue(v) up to
+        // 2^32 - 2, so the products and sums are checked before the size test.
+        let crop = (
+            l.checked_mul(cx),
+            rr.checked_mul(cx),
+            t.checked_mul(cy),
+            b.checked_mul(cy),
+        );
+        let (Some(cl), Some(cr), Some(ct), Some(cb)) = crop else {
+            return bitstream("frame cropping larger than the picture");
+        };
+        s.crop = (cl, cr, ct, cb);
+        let fits = |a: u32, b: u32, size: u32| a.checked_add(b).is_some_and(|sum| sum < size);
+        if !fits(cl, cr, s.width()) || !fits(ct, cb, s.height()) {
             return bitstream("frame cropping larger than the picture");
         }
     }
