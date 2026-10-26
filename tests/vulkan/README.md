@@ -13,6 +13,7 @@ Small public-API Vulkan programs that load the built driver directly and check r
     tests/vulkan/run.py --target host --rust-profile release           # print the commands
     tests/vulkan/run.py --target host --rust-profile release --run     # run them (needs the GPU)
 
-`run.py` checks the build records `mesa/build.py` wrote before it runs anything. The i686 programs run under the
-image's unmodified bionic linker (`build/nvk-android32/runtime`, `mesa/prepare-runtime32.py`) in a new user and
-PID namespace, so a host PID above 65535 cannot overflow bionic's 32-bit thread id.
+`run.py` checks the build records `mesa/build.py` wrote before it runs anything. The x86_64 programs run under the
+image's unmodified bionic `linker64` (`build/bionic-runtime64`, `mesa/prepare-runtime64.py`). The i686 programs run
+under the image's unmodified bionic linker (`build/nvk-android32/runtime`, `mesa/prepare-runtime32.py`) in a new user
+and PID namespace, so a host PID above 65535 cannot overflow bionic's 32-bit thread id.

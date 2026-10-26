@@ -44,8 +44,9 @@ say "bionic libdrm (both ABIs)"
 make -C libdrm
 make -C libdrm ARCH=x86
 
-say "Android runtime closure for the 32-bit host tests (read-only from the image)"
+say "Android runtimes for the host tests (read-only from the image): i686 closure, x86_64 bionic"
 "$PY" mesa/prepare-runtime32.py --image "$SYSIMG"
+"$PY" mesa/prepare-runtime64.py --image "$SYSIMG"
 
 say "NVK + the Rust RM backend (host, x86_64, i686)"
 "$PY" mesa/compiler/build.py --tools-only --download-deps

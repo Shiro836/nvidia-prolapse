@@ -4,8 +4,12 @@ import argparse
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from android_image import extract  # noqa: E402
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--image", type=Path, default=Path("/var/lib/waydroid/images/system.img"))
 args = parser.parse_args()
@@ -28,16 +32,7 @@ while pending:
     else:
         source = "/system/lib/" + name
     destination = out / name
-    temporary = out / (name + ".extract")
-    temporary.unlink(missing_ok=True)
-    result = subprocess.run(["debugfs", "-R", f"dump {source} {temporary}", str(args.image)],
-                            capture_output=True, text=True, check=True)
-    if not temporary.exists():
-        raise SystemExit(f"Image lacks {source}: {result.stderr}")
-    header = subprocess.check_output(["readelf", "-h", str(temporary)], text=True)
-    if "ELF32" not in header or "Intel 80386" not in header:
-        raise SystemExit(f"Expected x86 ELF32: {source}")
-    temporary.replace(destination)
+    extract(args.image, source, destination, "x86")
     dynamic = subprocess.check_output(["readelf", "-d", str(destination)], text=True)
     pending += re.findall(r"NEEDED.*\[(.*?)\]", dynamic)
     print(source)

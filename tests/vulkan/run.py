@@ -3,8 +3,9 @@
 
 Default is a checked dry run: no process is loaded and no GPU work is submitted.
 Build the programs first (tests/vulkan/build.py). The android (x86_64) target runs the
-programs under an unmodified bionic linker64/libc/libdl/libm in build/bionic-runtime64,
-which is not extracted by the build yet; host and android32 need nothing else.
+programs under the image's unmodified bionic linker64/libc/libdl/libm in build/bionic-runtime64
+(mesa/prepare-runtime64.py), android32 under build/nvk-android32/runtime (mesa/prepare-runtime32.py);
+build.sh extracts both.
 """
 import argparse
 import os
