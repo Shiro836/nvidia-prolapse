@@ -387,12 +387,14 @@ impl Compat {
         };
         for field in logical.fields {
             // Read named fields only: do not read Rust's possibly uninitialized padding.
-            let input = unsafe {
-                std::slice::from_raw_parts(
-                    (value as *const T).cast::<u8>().add(field.offset),
-                    field.len,
-                )
-            };
+            // SAFETY: field.offset + field.len <= logical.size == size_of::<T>()
+            // (generated schema, size checked above), inside `*value`.
+            let start = unsafe { (value as *const T).cast::<u8>().add(field.offset) };
+            // SAFETY: in bounds as above; the bytes are a named field of the
+            // wire struct T (never padding), hence initialised. Relies on T
+            // being the schema's type: every caller passes the nv-rm-sys
+            // struct generated for `name`.
+            let input = unsafe { std::slice::from_raw_parts(start, field.len) };
             if let Some(output) = target.field(field.name) {
                 let n = input.len().min(output.len);
                 wire.bytes[output.offset..output.offset + n].copy_from_slice(&input[..n]);
@@ -438,37 +440,39 @@ impl Wire {
         for output in self.logical.fields {
             if let Some(input) = self.target.field(output.name) {
                 let n = input.len.min(output.len);
-                // SAFETY: private integer-only wire caller, size checked; named
-                // fields are bounds checked by metadata generation/tests.
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        self.bytes.as_ptr().add(input.offset),
-                        (value as *mut T).cast::<u8>().add(output.offset),
-                        n,
-                    );
-                }
+                // SAFETY: input.offset + n <= target size == bytes.len()
+                // (generated schema).
+                let source = unsafe { self.bytes.as_ptr().add(input.offset) };
+                // SAFETY: output.offset + n <= logical.size == size_of::<T>()
+                // (checked above), inside `*value`.
+                let target = unsafe { (value as *mut T).cast::<u8>().add(output.offset) };
+                // SAFETY: both ranges valid for n bytes and disjoint (owned
+                // Vec vs `*value`); T is an integer-only wire struct (private
+                // callers), so any bytes are a valid field value.
+                unsafe { ptr::copy_nonoverlapping(source, target, n) };
                 // Older RM ASCII names may be 128 bytes; the logical output is
                 // an explicitly truncated 64-byte C string, always terminated.
                 if self.logical.name == "NV2080_CTRL_GPU_GET_NAME_STRING_PARAMS"
                     && output.name == "gpuNameString"
                 {
-                    unsafe {
+                    // SAFETY: the last byte of the named output field, inside
+                    // `*value` (size checked above).
+                    let last = unsafe {
                         (value as *mut T)
                             .cast::<u8>()
                             .add(output.offset + output.len - 1)
-                            .write(0);
-                    }
+                    };
+                    // SAFETY: in bounds as above; a byte of a char array.
+                    unsafe { last.write(0) };
                 }
             } else if self.logical.name == "NV2080_CTRL_FB_GET_STATIC_BAR1_INFO_PARAMS" {
                 // These outputs did not exist in older public contracts. Never
                 // preserve a caller's previous value as an old driver answer.
-                unsafe {
-                    ptr::write_bytes(
-                        (value as *mut T).cast::<u8>().add(output.offset),
-                        0,
-                        output.len,
-                    );
-                }
+                // SAFETY: the named output field, inside `*value` (size
+                // checked above).
+                let field = unsafe { (value as *mut T).cast::<u8>().add(output.offset) };
+                // SAFETY: in bounds as above; zero is a valid integer value.
+                unsafe { ptr::write_bytes(field, 0, output.len) };
             }
         }
         Ok(())

@@ -176,6 +176,8 @@ fn property(name: &str) -> Option<String> {
     let name = std::ffi::CString::new(name).ok()?;
     // PROP_VALUE_MAX = 92 (sys/system_properties.h).
     let mut value = [0 as std::os::raw::c_char; 92];
+    // SAFETY: a NUL-terminated name and a PROP_VALUE_MAX buffer, the size
+    // sys/system_properties.h requires for the value.
     let n = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
     if n <= 0 {
         return None;

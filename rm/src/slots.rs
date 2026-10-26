@@ -36,10 +36,56 @@ pub(crate) const MAX_PAGES: usize = 256;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Slot(pub(crate) u32);
 
+/// One installed page. `cpu` is the address of a PAGE_BYTES CPU mapping the
+/// GPU writes concurrently (semaphore releases); it is only ever accessed
+/// through the atomics `atomic32`/`atomic64` hand out (install_page's
+/// contract), never through a plain reference or a non-atomic access.
 struct Page {
     cpu: usize,
     gpu: u64,
     refs: Box<[AtomicU32]>,
+}
+
+/// Which word of a 16-byte slot: the GPU word at +0 or the second 64-bit
+/// word at +8 (the Split32 shadow).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Word {
+    Low,
+    High,
+}
+
+/// Byte offset of a slot word inside its page. Only `of` makes one: the slot
+/// base is a multiple of SLOT_BYTES below PAGE_BYTES and the word adds 0 or
+/// 8, so an 8-byte access at the offset is aligned and inside the page.
+#[derive(Clone, Copy, Debug)]
+struct PageOffset(usize);
+const _: () = assert!(PAGE_BYTES.is_multiple_of(SLOT_BYTES) && SLOT_BYTES == 16);
+impl PageOffset {
+    #[inline]
+    fn of(slot: Slot, word: Word) -> Self {
+        let within = match word {
+            Word::Low => 0,
+            Word::High => 8,
+        };
+        Self((slot.0 as usize % SLOTS_PER_PAGE) * SLOT_BYTES + within)
+    }
+}
+
+impl Page {
+    #[inline]
+    fn atomic32(&self, at: PageOffset) -> &AtomicU32 {
+        // SAFETY: `at` is 8-aligned and at + 8 <= PAGE_BYTES (PageOffset), and
+        // install_page's contract keeps `cpu..cpu + PAGE_BYTES` mapped and
+        // 4096-aligned until the pool is closed; the pool outlives `&self`.
+        // Atomics have interior mutability, so the GPU's concurrent writes do
+        // not conflict with the shared reference.
+        unsafe { &*((self.cpu + at.0) as *const AtomicU32) }
+    }
+    #[inline]
+    fn atomic64(&self, at: PageOffset) -> &AtomicU64 {
+        // SAFETY: as atomic32; `at` is 8-byte aligned.
+        unsafe { &*((self.cpu + at.0) as *const AtomicU64) }
+    }
 }
 
 struct FreeList {
@@ -109,7 +155,12 @@ impl SlotPool {
 
     /// Register a mapped page. `cpu` must stay mapped and `gpu` must stay
     /// GPU-mapped until close(); both must be 16-byte aligned PAGE_BYTES ranges.
-    pub(crate) fn install_page(&self, cpu: usize, gpu: u64) -> Result<()> {
+    ///
+    /// # Safety
+    /// `cpu..cpu + PAGE_BYTES` is a readable and writable CPU mapping that
+    /// stays mapped until close() and that nothing accesses except through
+    /// this pool's atomics (the GPU through `gpu`) while installed.
+    pub(crate) unsafe fn install_page(&self, cpu: usize, gpu: u64) -> Result<()> {
         if cpu == 0 || !cpu.is_multiple_of(4096) || !gpu.is_multiple_of(4096) {
             return Err(Error::Contract("unaligned semaphore pool page".into()));
         }
@@ -167,11 +218,10 @@ impl SlotPool {
         // No GPU reference exists (count was zero: every submission that
         // touched it has retired), so plain initialization cannot race a
         // GPU write. Order it before the slot address escapes.
-        let base = page.cpu + Self::offset(slot);
-        unsafe {
-            (*(base as *const AtomicU64)).store(0, Ordering::Relaxed);
-            (*((base + 8) as *const AtomicU64)).store(0, Ordering::Relaxed);
-        }
+        page.atomic64(PageOffset::of(slot, Word::Low))
+            .store(0, Ordering::Relaxed);
+        page.atomic64(PageOffset::of(slot, Word::High))
+            .store(0, Ordering::Relaxed);
         fence(Ordering::SeqCst);
         Some(slot)
     }
@@ -222,14 +272,11 @@ impl SlotPool {
     }
     #[inline]
     fn word32(&self, slot: Slot) -> &AtomicU32 {
-        // SAFETY: installed page is mapped until close(); offset is 16-aligned.
-        unsafe { &*((self.page(slot).cpu + Self::offset(slot)) as *const AtomicU32) }
+        self.page(slot).atomic32(PageOffset::of(slot, Word::Low))
     }
     #[inline]
-    fn word64(&self, slot: Slot, offset: usize) -> &AtomicU64 {
-        debug_assert!(offset == 0 || offset == 8);
-        // SAFETY: as above; 8-byte aligned inside the 16-byte slot.
-        unsafe { &*((self.page(slot).cpu + Self::offset(slot) + offset) as *const AtomicU64) }
+    fn word64(&self, slot: Slot, word: Word) -> &AtomicU64 {
+        self.page(slot).atomic64(PageOffset::of(slot, word))
     }
 
     /// Binary payload: 1 = signalled. GPU consume writes 0 in its own stream.
@@ -253,18 +300,18 @@ impl SlotPool {
     /// words released with 64-bit host semaphores). Real 64-bit atomic load.
     pub(crate) fn read64_raw(&self, slot: Slot) -> Result<u64> {
         self.live()?;
-        Ok(self.word64(slot, 0).load(Ordering::Acquire))
+        Ok(self.word64(slot, Word::Low).load(Ordering::Acquire))
     }
 
     /// Full-width timeline value of the slot (see TimelineView).
     pub(crate) fn timeline_value(&self, slot: Slot) -> Result<u64> {
         self.live()?;
         match self.view {
-            TimelineView::Native64 => Ok(self.word64(slot, 0).load(Ordering::Acquire)),
+            TimelineView::Native64 => Ok(self.word64(slot, Word::Low).load(Ordering::Acquire)),
             TimelineView::Split32 => {
                 // Low word strictly before the shadow (see TimelineView).
                 let low = self.word32(slot).load(Ordering::Acquire);
-                let shadow = self.word64(slot, 8).load(Ordering::Acquire);
+                let shadow = self.word64(slot, Word::High).load(Ordering::Acquire);
                 split_value(low, shadow)
             }
         }
@@ -273,9 +320,9 @@ impl SlotPool {
     pub(crate) fn init_timeline(&self, slot: Slot, value: u64) -> Result<()> {
         self.live()?;
         match self.view {
-            TimelineView::Native64 => self.word64(slot, 0).store(value, Ordering::SeqCst),
+            TimelineView::Native64 => self.word64(slot, Word::Low).store(value, Ordering::SeqCst),
             TimelineView::Split32 => {
-                self.word64(slot, 8).store(value, Ordering::SeqCst);
+                self.word64(slot, Word::High).store(value, Ordering::SeqCst);
                 self.word32(slot).store(value as u32, Ordering::SeqCst);
             }
         }
@@ -290,13 +337,15 @@ impl SlotPool {
         self.live()?;
         let changed = match self.view {
             TimelineView::Native64 => {
-                self.word64(slot, 0).fetch_max(value, Ordering::SeqCst) < value
+                self.word64(slot, Word::Low)
+                    .fetch_max(value, Ordering::SeqCst)
+                    < value
             }
             TimelineView::Split32 => {
                 // Reconstruct with the shadow as it was, never after raising it:
                 // a jump >= 2^31 cannot be represented by the 32-bit GPU word.
                 let low = self.word32(slot).load(Ordering::Acquire);
-                let shadow = self.word64(slot, 8).load(Ordering::Acquire);
+                let shadow = self.word64(slot, Word::High).load(Ordering::Acquire);
                 let current = split_value(low, shadow)?;
                 if value <= current {
                     false
@@ -308,7 +357,8 @@ impl SlotPool {
                     // Shadow first (readers read low then shadow), then the
                     // GPU-visible low word. A pending higher GPU signal keeps
                     // its larger shadow (VUID-VkSemaphoreSignalInfo-value-03259).
-                    self.word64(slot, 8).fetch_max(value, Ordering::SeqCst);
+                    self.word64(slot, Word::High)
+                        .fetch_max(value, Ordering::SeqCst);
                     self.word32(slot).store(value as u32, Ordering::SeqCst);
                     true
                 }
@@ -322,7 +372,8 @@ impl SlotPool {
     pub(crate) fn raise_shadow(&self, slot: Slot, value: u64) -> Result<()> {
         self.live()?;
         if self.view == TimelineView::Split32 {
-            self.word64(slot, 8).fetch_max(value, Ordering::SeqCst);
+            self.word64(slot, Word::High)
+                .fetch_max(value, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -330,7 +381,7 @@ impl SlotPool {
     /// only correct while target and every reachable value stay within 2^31.
     pub(crate) fn check_split_distance(&self, slot: Slot, target: u64) -> Result<()> {
         if self.view == TimelineView::Split32 {
-            let shadow = self.word64(slot, 8).load(Ordering::Acquire);
+            let shadow = self.word64(slot, Word::High).load(Ordering::Acquire);
             if target.abs_diff(shadow) >= 0x8000_0000 {
                 return Err(Error::Contract(format!(
                     "32-bit host semaphore cannot order timeline wait {target} against pending {shadow} (2^31 window)"
@@ -358,7 +409,10 @@ pub(crate) mod tests {
                 // SAFETY: an all-zero u64 array is a valid HostPage.
                 let page: Box<HostPage> = unsafe { Box::new_zeroed().assume_init() };
                 let address = page.0.as_ptr() as usize;
-                pool.install_page(address, 0x1000_0000 + (i * PAGE_BYTES) as u64)
+                // SAFETY: the page is owned by the returned HostPages, which
+                // every test keeps alongside the pool; only the pool's atomics
+                // access it.
+                unsafe { pool.install_page(address, 0x1000_0000 + (i * PAGE_BYTES) as u64) }
                     .unwrap();
                 owned.push(page);
             }
@@ -371,7 +425,7 @@ pub(crate) mod tests {
             self.word32(slot).store(value, Ordering::SeqCst);
         }
         pub(crate) fn gpu_write64(&self, slot: Slot, value: u64) {
-            self.word64(slot, 0).store(value, Ordering::SeqCst);
+            self.word64(slot, Word::Low).store(value, Ordering::SeqCst);
         }
     }
 

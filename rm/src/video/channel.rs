@@ -223,7 +223,8 @@ impl NvdecChannel {
         if self.completed()? >= value {
             return Ok(());
         }
-        let fd = self.timeline.context_fence(drm.as_raw_fd(), value)?;
+        // SAFETY: `drm` is a borrowed open File for the whole call.
+        let fd = unsafe { self.timeline.context_fence(drm.as_raw_fd(), value) }?;
         wait_sync_file(fd.as_raw_fd(), Duration::from_secs(2)).map_err(|e| {
             let gpget = self.ring.read_u32(ENTRIES * 8 + 0x88).unwrap_or(u32::MAX);
             VideoError::DeviceLost(format!(

@@ -153,7 +153,10 @@ impl CopyEngine {
         let page_mem = device.allocate_aligned(PAGE_BYTES, PAGE_BYTES, false, true)?;
         let page_cpu = page_mem.map()?;
         let page_gpu = space.map(&page_mem)?;
-        pool.install_page(page_cpu.cpu_address(), page_gpu.address())?;
+        // SAFETY: page_cpu maps the whole PAGE_BYTES allocation and is kept
+        // in `_page`, which drops after `queue` (field order), the pool's
+        // only other user; nothing else accesses the page.
+        unsafe { pool.install_page(page_cpu.cpu_address(), page_gpu.address()) }?;
         let retire = pool
             .try_allocate()
             .ok_or_else(|| VideoError::DeviceLost("empty semaphore slot page".into()))?;
@@ -621,10 +624,13 @@ impl Session {
             })?;
         // A copy_out may still read this surface (picture released early).
         if self.surface_copy[current] != 0 && !self.copy.retired(self.surface_copy[current])? {
-            let fd = self.copy.queue.context_fence(
-                std::os::fd::AsRawFd::as_raw_fd(&self.drm),
-                self.surface_copy[current],
-            )?;
+            // SAFETY: the session's own DRM file, open while `self` lives.
+            let fd = unsafe {
+                self.copy.queue.context_fence(
+                    std::os::fd::AsRawFd::as_raw_fd(&self.drm),
+                    self.surface_copy[current],
+                )
+            }?;
             wait_sync_file(std::os::fd::AsRawFd::as_raw_fd(&fd), Duration::from_secs(2))
                 .map_err(VideoError::DeviceLost)?;
         }
@@ -734,7 +740,13 @@ impl Session {
         self.nvdec.wait(&self.drm, self.nvdec.submitted)
     }
 
-    pub fn copy_out(&mut self, id: u64, t: &Target) -> VResult<Option<OwnedFd>> {
+    /// Copy picture `id` into the caller's target and return the copy's
+    /// completion fence (None when it already completed).
+    ///
+    /// # Safety
+    /// Every non-negative descriptor in `t` (plane dma-bufs, acquire fence) is
+    /// open for the whole call; the fds stay the caller's.
+    pub unsafe fn copy_out(&mut self, id: u64, t: &Target) -> VResult<Option<OwnedFd>> {
         self.copy.reap()?;
         let pic = self
             .pictures
@@ -806,7 +818,8 @@ impl Session {
             match (0..p).find(|&q| t.dmabuf_fd[q] == fd) {
                 Some(q) => import_of[p] = import_of[q],
                 None => {
-                    // SAFETY: the caller lends a live fd for the duration of the call.
+                    // SAFETY: non-negative (checked above) and open for the
+                    // call (# Safety); the borrow ends within it.
                     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
                     let mem = crate::external::import(&self.device, self.drm.as_fd(), borrowed)
                         .map_err(|e| {
@@ -980,10 +993,12 @@ impl Session {
         if self.copy.retired(token)? {
             return Ok(None);
         }
-        let fd = self
-            .copy
-            .queue
-            .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), token)?;
+        // SAFETY: the session's own DRM file, open while `self` lives.
+        let fd = unsafe {
+            self.copy
+                .queue
+                .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), token)
+        }?;
         Ok(Some(fd))
     }
 
@@ -1001,11 +1016,13 @@ impl Drop for Session {
         let _ = self.nvdec.wait(&self.drm, self.nvdec.submitted);
         let last = self.copy.queue.last_token();
         if last != 0 {
-            if let Ok(fd) = self
-                .copy
-                .queue
-                .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), last)
-            {
+            // SAFETY: the session's own DRM file, open while `self` lives.
+            let fence = unsafe {
+                self.copy
+                    .queue
+                    .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), last)
+            };
+            if let Ok(fd) = fence {
                 let _ =
                     wait_sync_file(std::os::fd::AsRawFd::as_raw_fd(&fd), Duration::from_secs(2));
             }

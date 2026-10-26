@@ -883,6 +883,10 @@ impl Memory {
             }
             // RM associated this fd with its map. VMA ownership and RM ownership
             // are independent: always munmap before releasing the BAR aperture.
+            // SAFETY: a fresh kernel-chosen address (NULL hint, no MAP_FIXED),
+            // so no existing mapping or Rust object is replaced; fd and
+            // length are the ones RM just associated with this allocation.
+            // The VMA is owned by `lease` from here on, which unmaps it.
             let address = unsafe {
                 platform::mmap(std::ptr::null_mut(), mapping_size, 3, 1, fd.as_raw_fd(), 0)
             };
@@ -903,10 +907,10 @@ impl Memory {
             // remain pressure-reclaimable and retain their actual BAR charge.
             // Borrowed USERD/register mappings keep their existing short lifetime.
             let retain_idle = self.owned;
-            Ok((
-                unsafe { NonNull::new_unchecked(base.as_ptr().add(within_page).cast::<u32>()) },
-                retain_idle,
-            ))
+            // SAFETY: `within_page` < the CPU page size <= `mapping_size`
+            // (cpu_mapping_extent), so the offset stays inside this VMA.
+            let start = unsafe { base.add(within_page) };
+            Ok((start.cast::<u32>(), retain_idle))
         })();
         match result {
             Ok((pointer, retain_idle)) => {
@@ -1077,6 +1081,9 @@ impl CpuMappingLease {
             .cleanup_owned(&mut self.resources, |stage, resources| match stage {
                 CpuCleanupStage::Vma => {
                     let (base, size) = vma.expect("live VMA has an extent");
+                    // SAFETY: (base, size) is the VMA this lease mapped and still
+                    // owns (state.vma); every Mapping borrow of it has ended,
+                    // since the lease is only released by its owner.
                     if unsafe { platform::munmap(base as *mut _, size) } != 0 {
                         Err(Error::Io(
                             "munmap NVIDIA allocation",
@@ -1204,10 +1211,13 @@ impl Mapping {
                 "unaligned/out-of-bounds mapped write".into(),
             ));
         }
-        // SAFETY: mapping remains owned, bounds/alignment checked above.
-        unsafe {
-            self.pointer.as_ptr().add(offset / 4).write_volatile(value);
-        }
+        // SAFETY: offset + 4 <= size (checked above) keeps the word inside
+        // the live mapping (live() above).
+        let word = unsafe { self.pointer.as_ptr().add(offset / 4) };
+        // SAFETY: in bounds and 4-byte aligned (checked above; the base is
+        // 4-aligned, cpu_mapping_extent). Volatile: the GPU or another
+        // process may read or write this word concurrently.
+        unsafe { word.write_volatile(value) };
         Ok(())
     }
     /// Bulk copy into the mapping (bounds-checked, byte granular).
@@ -1219,14 +1229,13 @@ impl Mapping {
         {
             return Err(Error::Contract("out-of-bounds mapped bulk write".into()));
         }
-        // SAFETY: mapping remains owned, bounds checked above; byte copies.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                (self.pointer.as_ptr() as *mut u8).add(offset),
-                data.len(),
-            );
-        }
+        // SAFETY: offset + len <= size (checked above), inside the live
+        // mapping.
+        let target = unsafe { (self.pointer.as_ptr() as *mut u8).add(offset) };
+        // SAFETY: both ranges are valid for `len` bytes and cannot overlap
+        // (`data` is a Rust slice, the target device memory). Plain copy, as
+        // every caller writes ranges no GPU work in flight touches.
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), target, data.len()) };
         Ok(())
     }
     /// Bulk copy out of the mapping (bounds-checked, byte granular).
@@ -1238,14 +1247,13 @@ impl Mapping {
         {
             return Err(Error::Contract("out-of-bounds mapped bulk read".into()));
         }
-        // SAFETY: mapping remains owned, bounds checked above; byte copies.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                (self.pointer.as_ptr() as *const u8).add(offset),
-                out.as_mut_ptr(),
-                out.len(),
-            );
-        }
+        // SAFETY: offset + len <= size (checked above), inside the live
+        // mapping.
+        let source = unsafe { (self.pointer.as_ptr() as *const u8).add(offset) };
+        // SAFETY: both ranges are valid for `len` bytes and cannot overlap.
+        // Plain copy, as every caller reads ranges whose GPU writers have
+        // completed.
+        unsafe { std::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), out.len()) };
         Ok(())
     }
     pub(crate) fn read_u32(&self, offset: usize) -> Result<u32> {
@@ -1255,8 +1263,36 @@ impl Mapping {
                 "unaligned/out-of-bounds mapped read".into(),
             ));
         }
-        // SAFETY: mapping remains owned, bounds/alignment checked above.
-        Ok(unsafe { self.pointer.as_ptr().add(offset / 4).read_volatile() })
+        // SAFETY: offset + 4 <= size (checked above), inside the live mapping.
+        let word = unsafe { self.pointer.as_ptr().add(offset / 4) };
+        // SAFETY: in bounds and 4-byte aligned (checked above). Volatile: the
+        // GPU or another process may write this word concurrently.
+        Ok(unsafe { word.read_volatile() })
+    }
+    /// A 64-bit word of the mapping that RM, the kernel or another process
+    /// may update concurrently, for atomic access only. The word must never
+    /// be accessed non-atomically, nor at another width, while the
+    /// reference lives (the semaphore surface's maxSubmitted word is such a
+    /// word: RM and userspace both use aligned 64-bit atomics on it).
+    pub(crate) fn atomic_u64(&self, offset: usize) -> Result<&std::sync::atomic::AtomicU64> {
+        let address = self
+            .cpu_address()
+            .checked_add(offset)
+            .ok_or_else(|| Error::Contract("semaphore CPU address overflow".into()))?;
+        if address % std::mem::align_of::<std::sync::atomic::AtomicU64>() != 0
+            || offset.checked_add(8).is_none_or(|end| end > self.size)
+        {
+            return Err(Error::Contract(
+                "unaligned/out-of-bounds cached semaphore atomic".into(),
+            ));
+        }
+        // SAFETY: offset + 8 <= size (checked above), inside the live mapping.
+        let word = unsafe { self.pointer.as_ptr().cast::<u8>().add(offset) };
+        // SAFETY: in bounds and 8-byte aligned (checked above); the mapping
+        // stays mapped while `self` is borrowed (Drop unmaps). AtomicU64 has
+        // interior mutability, so concurrent writers are allowed as long as
+        // every access is atomic (this accessor's contract).
+        Ok(unsafe { &*word.cast::<std::sync::atomic::AtomicU64>() })
     }
 
     /// CPU-only allocation smoke check; deliberately does not claim GPU execution.
@@ -1264,18 +1300,18 @@ impl Mapping {
         self.live()?;
         let count = self.size / 4;
         for i in 0..count {
-            // SAFETY: unique &mut mapping access, in bounds, 4-byte aligned.
-            unsafe {
-                self.pointer
-                    .as_ptr()
-                    .add(i)
-                    .write_volatile((i as u32).wrapping_mul(0x9e3779b9) ^ 0xa5a55a5a);
-            }
+            // SAFETY: i < size / 4, inside the live mapping.
+            let word = unsafe { self.pointer.as_ptr().add(i) };
+            // SAFETY: in bounds, 4-byte aligned; no GPU command references
+            // this smoke-test allocation.
+            unsafe { word.write_volatile((i as u32).wrapping_mul(0x9e3779b9) ^ 0xa5a55a5a) };
         }
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         for i in 0..count {
-            // SAFETY: same live aligned mapping; no GPU commands reference it.
-            let actual = unsafe { self.pointer.as_ptr().add(i).read_volatile() };
+            // SAFETY: i < size / 4, inside the live mapping.
+            let word = unsafe { self.pointer.as_ptr().add(i) };
+            // SAFETY: in bounds, aligned; no GPU commands reference it.
+            let actual = unsafe { word.read_volatile() };
             let expected = (i as u32).wrapping_mul(0x9e3779b9) ^ 0xa5a55a5a;
             if actual != expected {
                 return Err(Error::Contract(format!(

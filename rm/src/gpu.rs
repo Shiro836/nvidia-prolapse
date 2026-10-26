@@ -1892,11 +1892,16 @@ impl Queue {
     pub(crate) fn stop_submissions(&mut self) {
         self.stopped = true;
     }
-    pub(crate) fn context_fence(&self, drm_fd: i32, token: u64) -> Result<OwnedFd> {
+    /// A sync_file that signals when `token` completes on this channel.
+    ///
+    /// # Safety
+    /// `drm_fd` is negative (rejected) or an open descriptor for the whole call.
+    pub(crate) unsafe fn context_fence(&self, drm_fd: i32, token: u64) -> Result<OwnedFd> {
         if self.lost || token == 0 || token > self.ledger.sequence {
             return Err(Error::Contract("invalid/lost RM completion token".into()));
         }
-        self.completion.context_fence(drm_fd, token)
+        // SAFETY: `drm_fd` is this function's, under its contract.
+        unsafe { self.completion.context_fence(drm_fd, token) }
     }
     /// Write `words` into a dedicated retained SYS segment (rare overflow).
     fn overflow_segment(

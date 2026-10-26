@@ -429,7 +429,8 @@ fn ring_full_leaves_payloads_untouched() {
         };
         if r == 1 {
             // Retry the same batch with the consuming wait: still full.
-            let slot_of = |id: u64| match sync_ref(id).unwrap().lock().payload {
+            // SAFETY: `consumed` and `target` are live payloads of this test.
+            let slot_of = |id: u64| match unsafe { sync_ref(id) }.unwrap().lock().payload {
                 crate::syncobj::Payload::Native(slot) => slot,
                 _ => panic!("native"),
             };
@@ -452,8 +453,22 @@ fn ring_full_leaves_payloads_untouched() {
             assert_eq!(slot_of(target), t_slot);
             assert_eq!(bridge.core.pool.refs(c_slot), 1);
             assert_eq!(bridge.core.pool.refs(t_slot), 1);
-            assert!(sync_ref(consumed).unwrap().ready(0, false).unwrap().0);
-            assert!(sync_ref(target).unwrap().lock().pending.is_none());
+            // SAFETY: a live payload of this test.
+            assert!(
+                unsafe { sync_ref(consumed) }
+                    .unwrap()
+                    .ready(0, false)
+                    .unwrap()
+                    .0
+            );
+            // SAFETY: a live payload of this test.
+            assert!(
+                unsafe { sync_ref(target) }
+                    .unwrap()
+                    .lock()
+                    .pending
+                    .is_none()
+            );
             assert_eq!(unsafe { nv_rm_sync_destroy(&mut *bridge, target) }, 0);
             break token;
         }
