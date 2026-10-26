@@ -316,7 +316,7 @@ fn profile_tier_level(r: &mut BitReader, max_sub_layers_minus1: u32) -> VResult<
 }
 
 pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
-    let mut r = BitReader::new(&rbsp[2..]);
+    let mut r = BitReader::new(super::payload(rbsp, "SPS")?);
     let r = &mut r;
     r.skip(4)?; // sps_video_parameter_set_id
     let max_sub_layers_minus1 = r.u(3)?;
@@ -530,7 +530,7 @@ pub struct Pps {
 }
 
 pub fn parse_pps(rbsp: &[u8]) -> VResult<Pps> {
-    let mut r = BitReader::new(&rbsp[2..]);
+    let mut r = BitReader::new(super::payload(rbsp, "PPS")?);
     let r = &mut r;
     let id = r.ue_max(63, "pps_pic_parameter_set_id")?;
     let sps_id = r.ue_max(15, "pps_seq_parameter_set_id")?;

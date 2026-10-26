@@ -49,7 +49,7 @@ pub fn parse_slice_header<'a>(
     pps_of: impl Fn(u32) -> Option<&'a Pps>,
     sps_of: impl Fn(u32) -> Option<&'a Sps>,
 ) -> VResult<SliceHeader> {
-    let mut rd = BitReader::new(&rbsp[2..]);
+    let mut rd = BitReader::new(super::payload(rbsp, "slice segment")?);
     let r = &mut rd;
     let first = r.flag()?;
     let no_output_of_prior_pics = if (16..=23).contains(&nal_type) {

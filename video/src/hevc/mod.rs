@@ -98,6 +98,18 @@ struct SliceNal<'a> {
     hdr: slice::SliceHeader,
 }
 
+/// The RBSP after the two-byte NAL unit header (H.265 7.3.1.2) of a `what` NAL; a NAL shorter
+/// than its header is a bitstream error.
+fn payload<'a>(rbsp: &'a [u8], what: &str) -> VResult<&'a [u8]> {
+    match rbsp.get(2..) {
+        Some(p) => Ok(p),
+        None => bitstream(format!(
+            "HEVC {what} NAL of {} bytes has no NAL unit header",
+            rbsp.len()
+        )),
+    }
+}
+
 fn bs_err<T>(m: impl Into<String>) -> Result<T, PicErr> {
     Err(PicErr::V(VideoError::Bitstream(m.into())))
 }
