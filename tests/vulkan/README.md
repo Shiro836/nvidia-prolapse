@@ -17,3 +17,13 @@ Small public-API Vulkan programs that load the built driver directly and check r
 image's unmodified bionic `linker64` (`build/bionic-runtime64`, `mesa/prepare-runtime64.py`). The i686 programs run
 under the image's unmodified bionic linker (`build/nvk-android32/runtime`, `mesa/prepare-runtime32.py`) in a new user
 and PID namespace, so a host PID above 65535 cannot overflow bionic's 32-bit thread id.
+
+`capture.py` records what the driver sends while these programs run: the ioctl sequence (strace) and every
+submission's pushbuffer bytes (the Rust RM's `NV_RM_CAPTURE` capture), normalised so that two runs of the same
+build compare equal. A behaviour-identical change (a refactor, a port) is checked by recording before and after
+on the same GPU and driver and diffing:
+
+    tests/vulkan/capture.py record --out build/capture/before        # all targets, release profile
+    tests/vulkan/capture.py diff build/capture/before build/capture/after
+
+The fields it masks or drops, and why each is nondeterministic, are listed in the script.
