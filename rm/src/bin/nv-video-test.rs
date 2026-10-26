@@ -19,13 +19,11 @@
     clippy::doc_markdown,
     clippy::items_after_statements,
     clippy::many_single_char_names,
-    clippy::multiple_unsafe_ops_per_block,
     clippy::print_stderr,
     clippy::print_stdout,
     clippy::redundant_closure_for_method_calls,
     clippy::similar_names,
     clippy::too_many_lines,
-    clippy::undocumented_unsafe_blocks,
     clippy::unwrap_used,
     reason = "pre-standard code; cleanup tracked"
 )]
@@ -36,44 +34,19 @@
         reason = "pre-standard code; cleanup tracked"
     )
 )]
-use nv_bionic_native::video::ffi::NvVideoHdrMetadata;
 use nv_bionic_native::video::{
-    CODEC_AV1, CODEC_VP9, FORMAT_NV12, FORMAT_P010, FORMAT_YUV420P, NvVideoDeviceInfo, TestDmaBuf,
-    VideoDevice, ffi::*,
+    CODEC_AV1, CODEC_VP9, FORMAT_NV12, FORMAT_P010, FORMAT_YUV420P, TestDmaBuf, VideoDevice, ffi::*,
 };
 use std::time::{Duration, Instant};
 
+#[path = "common/nv_video.rs"]
+mod nv_video;
+use nv_video::{Device, Session, wait_fd};
+
 fn check(r: i32, what: &str) {
     if r < 0 {
-        // SAFETY: nv_video_last_error returns a valid C string.
-        let msg = unsafe { std::ffi::CStr::from_ptr(nv_video_last_error()) };
-        eprintln!("{what}: error {r}: {}", msg.to_string_lossy());
+        eprintln!("{what}: error {r}: {}", nv_video::last_error());
         std::process::exit(2);
-    }
-}
-
-fn wait_fd(fd: i32) {
-    if fd < 0 {
-        return;
-    }
-    #[repr(C)]
-    struct P {
-        fd: i32,
-        e: i16,
-        r: i16,
-    }
-    unsafe extern "C" {
-        fn poll(f: *mut P, n: std::ffi::c_ulong, t: i32) -> i32;
-        fn close(fd: i32) -> i32;
-    }
-    let mut p = P { fd, e: 1, r: 0 };
-    // SAFETY: one pollfd; fd owned by us.
-    unsafe {
-        if poll(&mut p, 1, 2000) != 1 {
-            eprintln!("release fence did not signal");
-            std::process::exit(3);
-        }
-        close(fd);
     }
 }
 
@@ -100,13 +73,9 @@ fn main() {
     let max_w: u32 = args.get(2).map_or(w0, |v| v.parse().unwrap());
     let max_h: u32 = args.get(3).map_or(h0, |v| v.parse().unwrap());
 
-    let mut dev = std::ptr::null_mut();
-    let mut info = std::mem::MaybeUninit::<NvVideoDeviceInfo>::zeroed();
-    check(
-        unsafe { nv_video_device_open(&mut dev, info.as_mut_ptr()) },
-        "device_open",
-    );
-    let info = unsafe { info.assume_init() };
+    let (r, opened) = Device::open();
+    check(r, "device_open");
+    let (dev, info) = opened.expect("nv_video_device_open returned a device");
     let name = String::from_utf8_lossy(&info.name);
     println!(
         "device {:04x} {} class {:#x} engines {}",
@@ -159,25 +128,19 @@ fn main() {
         max_height: max_h,
         bit_depth,
         extra_output_slots: 2,
-        codec_config: if config.is_empty() {
-            std::ptr::null()
-        } else {
-            config.as_ptr()
-        },
-        codec_config_len: config.len(),
+        codec_config: std::ptr::null(),
+        codec_config_len: 0,
         reserved: [0; 8],
     };
-    let mut s = std::ptr::null_mut();
-    check(
-        unsafe { nv_video_session_create(dev, &si, &mut s) },
-        "session_create",
-    );
+    let (r, s) = Session::create(&dev, si, &config);
+    check(r, "session_create");
+    let mut s = s.expect("nv_video_session_create returned a session");
     let vdev = VideoDevice::open().expect("device");
     let pitch = (max_w * bps as u32).next_multiple_of(256);
     let luma = pitch as usize * max_h as usize;
     let size = luma + pitch as usize * max_h.div_ceil(2) as usize;
     let target = TestDmaBuf::new(&vdev, size).expect("dma-buf");
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsFd, AsRawFd};
     let tfd = target.fd.as_raw_fd();
 
     let mut off = 0usize;
@@ -187,27 +150,21 @@ fn main() {
     let mut out = vec![0u8; size];
     let mut dump = std::env::var_os("NV_VIDEO_DUMP")
         .map(|p| std::io::BufWriter::new(std::fs::File::create(p).expect("create NV_VIDEO_DUMP")));
-    let mut handle = |s: *mut NvVideoSession,
+    let mut handle = |s: &mut Session<'_>,
                       frames: &mut usize,
                       bad: &mut usize,
                       diff_total: &mut usize,
                       off: &mut usize,
                       copy_times: &mut Vec<Duration>| {
         loop {
-            let mut pic = std::mem::MaybeUninit::<NvVideoPicture>::zeroed();
-            let r = unsafe { nv_video_next_picture(s, pic.as_mut_ptr()) };
+            let (r, pic) = s.next_picture();
             check(r, "next_picture");
             if r == 0 {
                 break;
             }
-            let pic = unsafe { pic.assume_init() };
             if report {
-                let mut hdr = std::mem::MaybeUninit::<NvVideoHdrMetadata>::zeroed();
-                check(
-                    unsafe { nv_video_picture_hdr(s, pic.id, hdr.as_mut_ptr()) },
-                    "picture_hdr",
-                );
-                let hdr = unsafe { hdr.assume_init() };
+                let (r, hdr) = s.picture_hdr(pic.id);
+                check(r, "picture_hdr");
                 if hdr.has_mastering_display != 0 || hdr.has_content_light_level != 0 {
                     println!(
                         "picture {} HDR: mdcv {} R({},{}) G({},{}) B({},{}) WP({},{}) L({},{}) \
@@ -257,12 +214,9 @@ fn main() {
                 cr_offset: if planar { cr } else { 0 },
                 reserved: [0; 2],
             };
-            let mut fence = -1;
             let t0 = Instant::now();
-            check(
-                unsafe { nv_video_copy_out(s, pic.id, &t, &mut fence) },
-                "copy_out",
-            );
+            let (r, fence) = s.copy_out(pic.id, &t, &[target.fd.as_fd()]);
+            check(r, "copy_out");
             wait_fd(fence);
             copy_times.push(t0.elapsed());
             target.read(0, &mut out).unwrap();
@@ -303,14 +257,14 @@ fn main() {
             }
             *off += nv12.len();
             *frames += 1;
-            check(unsafe { nv_video_picture_release(s, pic.id) }, "release");
+            check(s.picture_release(pic.id), "release");
         }
     };
     let start = Instant::now();
     let mut empty_units = 0usize;
     for (i, p) in packets.iter().enumerate() {
         let t0 = Instant::now();
-        let shown = unsafe { nv_video_decode(s, p.as_ptr(), p.len(), i as u64, 0) };
+        let shown = s.decode(Some(p), i as u64, 0);
         check(shown, "decode");
         if shown == 0 {
             empty_units += 1;
@@ -320,7 +274,7 @@ fn main() {
         }
         dec_times.push(t0.elapsed());
         handle(
-            s,
+            &mut s,
             &mut frames,
             &mut bad,
             &mut diff_total,
@@ -328,12 +282,9 @@ fn main() {
             &mut copy_times,
         );
     }
-    check(
-        unsafe { nv_video_decode(s, std::ptr::null(), 0, 0, 1) },
-        "drain",
-    );
+    check(s.decode(None, 0, 1), "drain");
     handle(
-        s,
+        &mut s,
         &mut frames,
         &mut bad,
         &mut diff_total,
@@ -359,10 +310,8 @@ fn main() {
         "{} packets ({empty_units} without a displayable picture), {frames} pictures, max {max_w}x{max_h}; nv_video_decode mean {dm:?} median {dmed:?} max {dmax:?}; copy_out+fence mean {cm:?} median {cmed:?} max {cmax:?}; wall {wall:?}",
         packets.len()
     );
-    unsafe {
-        nv_video_session_destroy(s);
-        nv_video_device_close(dev);
-    }
+    drop(s);
+    drop(dev);
     if let Some(r) = &reference {
         if off != r.len() {
             println!("MISMATCH: produced {off} bytes, reference {}", r.len());
