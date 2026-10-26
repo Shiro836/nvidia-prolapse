@@ -92,6 +92,13 @@ fn syntax_i32(v: u32) -> i32 {
     i32::try_from(v).expect("frame_num, pic_order_cnt_lsb and MaxFrameNum are <= 2^16")
 }
 
+/// picNumX = CurrPicNum - (difference_of_pic_nums_minus1 + 1) (8.2.5.4.1, eq. 8-39), or `None`
+/// when it is outside `i32`: no picture has such a PicNum (PicNums lie in
+/// -MaxFrameNum..MaxFrameNum, 8.2.4.1), and the ue(v) difference goes up to 2^32 - 2.
+fn pic_num_x(cur_pic_num: i32, difference_of_pic_nums_minus1: u32) -> Option<i32> {
+    i32::try_from(i64::from(cur_pic_num) - i64::from(difference_of_pic_nums_minus1) - 1).ok()
+}
+
 impl RefPic {
     fn frame_num_wrap(&self, cur_frame_num: u32, max: u32) -> i32 {
         if self.frame_num > cur_frame_num {
@@ -731,10 +738,14 @@ impl Decoder {
                 for op in ops {
                     match *op {
                         Mmco::ShortUnused(d) => {
-                            let x = cur_pic_num - (d as i32 + 1);
-                            match self.find_short(x, h.frame_num, max) {
+                            let x = pic_num_x(cur_pic_num, d);
+                            match x.and_then(|x| self.find_short(x, h.frame_num, max)) {
                                 Some(i) => self.dpb[i] = None,
-                                None => return bitstream(format!("MMCO1 on missing PicNum {x}")),
+                                None => {
+                                    return bitstream(format!(
+                                        "MMCO1 on missing PicNum {cur_pic_num} - ({d} + 1)"
+                                    ));
+                                }
                             }
                         }
                         Mmco::LongUnused(n) => match self
@@ -748,13 +759,13 @@ impl Decoder {
                             }
                         },
                         Mmco::ShortToLong(d, idx) => {
-                            let x = cur_pic_num - (d as i32 + 1);
+                            let x = pic_num_x(cur_pic_num, d);
                             if self.max_lt_idx.is_none_or(|m| idx > m) {
                                 return bitstream(
                                     "MMCO3 LongTermFrameIdx above MaxLongTermFrameIdx",
                                 );
                             }
-                            let target = self.find_short(x, h.frame_num, max);
+                            let target = x.and_then(|x| self.find_short(x, h.frame_num, max));
                             if let Some(j) = self
                                 .dpb
                                 .iter()
@@ -766,7 +777,11 @@ impl Decoder {
                             }
                             match target {
                                 Some(i) => self.dpb[i].as_mut().unwrap().long_term_idx = Some(idx),
-                                None => return bitstream(format!("MMCO3 on missing PicNum {x}")),
+                                None => {
+                                    return bitstream(format!(
+                                        "MMCO3 on missing PicNum {cur_pic_num} - ({d} + 1)"
+                                    ));
+                                }
                             }
                         }
                         Mmco::MaxLongTermIdx(p1) => {

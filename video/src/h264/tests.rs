@@ -431,3 +431,36 @@ fn stock_new_h264_setup_frame_num_and_poc_wrap() {
         300
     );
 }
+
+/// MMCO 1/3 with difference_of_pic_nums_minus1 = 2^31 - 1 (any ue(v) value up to 2^32 - 2 is
+/// syntactically valid; 7.4.3.3 bounds picNumX semantically): computing
+/// CurrPicNum - (difference_of_pic_nums_minus1 + 1) in i32 overflowed and panicked. It is now the
+/// "missing PicNum" bitstream error every other out-of-range picNumX gets.
+#[test]
+fn mmco_difference_beyond_i32_is_a_bitstream_error() {
+    let stream = include_bytes!("../testdata/h264_160x144.h264");
+    let aus = crate::bits::access_units(stream, false);
+    let mut dec = Decoder::new(EngineParams::for_class(0xcfb0, None));
+    dec.decode_au(aus[0], 0).expect("IDR decodes");
+    let slice = split_annexb(aus[1])
+        .into_iter()
+        .find(|n| matches!(n.nal[0] & 0x1f, 1 | 5))
+        .expect("second access unit has a slice");
+    let mut hdr = slice::parse_slice_header(&bits::unescape(slice.nal), |id| {
+        let p = dec.pps.get(&id)?;
+        Some((dec.sps.get(&p.sps_id)?.clone(), p.clone()))
+    })
+    .expect("slice header parses");
+    let sps = dec.sps.values().next().expect("SPS parsed").clone();
+    hdr.nal_ref_idc = 1;
+    for op in [
+        Mmco::ShortUnused(0x7fff_ffff),
+        Mmco::ShortToLong(u32::MAX - 1, 0),
+    ] {
+        hdr.mmco = Some(vec![op]);
+        let e = dec
+            .mark(&hdr, &sps, [0, 0], 0, 1, 1)
+            .expect_err("picNumX out of range");
+        assert_eq!(e.code(), -3, "{e}");
+    }
+}
