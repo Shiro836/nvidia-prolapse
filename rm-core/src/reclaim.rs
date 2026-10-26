@@ -2,11 +2,11 @@
 //! Deferred reclamation keyed by per-queue completion-token snapshots.
 //!
 //! Freeing memory or a VA range must not wait for GPU work: that work can be
-//! gated on a foreign sync_file whose producer is the freeing thread itself
+//! gated on a foreign `sync_file` whose producer is the freeing thread itself
 //! (Android buffer release cycle: build/fence-tracing/caller-release/
 //! FINDINGS.md). Kernel drivers solve the same problem by keeping a freed
 //! object alive until the fences that were outstanding at free time signal;
-//! the slot pool here already does it for semaphore slots (HeldSlots in
+//! the slot pool here already does it for semaphore slots (`HeldSlots` in
 //! gpu.rs, keyed by token). This is the same for RM mappings, memory objects
 //! and VA ranges: at free time the caller records, for every queue with
 //! unretired work, that queue's last submitted token; the object is
@@ -23,13 +23,13 @@ use std::collections::VecDeque;
 #[derive(Debug)]
 pub struct Reclaim<T> {
     /// (snapshot token count, item count) per group, oldest first.
-    groups: VecDeque<(u32, u32)>,
+    groups: VecDeque<(usize, usize)>,
     /// Flattened snapshots: (queue index, last submitted token).
     tokens: VecDeque<(u32, u64)>,
     /// Flattened items, in the order they must be reclaimed.
     items: VecDeque<T>,
     /// Snapshot tokens appended by `begin` and not yet committed.
-    open: u32,
+    open: usize,
 }
 impl<T> Default for Reclaim<T> {
     fn default() -> Self {
@@ -53,21 +53,22 @@ impl<T> Reclaim<T> {
     /// Record the snapshot of a new group: one (queue, token) pair for every
     /// queue whose last submitted token has not retired. Returns how many
     /// were recorded; zero means nothing can still use the object and the
-    /// caller reclaims it immediately (no group is opened then).
+    /// caller reclaims it immediately (no group is opened then). The count saturates at
+    /// `u32::MAX`; callers only distinguish zero from non-zero.
     pub fn begin(&mut self, snapshot: impl Iterator<Item = (u32, u64)>) -> u32 {
         debug_assert_eq!(self.open, 0, "reclaim group already open");
         let before = self.tokens.len();
         self.tokens.extend(snapshot);
-        let count = (self.tokens.len() - before) as u32;
+        let count = self.tokens.len() - before;
         self.open = count;
-        count
+        u32::try_from(count).unwrap_or(u32::MAX)
     }
     /// Close the group opened by a non-zero `begin` with its items.
     pub fn commit(&mut self, items: impl IntoIterator<Item = T>) {
         debug_assert_ne!(self.open, 0, "commit without an open snapshot");
         let before = self.items.len();
         self.items.extend(items);
-        let count = (self.items.len() - before) as u32;
+        let count = self.items.len() - before;
         self.groups.push_back((self.open, count));
         self.open = 0;
     }
@@ -88,14 +89,14 @@ impl<T> Reclaim<T> {
             && !self
                 .tokens
                 .iter()
-                .take(tokens as usize)
+                .take(tokens)
                 .all(|&(queue, token)| retired(queue, token))
         {
             return false;
         }
         self.groups.pop_front();
-        self.tokens.drain(..tokens as usize);
-        out.extend(self.items.drain(..items as usize));
+        self.tokens.drain(..tokens);
+        out.extend(self.items.drain(..items));
         true
     }
 }
@@ -123,7 +124,7 @@ mod tests {
         r.commit([20]);
         let mut out = Vec::new();
         let completed = std::cell::Cell::new([4u64, 0, 9]);
-        let retired = |q: u32, t: u64| completed.get()[q as usize] >= t;
+        let retired = |q: u32, t: u64| completed.get()[crate::conv::usize_from_u32(q)] >= t;
         assert!(!r.pop_retired(false, retired, &mut out), "queue 0 not at 5");
         completed.set([5, 0, 9]);
         assert!(r.pop_retired(false, retired, &mut out));
