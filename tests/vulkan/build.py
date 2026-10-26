@@ -2,7 +2,8 @@
 """Build the Vulkan test programs that tests/vulkan/run.py runs, for the host and both Android ABIs.
 
   build/native-vulkan-probe/      probe-<target> (compute + copy), interop-<target> (dma-buf + sync_fd between
-                                  two devices), generate.spv, transform.spv
+                                  two devices), copy-indirect-host (indirect memory copy on the
+                                  compute-only queue consumed by a dispatch), generate.spv, transform.spv
   build/native-vulkan-offscreen/  probe-<target> (triangle -> tiled image -> readback), vertex.spv, fragment.spv
   hal/out/host/                   the HAL's host test programs (hal/Makefile); the Android ones come from
                                   hal/build-nvk-tests.py
@@ -38,6 +39,8 @@ def main():
     for target, cc in COMPILERS.items():
         run(cc, *WARN, HERE / "native-vulkan-probe.c", "-ldl", "-o", core / f"probe-{target}")
         run(cc, *WARN, HERE / "native-vulkan-interop.c", "-ldl", "-o", core / f"interop-{target}")
+        if target == "host":  # the NDK r29 Vulkan headers predate VK_KHR_copy_memory_indirect
+            run(cc, *WARN, HERE / "native-vulkan-copy-indirect.c", "-ldl", "-o", core / f"copy-indirect-{target}")
         run(cc, *WARN, HERE / "native-vulkan-offscreen.c", "-ldl", "-o", graphics / f"probe-{target}")
     run("make", "-C", ROOT / "hal", "out/host/anb-roundtrip", "out/host/astc-roundtrip", "out/host/etc2-roundtrip",
         "out/host/ahb-roundtrip", "out/host/ahb-yuv")
