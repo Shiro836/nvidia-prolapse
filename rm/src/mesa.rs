@@ -1972,8 +1972,30 @@ pub unsafe extern "C" fn nv_rm_close(p: *mut Bridge) {
         drop(owned);
     });
 }
-/// nv_rm.h NV_RM_PLACEMENT_VRAM_COMPRESSIBLE.
-const PLACEMENT_VRAM_COMPRESSIBLE: u32 = 2;
+/// nv_rm.h NV_RM_PLACEMENT_*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    /// NV_RM_PLACEMENT_VRAM
+    Vram,
+    /// NV_RM_PLACEMENT_GART
+    Gart,
+    /// NV_RM_PLACEMENT_VRAM_COMPRESSIBLE
+    VramCompressible,
+    /// NV_RM_PLACEMENT_VRAM_POOL_BLOCK
+    VramPoolBlock,
+}
+impl TryFrom<u32> for Placement {
+    type Error = Error;
+    fn try_from(v: u32) -> Result<Self> {
+        match v {
+            0 => Ok(Self::Vram),
+            1 => Ok(Self::Gart),
+            2 => Ok(Self::VramCompressible),
+            3 => Ok(Self::VramPoolBlock),
+            _ => Err(Error::Contract(format!("unknown memory placement {v}"))),
+        }
+    }
+}
 /// # Safety
 /// nv_rm.h's contract for every entry point: the device pointer is NULL or a
 /// live nv_rm_open device that stays alive for the whole call; every output
@@ -2003,12 +2025,16 @@ pub unsafe extern "C" fn nv_rm_alloc(
             // no RM memory attribute: the block height travels in the DRM
             // modifier. A kind is only meaningful for an uncompressed
             // block-linear VRAM/GART allocation (Device::allocate_block_linear).
-            if placement > PLACEMENT_VRAM_COMPRESSIBLE
-                || tile != 0
-                || (kind != 0 && placement == PLACEMENT_VRAM_COMPRESSIBLE)
+            let placement = Placement::try_from(placement)?;
+            if tile != 0
+                || (kind != 0
+                    && matches!(
+                        placement,
+                        Placement::VramCompressible | Placement::VramPoolBlock
+                    ))
             {
                 return Err(Error::Contract(
-                    "unsupported memory placement/tiled allocation (tile mode, or a kind on compressible memory)".into(),
+                    "unsupported memory placement/tiled allocation (tile mode, or a kind on compressible or pool-block memory)".into(),
                 ));
             }
             let mut guard = b.lock();
@@ -2019,14 +2045,29 @@ pub unsafe extern "C" fn nv_rm_alloc(
                 .map_err(|_| Error::Contract("memory size overflow".into()))?;
             let alignment = usize::try_from(alignment.max(4096))
                 .map_err(|_| Error::Contract("memory alignment overflow".into()))?;
-            let memory = if placement == PLACEMENT_VRAM_COMPRESSIBLE {
-                s.device.allocate_compressible(size, alignment)?
-            } else if kind != 0 {
-                s.device
-                    .allocate_block_linear(size, alignment, placement == 1, kind)?
-            } else {
-                s.device
-                    .allocate_aligned(size, alignment, false, placement == 1)?
+            let memory = match placement {
+                Placement::VramCompressible => s.device.allocate_compressible(size, alignment)?,
+                Placement::VramPoolBlock => {
+                    if size != crate::rm::POOL_BLOCK_SIZE {
+                        return Err(Error::Contract(format!(
+                            "a pool block is {:#x} bytes, not {size:#x}",
+                            crate::rm::POOL_BLOCK_SIZE
+                        )));
+                    }
+                    s.device.allocate_pool_block()?
+                }
+                Placement::Vram | Placement::Gart if kind != 0 => s.device.allocate_block_linear(
+                    size,
+                    alignment,
+                    placement == Placement::Gart,
+                    kind,
+                )?,
+                Placement::Vram | Placement::Gart => s.device.allocate_aligned(
+                    size,
+                    alignment,
+                    false,
+                    placement == Placement::Gart,
+                )?,
             };
             let id = next_id(s)?;
             let a = Allocation {

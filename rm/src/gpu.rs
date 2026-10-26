@@ -251,14 +251,18 @@ fn mapping_plan(
         allocation_size,
         address,
         kind,
-        false,
+        crate::rm::PhysicalPages::Small4K,
         KIND_GENERIC,
     )
 }
 
-/// `big_pages`: the physical allocation uses big pages. A mapping whose
-/// offset, length and fixed VA are all 64 KiB aligned then asks for big PTEs
+/// `pages`: the physical allocation's page size. With big pages a mapping
+/// whose offset, length and fixed VA are all 64 KiB aligned asks for big PTEs
 /// (stock maps device-local memory with NVOS46 PAGE_SIZE BIG, flags 0x208).
+/// A huge-page pool block maps whole with NVOS46 flags 0 apart from the fixed
+/// offset: PAGE_SIZE DEFAULT (RM maps the 2 MiB page), no CACHE_SNOOP, no
+/// kind, as stock maps its QMD/launch-counter blocks (NV_ESC_RM_MAP_MEMORY_DMA
+/// flags 0).
 // One argument per independent RM input (layout, placement, kind, page and
 // architecture facts); a parameter struct would only rename them.
 #[allow(clippy::too_many_arguments)]
@@ -269,7 +273,7 @@ fn mapping_plan_paged(
     allocation_size: u64,
     address: Option<u64>,
     kind: Option<u32>,
-    big_pages: bool,
+    pages: crate::rm::PhysicalPages,
     generic_kind: u32,
 ) -> Result<MappingPlan> {
     if length == 0
@@ -297,6 +301,24 @@ fn mapping_plan_paged(
     // RM picks the kind (observed in stock's RM alloc requests).
     let s8_chooser = generic_kind != KIND_GENERIC && kind == Some(KIND_S8);
     let typed = kind.is_some() && (!compat.supports_kind_override() || s8_chooser);
+    if pages == crate::rm::PhysicalPages::Huge2M {
+        let block = crate::rm::POOL_BLOCK_SIZE as u64;
+        if kind.is_some()
+            || offset != 0
+            || length != block
+            || address.is_some_and(|a| !a.is_multiple_of(block))
+        {
+            return Err(Error::Contract(
+                "a huge-page pool block maps whole, without a kind, at a 2 MiB aligned VA".into(),
+            ));
+        }
+        return Ok(MappingPlan {
+            typed: None,
+            flags: if address.is_some() { 1 << 15 } else { 0 },
+            wire_kind: 0,
+        });
+    }
+    let big_pages = pages == crate::rm::PhysicalPages::Big64K;
     let big = big_pages
         && offset.is_multiple_of(BIG_PAGE)
         && length.is_multiple_of(BIG_PAGE)
@@ -384,7 +406,13 @@ impl AddressSpace {
         address: Option<u64>,
         kind: u32,
     ) -> Result<GpuMapping> {
-        self.map_internal(memory, offset, length, address, Some(kind))
+        // A pool block maps without a kind; nvkmd's kind 0 means "none".
+        let kind = if memory.pages == crate::rm::PhysicalPages::Huge2M && kind == 0 {
+            None
+        } else {
+            Some(kind)
+        };
+        self.map_internal(memory, offset, length, address, kind)
     }
     fn map_internal(
         &self,
@@ -420,7 +448,7 @@ impl AddressSpace {
             memory.size as u64,
             address,
             kind,
-            memory.big_pages,
+            memory.pages,
             generic_kind,
         )?;
         if !Rc::ptr_eq(&self.device, &memory.device) {
@@ -2414,7 +2442,7 @@ mod compression_tests {
                 1 << 24,
                 Some(1 << 34),
                 kind,
-                false,
+                crate::rm::PhysicalPages::Small4K,
                 generic,
             )
             .unwrap()
@@ -2487,7 +2515,7 @@ mod compression_tests {
             1 << 24,
             Some(1 << 34),
             Some(0x11),
-            false,
+            crate::rm::PhysicalPages::Small4K,
             G,
         )
         .unwrap();
@@ -2507,7 +2535,7 @@ mod compression_tests {
                 1 << 24,
                 Some(1 << 34),
                 Some(kind),
-                false,
+                crate::rm::PhysicalPages::Small4K,
                 generic,
             )
             .unwrap()
@@ -2635,7 +2663,7 @@ mod compression_tests {
                 1 << 24,
                 Some(address),
                 Some(6),
-                true,
+                crate::rm::PhysicalPages::Big64K,
                 KIND_GENERIC,
             )
             .unwrap()
@@ -2653,7 +2681,7 @@ mod compression_tests {
             1 << 24,
             Some(1 << 34),
             Some(6),
-            false,
+            crate::rm::PhysicalPages::Small4K,
             KIND_GENERIC,
         )
         .unwrap();
@@ -2666,7 +2694,7 @@ mod compression_tests {
                 1 << 24,
                 Some(1 << 34),
                 Some(8),
-                true,
+                crate::rm::PhysicalPages::Big64K,
                 KIND_GENERIC
             )
             .is_err()

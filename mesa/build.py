@@ -250,6 +250,15 @@ NVK_PATCHES = (
     # driver does on its Turing and Volta compute queues), and the
     # compute-only family is offered from Volta on.
     "nvk-compute-queue-no-mme.patch",
+    # vkCmdCopyMemoryIndirectKHR on a queue without a copy engine (the
+    # compute-only family): one copy kernel per command that reads the
+    # command and moves its bytes, as the proprietary driver records it,
+    # instead of copy-engine methods the channel has no object for. Each
+    # launch releases the command buffer's launch counter (QMD RELEASE0,
+    # every QMD layout from Volta), kept in GPU-only device-memory blocks
+    # (NVKMD_MEM_POOL_BLOCK); the barrier after the copy and the end of the
+    # command buffer wait for that counter instead of idling the engine.
+    "nvk-compute-queue-copy-memory-indirect.patch",
 )
 
 NVK_PATCH_LIST = [HERE / name for name in NVK_PATCHES]

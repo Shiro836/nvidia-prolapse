@@ -37,6 +37,9 @@ def cases(target, suite):
                           graphics / "vertex.spv", graphics / "fragment.spv"]),
             ("interop", [core / f"interop-{target}", "--driver", icd]),
         ]
+        if target == "host":  # built for the host only (tests/vulkan/build.py)
+            result.append(("copy-indirect", [core / "copy-indirect-host", "--driver", icd,
+                                             "--transform", core / "transform.spv"]))
     if suite in ("hal", "all"):
         tests = ROOT / "hal/out/host" if target == "host" else integration
         # The strict default requires an actually pending release fd. Never
