@@ -179,7 +179,9 @@ pub fn decoder(data: &[u8]) {
         0 => h264::codec::H264Decoder::new(class, w, h, &[]).map(boxed),
         1 => hevc::codec::HevcDecoder::new(class, w, h, 8, &[]).map(boxed),
         2 => Ok(boxed(nv_video::vp9::Vp9Decoder::new(class, w, h, 8))),
-        _ => av1::codec::Av1Decoder::new(w, h, 8, &[]).map(boxed),
+        // The first temporal unit doubles as codec_config, so a sequence header with
+        // film_grain_params_present makes the session grain-capable and the grain path runs.
+        _ => av1::codec::Av1Decoder::new(w, h, 8, packets(stream)[0]).map(boxed),
     };
     let Ok(mut dec) = dec else { return };
     let mut alloc = FakeVram {
