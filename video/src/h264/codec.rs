@@ -10,11 +10,12 @@
 //!   `width·16 + 256` and the 0x4dc buffer at `align(width·4, 256)` after it (measured at widths
 //!   176, 352, 1920), legacy MBHIST/HISTORY instead of filter/intra/0x4dc.
 use super::{Begun, Decoder, MAX_SLOTS, desc, legacy};
+use crate::fit;
 use crate::{
     Allocator, BuildContext, CODEC_H264, CodecDecoder, DecodeJob, Job, NvdecGen,
     PictureInfo as SessionInfo, SurfaceLayout, VResult, VideoError, bits,
 };
-use nv_rm_core::conv::usize_from_u32;
+use nv_rm_core::conv::{u64_from_usize, usize_from_u32};
 use nv_rm_core::push::method;
 use std::collections::VecDeque;
 
@@ -104,15 +105,18 @@ impl CodecDecoder for H264Decoder {
         let h_mbs = u64::from(max_height.div_ceil(16));
         // Per slot: colMV row (worst case 16 vectors per MB, 8 B each) × MB rows.
         self.colmv_slot = (w_mbs * 16 * 8).next_multiple_of(256) * h_mbs;
-        self.colmv = alloc.vram((self.colmv_slot * MAX_SLOTS as u64) as usize)?;
+        self.colmv = alloc.vram(fit(
+            self.colmv_slot * u64_from_usize(MAX_SLOTS),
+            "colMV size",
+        )?)?;
         let filter = u64::from(max_width.next_multiple_of(16)) * 16 + 256;
         let intra = (u64::from(max_width.next_multiple_of(16)) * 4).next_multiple_of(256);
-        self.filter = alloc.vram((filter + intra + SIZE_4DC) as usize)?;
+        self.filter = alloc.vram(fit(filter + intra + SIZE_4DC, "filter size")?)?;
         self.intra_top = self.filter + filter;
         self.buf_4dc = self.intra_top + intra;
         // Legacy (interlaced) side buffers: MBHIST 128 B per MB row, HISTORY 768 B per MB column.
-        self.mbhist = alloc.vram((h_mbs * 128).next_multiple_of(256) as usize)?;
-        self.history = alloc.vram((w_mbs * 768) as usize)?;
+        self.mbhist = alloc.vram(fit((h_mbs * 128).next_multiple_of(256), "MBHIST size")?)?;
+        self.history = alloc.vram(fit(w_mbs * 768, "HISTORY size")?)?;
         Ok(())
     }
     fn surfaces_needed(&self, data: &[u8]) -> VResult<usize> {
@@ -174,7 +178,7 @@ impl CodecDecoder for H264Decoder {
             .pending
             .take()
             .ok_or_else(|| VideoError::Invalid("H.264 build without a parsed picture".into()))?;
-        let mut job = self.dec.complete(b, ctx.current as u32)?;
+        let mut job = self.dec.complete(b, fit(ctx.current, "surface index")?)?;
         self.reorder = job.max_num_reorder;
         if job.app_id == desc::APP_ID_NEW_H264 {
             job.setup.truncate(0x2e0);
@@ -195,8 +199,16 @@ impl CodecDecoder for H264Decoder {
         }
         for (i, s) in job.slot_surfaces.iter().enumerate() {
             let s = s.map_or(cur, |s| ctx.surfaces[usize_from_u32(s)]);
-            reloc(&mut w, 0x430 + 4 * i as u32, s.luma);
-            reloc(&mut w, 0x474 + 4 * i as u32, s.chroma);
+            reloc(
+                &mut w,
+                0x430 + 4 * fit::<u32, _>(i, "reference slot")?,
+                s.luma,
+            );
+            reloc(
+                &mut w,
+                0x474 + 4 * fit::<u32, _>(i, "reference slot")?,
+                s.chroma,
+            );
         }
         reloc(&mut w, 0x414, self.colmv);
         reloc(&mut w, 0x424, da + STATUS);

@@ -8,6 +8,7 @@
 //! ([`SessionInputs`]), never stock's numbers.
 use super::ps::{Pps, ScalingList, Sps, diag_scan};
 use crate::{VResult, bitstream, fit, unsupported};
+use nv_rm_core::conv::{low_u8, low_u16};
 
 /// Size of the descriptor area (struct + tail, zero padded).
 pub const DESC_SIZE: usize = 0x200;
@@ -71,8 +72,8 @@ impl StockOpaque {
     pub fn observed(bit_depth_luma: u32) -> Self {
         let bps = crate::bytes_per_sample(bit_depth_luma);
         Self {
-            reserved6: crate::plane_kind_bits(bps) as u8,
-            reserved7: crate::surface_format_code(bit_depth_luma) as u16,
+            reserved6: low_u8(crate::plane_kind_bits(bps)),
+            reserved7: low_u16(crate::surface_format_code(bit_depth_luma)),
         }
     }
 }
@@ -148,8 +149,8 @@ pub fn build(
     if sps.width > 0xffff || sps.height > 0xffff {
         return bitstream("picture size exceeds 16 bits");
     }
-    put16(&mut d, 0x58, sps.width as u16);
-    put16(&mut d, 0x5a, sps.height as u16);
+    put16(&mut d, 0x58, fit(sps.width, "pic_width_in_luma_samples")?);
+    put16(&mut d, 0x5a, fit(sps.height, "pic_height_in_luma_samples")?);
     let mut b = Bits(0);
     b.set(0, 4, sps.chroma_format_idc, "chroma_format_idc")?;
     b.set(4, 4, sps.bit_depth_luma, "bit_depth_luma")?;
@@ -351,7 +352,7 @@ pub fn build(
     )?;
     put32(&mut d, 0x6c, b.0);
     // 0x70 num_ref_frames = min(NumPocTotalCurr, 8) (stock ELF 0x3e795).
-    let nrf = st.num_poc_total_curr.min(8) as u8;
+    let nrf = u8::try_from(st.num_poc_total_curr.min(8)).expect("min(8) fits u8");
     d[0x70] = nrf;
     if si.blackwell_b {
         d[0x71] = op.reserved6;
@@ -383,7 +384,12 @@ pub fn build(
         sps.log2_max_poc_lsb - 4,
         "log2_max_pic_order_cnt_lsb_minus4",
     )?;
-    b.set(5, 7, sps.st_rps.len() as u32, "num_short_term_ref_pic_sets")?;
+    b.set(
+        5,
+        7,
+        fit(sps.st_rps.len(), "num_short_term_ref_pic_sets")?,
+        "num_short_term_ref_pic_sets",
+    )?;
     b.set(
         12,
         6,
@@ -413,7 +419,7 @@ pub fn build(
         put32(
             &mut d,
             0x11c,
-            ((((sps.width.cast_signed()) * 2 + 0x7e) & 0x3ff80) + 0x13f) as u32 >> 8,
+            ((((sps.width.cast_signed()) * 2 + 0x7e) & 0x3ff80) + 0x13f).cast_unsigned() >> 8,
         );
         put16(&mut d, 0x120, 0xffff);
     }
@@ -438,8 +444,8 @@ pub fn build(
     let mut o = TILE_SIZES_OFFSET;
     for &r in &rows {
         for &c in &cols {
-            put16(&mut d, o, c as u16);
-            put16(&mut d, o + 2, r as u16);
+            put16(&mut d, o, fit(c, "column_width_minus1")?);
+            put16(&mut d, o + 2, fit(r, "row_height_minus1")?);
             o += 4;
         }
     }

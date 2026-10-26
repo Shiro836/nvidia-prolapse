@@ -331,7 +331,7 @@ impl CodecDecoder for Av1Decoder {
         } else {
             Surf::Session(ctx.current)
         });
-        j.build_descriptor(ctx.layout.pitch, ctx.r#gen().blackwell_b(), d);
+        j.build_descriptor(ctx.layout.pitch, ctx.r#gen().blackwell_b(), d)?;
         if let Some(q) = j.cdf_default_qctx {
             self.cdf_alias[j.cdf_read] = Some(q);
         }

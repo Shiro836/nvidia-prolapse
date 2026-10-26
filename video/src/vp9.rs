@@ -25,6 +25,7 @@ use super::{
     BuildContext, CODEC_VP9, CodecDecoder, DecodeJob, Job, NvdecGen, PictureInfo, VResult,
     VideoError,
 };
+use crate::fit;
 use crate::nvdec_vp9::{FrameHeader, KEY_FRAME, Vp9State, split_superframe, tile_sizes};
 use nv_rm_core::conv::u64_from_usize;
 use nv_rm_core::push::method;
@@ -137,17 +138,19 @@ impl Vp9Decoder {
     fn pic(&mut self, h: &FrameHeader, ctx: &BuildContext, stream_len: usize) -> VResult<Vp9PicS> {
         // Stride in samples: stock writes the surface pitch >> 1 for its 16-bit surface format
         // (build_pic_13f400 `shift = surface_format_1dc == 8`; vp9p2 trace: 640 for a 1280-byte pitch).
-        let pitch = (ctx.layout.pitch / ctx.layout.bytes_per_sample) as u16;
-        let dims = |w: u32, hh: u32| Vp9Dims {
-            width: w as u16,
-            height: hh as u16,
-            // Stride = the real surface pitch (FFmpeg audit item 4).
-            stride: [pitch; 2],
+        let pitch: u16 = fit(ctx.layout.pitch / ctx.layout.bytes_per_sample, "stride")?;
+        let dims = |w: u32, hh: u32| -> VResult<Vp9Dims> {
+            Ok(Vp9Dims {
+                width: fit(w, "frame_width")?,
+                height: fit(hh, "frame_height")?,
+                // Stride = the real surface pitch (FFmpeg audit item 4).
+                stride: [pitch; 2],
+            })
         };
         let key = h.frame_type == KEY_FRAME;
         let mbs = |v: u32| v.div_ceil(16);
         let mut p = Vp9PicS {
-            stream_len: stream_len as u32,
+            stream_len: fit(stream_len, "stream_len")?,
             // gptimer: no cap read from the engine caps here (stock +0x65f8 is
             // the class's max, larger than any 8K value) -> uncapped formula.
             gptimer_timeout_value: stock_gptimer(mbs(h.width), mbs(h.height)),
@@ -163,13 +166,13 @@ impl Vp9Decoder {
         // (gens.rs DECODE_GATES 0x3f977; Ada vp9p2 trace: +0x43 = 0).
         p.v1_bits = self.bit_depth << 1;
         if self.r#gen.blackwell_b() {
-            p.reserved1[2] = super::surface_format_code(self.bit_depth) as u8;
+            p.reserved1[2] = fit(super::surface_format_code(self.bit_depth), "surface_format")?;
         }
         if !key {
             // Stock fills ref dims for every non-key frame, intra-only included.
             for i in 0..3 {
                 let (w, hh) = self.st.slot_size(h.ref_frame_idx[i]);
-                p.refs[i] = dims(w, hh);
+                p.refs[i] = dims(w, hh)?;
             }
         }
         if !h.is_intra() {
@@ -187,7 +190,7 @@ impl Vp9Decoder {
                 }
             }
         }
-        p.current = dims(h.width, h.height);
+        p.current = dims(h.width, h.height)?;
         let res_change = !key && self.last_decoded.is_some_and(|s| s != (h.width, h.height));
         p.flags = u8::from(key)
             | u8::from(self.prev_key) << 1
@@ -219,8 +222,8 @@ impl Vp9Decoder {
         p.allow_high_precision_mv = i8::from(h.allow_high_precision_mv);
         p.mcomp_filter_type = engine_interp_filter(h);
         p.comp_pred_mode = h.reference_mode.cast_signed();
-        p.log2_tile_columns = h.log2_tile_cols as i8;
-        p.log2_tile_rows = h.log2_tile_rows as i8;
+        p.log2_tile_columns = fit(h.log2_tile_cols, "log2_tile_cols")?;
+        p.log2_tile_rows = fit(h.log2_tile_rows, "log2_tile_rows")?;
         let seg = &self.st.seg;
         p.segment_enabled = u8::from(seg.enabled);
         // FFmpeg vp9.c:733-738: update/temporal cleared when segmentation off.
@@ -239,7 +242,10 @@ impl Vp9Decoder {
         // Stock +0xeb: plane GOB kinds `luma | chroma << 2` (stock `plane_bits_90`): 9 for 8-bit,
         // 2 for 10-bit (vp9p0 / vp9p2 traces), see `super::plane_kind_bits`; blackwell_b only.
         if self.r#gen.blackwell_b() {
-            p.reserved5 = super::plane_kind_bits(ctx.layout.bytes_per_sample) as i8;
+            p.reserved5 = fit(
+                super::plane_kind_bits(ctx.layout.bytes_per_sample),
+                "plane_kind_bits",
+            )?;
         }
         Ok(p)
     }
@@ -451,8 +457,16 @@ impl CodecDecoder for Vp9Decoder {
             } else {
                 self.st.slot_surface(h.ref_frame_idx[i]).unwrap_or(cur)
             };
-            r(&mut w, 0x430 + 4 * i as u32, s(si).luma);
-            r(&mut w, 0x474 + 4 * i as u32, s(si).chroma);
+            r(
+                &mut w,
+                0x430 + 4 * fit::<u32, _>(i, "reference slot")?,
+                s(si).luma,
+            );
+            r(
+                &mut w,
+                0x474 + 4 * fit::<u32, _>(i, "reference slot")?,
+                s(si).chroma,
+            );
         }
         r(&mut w, 0x424, da + u64_from_usize(STATUS));
         method(&mut w, 4, 0x40c, &[ctx.picture_index]); // PICTURE_INDEX

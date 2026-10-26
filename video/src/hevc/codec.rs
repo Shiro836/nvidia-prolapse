@@ -13,6 +13,7 @@
 //! `h64² + w64·h64/16`. All sized from the session maximum.
 use super::Decoder;
 use super::desc::{FilterOffsets, SETUP_SIZE, SessionInputs};
+use crate::fit;
 use crate::{
     Allocator, BuildContext, CODEC_HEVC, CodecDecoder, DecodeJob, Job, NvdecGen, PictureInfo,
     SurfaceLayout, VResult, VideoError, bits,
@@ -46,10 +47,13 @@ pub struct HevcDecoder {
 fn filter_layout(max_height: u32) -> (FilterOffsets, u64, u64, u64) {
     let h64 = u64::from(max_height.next_multiple_of(64));
     let step = |prev: u32, bytes_per_row: u64| ((u64::from(prev) << 8) + bytes_per_row * h64) >> 8;
-    let sao = step(0, 608) as u32;
-    let bsd = step(sao, 4864) as u32;
-    let flt = step(bsd, 152) as u32;
-    let sao_above = step(flt, 2000) as u32;
+    // Offsets in 256-byte units: for heights up to u32::MAX rounded to 64, the sum of the four
+    // per-row sizes (7624 B) times the rows stays far below 2^40, so each fits u32 after >> 8.
+    let unit = |v: u64| u32::try_from(v).expect("filter offsets in 256-byte units fit u32");
+    let sao = unit(step(0, 608));
+    let bsd = unit(step(sao, 4864));
+    let flt = unit(step(bsd, 152));
+    let sao_above = unit(step(flt, 2000));
     let intra_top = h64 * (608 + 4864 + 152 + 2000);
     let off_4dc = intra_top.next_multiple_of(0x10000) + (64 << 10);
     let size = (off_4dc + (2 << 20)).next_multiple_of(2 << 20);
@@ -143,9 +147,12 @@ impl CodecDecoder for HevcDecoder {
             u64::from(max_width.next_multiple_of(64)),
             u64::from(max_height.next_multiple_of(64)),
         );
-        self.colmv = alloc.vram((h64 * h64 + w64 * h64 / 16).next_multiple_of(2 << 20) as usize)?;
+        self.colmv = alloc.vram(fit(
+            (h64 * h64 + w64 * h64 / 16).next_multiple_of(2 << 20),
+            "colMV size",
+        )?)?;
         let (_, intra, off_4dc, size) = filter_layout(max_height);
-        self.filter = alloc.vram(size as usize)?;
+        self.filter = alloc.vram(fit(size, "filter size")?)?;
         self.intra_top = self.filter + intra;
         self.buf_4dc = self.filter + off_4dc;
         Ok(())
@@ -240,8 +247,16 @@ impl CodecDecoder for HevcDecoder {
         reloc(&mut w, 0x404, da);
         reloc(&mut w, 0x408, ctx.bitstream);
         for (i, s) in slot_surface.iter().enumerate().take(16) {
-            reloc(&mut w, 0x430 + 4 * i as u32, s.luma);
-            reloc(&mut w, 0x474 + 4 * i as u32, s.chroma);
+            reloc(
+                &mut w,
+                0x430 + 4 * fit::<u32, _>(i, "reference slot")?,
+                s.luma,
+            );
+            reloc(
+                &mut w,
+                0x474 + 4 * fit::<u32, _>(i, "reference slot")?,
+                s.chroma,
+            );
         }
         reloc(&mut w, 0x414, self.colmv);
         reloc(&mut w, 0x424, da + STATUS);

@@ -8,6 +8,7 @@
 mod gaussian;
 use super::header::{FilmGrainParams, SequenceHeader};
 use gaussian::GAUSSIAN_SEQUENCE;
+use nv_rm_core::conv::low_u8;
 
 pub const FILM_GRAIN_MEMORY_SIZE: usize = 3 * 256 + 2 * (4096 + 2 * 1024);
 
@@ -32,7 +33,7 @@ fn scaling_lut(num: u8, value: &[u8], scaling: &[u8], lut: &mut [u8]) {
         lut[..256].fill(0);
         return;
     }
-    lut[..value[0] as usize].fill(scaling[0]);
+    lut[..usize::from(value[0])].fill(scaling[0]);
     for i in 0..n - 1 {
         let dy = i32::from(scaling[i + 1]) - i32::from(scaling[i]);
         let dx = i32::from(value[i + 1]) - i32::from(value[i]);
@@ -42,12 +43,20 @@ fn scaling_lut(num: u8, value: &[u8], scaling: &[u8], lut: &mut [u8]) {
             continue;
         }
         let delta = dy * ((65536 + (dx >> 1)) / dx);
-        for x in 0..dx {
-            lut[usize::from(value[i]) + x as usize] =
-                (i32::from(scaling[i]) + ((x * delta + 32768) >> 16)) as u8;
+        for (k, x) in (0..dx).enumerate() {
+            // The interpolated scale is stored into a u8 LUT entry, keeping its low 8 bits as the
+            // reference decoders' uint8_t LUTs do (dav1d src/filmgrain_tmpl.c generate_scaling).
+            lut[usize::from(value[i]) + k] =
+                low_u8((i32::from(scaling[i]) + ((x * delta + 32768) >> 16)).cast_unsigned());
         }
     }
     lut[usize::from(value[n - 1])..256].fill(scaling[n - 1]);
+}
+
+/// A grain template sample as the engine's 16-bit entry: every sample is a rounded Gaussian
+/// value (|v| < 2^11) or was clamped to GrainMin..=GrainMax (at most 2^11 in magnitude for 12-bit).
+fn grain_i16(v: i32) -> i16 {
+    i16::try_from(v).expect("grain samples are within -2^11..2^11")
 }
 
 /// Fill `out` (`FILM_GRAIN_MEMORY_SIZE` bytes) for one picture.
@@ -100,7 +109,10 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
         }
     }
     let ar_shift = u32::from(g.ar_coeff_shift_minus_6) + 6;
-    let lag = i32::from(g.ar_coeff_lag);
+    let lag = isize::from(g.ar_coeff_lag);
+    // The templates keep a 3-sample border and ar_coeff_lag <= 3, so y + dr and x + dc never go
+    // below 0 (spec 7.18.3.3).
+    let at = |v: usize, d: isize| v.checked_add_signed(d).expect("border 3 >= ar_coeff_lag");
     for y in 3..73 {
         for x in 3..82 - 3 {
             let (mut sum, mut pos) = (0i32, 0usize);
@@ -110,12 +122,11 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
                         break 'o;
                     }
                     let c = i32::from(g.ar_coeffs_y_plus_128[pos]) - 128;
-                    sum += luma[(y + dr) as usize][(x + dc) as usize] * c;
+                    sum += luma[at(y, dr)][at(x, dc)] * c;
                     pos += 1;
                 }
             }
-            let (yy, xx) = (y as usize, x as usize);
-            luma[yy][xx] = (luma[yy][xx] + round2(sum, ar_shift)).clamp(gmin, gmax);
+            luma[y][x] = (luma[y][x] + round2(sum, ar_shift)).clamp(gmin, gmax);
         }
     }
     let (cw, ch) = (if sx == 1 { 44 } else { 82 }, if sy == 1 { 38 } else { 73 });
@@ -138,8 +149,8 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
             }
         }
     }
-    for y in 3..ch as i32 {
-        for x in 3..cw as i32 - 3 {
+    for y in 3..ch {
+        for x in 3..cw - 3 {
             let (mut s0, mut s1, mut pos) = (0i32, 0i32, 0usize);
             'o: for dr in -lag..=0 {
                 for dc in -lag..=lag {
@@ -148,25 +159,28 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
                     if dr == 0 && dc == 0 {
                         if g.num_y_points > 0 {
                             let mut l = 0;
-                            let lx = (((x - 3) as usize) << sx) + 3;
-                            let ly = (((y - 3) as usize) << sy) + 3;
+                            let lx = ((x - 3) << sx) + 3;
+                            let ly = ((y - 3) << sy) + 3;
                             for i in 0..=sy {
                                 for j in 0..=sx {
                                     l += luma[ly + i][lx + j];
                                 }
                             }
-                            let l = round2(l, (sx + sy) as u32);
+                            let l = round2(
+                                l,
+                                u32::try_from(sx + sy).expect("subsampling shifts are 0 or 1"),
+                            );
                             s0 += l * c0;
                             s1 += l * c1;
                         }
                         break 'o;
                     }
-                    s0 += c0 * cb[(y + dr) as usize][(x + dc) as usize];
-                    s1 += c1 * cr[(y + dr) as usize][(x + dc) as usize];
+                    s0 += c0 * cb[at(y, dr)][at(x, dc)];
+                    s1 += c1 * cr[at(y, dr)][at(x, dc)];
                     pos += 1;
                 }
             }
-            let (yy, xx) = (y as usize, x as usize);
+            let (yy, xx) = (y, x);
             if g.num_cb_points > 0 || g.chroma_scaling_from_luma {
                 cb[yy][xx] = (cb[yy][xx] + round2(s0, ar_shift)).clamp(gmin, gmax);
             }
@@ -179,14 +193,14 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
     let mut o = 768;
     for row in luma.iter().skip(9).take(64) {
         for v in &row[9..73] {
-            out[o..o + 2].copy_from_slice(&(*v as i16).to_le_bytes());
+            out[o..o + 2].copy_from_slice(&grain_i16(*v).to_le_bytes());
             o += 2;
         }
     }
     for p in [&cb, &cr] {
         for row in p.iter().skip(6).take(32) {
             for v in &row[6..38] {
-                out[o..o + 2].copy_from_slice(&(*v as i16).to_le_bytes());
+                out[o..o + 2].copy_from_slice(&grain_i16(*v).to_le_bytes());
                 o += 2;
             }
         }

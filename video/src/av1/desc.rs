@@ -5,6 +5,7 @@
 //! Field positions come from NVIDIA's MIT `nvdec_drv.h` (`nvdec_av1_pic_s`), computed with a C compiler
 //! (bit offset, width). Values follow the AV1 spec semantics; where the value convention is NVDEC-specific
 //! (constants, packing, enum remaps) it was matched against stock descriptors captured on an RTX 5090.
+use crate::fit;
 use nv_rm_core::conv::usize_from_u32;
 
 use super::header::{FrameHeader, GM_IDENTITY, SequenceHeader, TileRange, get_relative_dist};
@@ -177,8 +178,8 @@ const fn align(v: u64, a: u64) -> u64 {
     v.div_ceil(a) * a
 }
 
-pub const fn filter_layout(w: u32, h: u32) -> FilterLayout {
-    let (w, h) = (w as u64, h as u64);
+pub fn filter_layout(w: u32, h: u32) -> FilterLayout {
+    let (w, h) = (u64::from(w), u64::from(h));
     let sbw = align(w, 64) / 64 + 2;
     let sbh = align(h, 64) / 64 + 2;
     let flt_vert = align(sbw * align(1920, 128), 256);
@@ -566,7 +567,11 @@ fn put_frame_info(p: &mut [u8], base: usize, w: u32, h: u32, stride: u64) {
 }
 
 /// `AV1TileInfo_OLD` entries: width/height in superblocks, then [start, end) of the tile data.
-pub fn build_tile_info(h: &FrameHeader, tiles: &[TileRange], out: &mut [u8]) {
+pub fn build_tile_info(
+    h: &FrameHeader,
+    tiles: &[TileRange],
+    out: &mut [u8],
+) -> Result<(), crate::OutOfRange> {
     let t = &h.tile;
     for (n, tr) in tiles.iter().enumerate().take(MAX_TILES) {
         let (row, col) = (
@@ -575,11 +580,20 @@ pub fn build_tile_info(h: &FrameHeader, tiles: &[TileRange], out: &mut [u8]) {
         );
         let e = &mut out[n * TILE_INFO_ENTRY..(n + 1) * TILE_INFO_ENTRY];
         e.fill(0);
-        e[0] = (t.col_start_sb[col + 1] - t.col_start_sb[col]) as u8;
-        e[1] = (t.row_start_sb[row + 1] - t.row_start_sb[row]) as u8;
+        // Tile sizes in superblocks: at most MaxTileWidthSb (64) wide (5.9.15) and, within the
+        // session's 8192-pixel limit, at most 128 SB64 high.
+        e[0] = fit(
+            t.col_start_sb[col + 1] - t.col_start_sb[col],
+            "tile width (SB)",
+        )?;
+        e[1] = fit(
+            t.row_start_sb[row + 1] - t.row_start_sb[row],
+            "tile height (SB)",
+        )?;
         e[2..6].copy_from_slice(&tr.start.to_le_bytes());
         e[6..10].copy_from_slice(&tr.end.to_le_bytes());
     }
+    Ok(())
 }
 
 /// Global motion: 7 x 32 bytes, wmmat[6] as int32 followed by the four int16 shear parameters (spec
@@ -646,7 +660,9 @@ pub fn setup_shear(m: &[i32; 6]) -> Option<[i16; 4]> {
     if 4 * a.abs() + 7 * b.abs() >= (1 << 16) || 4 * g.abs() + 4 * d.abs() >= (1 << 16) {
         return None;
     }
-    Some([a as i16, b as i16, g as i16, d as i16])
+    // The validity test above bounds |a|, |g|, |d| below 2^14 and |b| below 2^16 / 7.
+    let narrow = |x: i64| i16::try_from(x).expect("valid shear parameters fit i16");
+    Some([narrow(a), narrow(b), narrow(g), narrow(d)])
 }
 
 /// Value of the word at `PIC_EXT_244` (rounding for an odd superblock count UNVERIFIED: no capture).

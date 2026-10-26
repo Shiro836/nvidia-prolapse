@@ -94,7 +94,8 @@ fn dump_jobs() {
         for tu in obu::ivf_frames(&data).unwrap() {
             for job in codec.decode_temporal_unit(tu).unwrap() {
                 let mut block = vec![0u8; desc::DESC_BLOCK_SIZE];
-                job.build_descriptor(job.hdr.upscaled_width, true, &mut block);
+                job.build_descriptor(job.hdr.upscaled_width, true, &mut block)
+                    .unwrap();
                 std::fs::write(format!("{out}/{name}_{n:03}.bin"), &block).unwrap();
                 std::fs::write(format!("{out}/{name}_{n:03}.bits"), &job.bitstream).unwrap();
                 summary += &format!(

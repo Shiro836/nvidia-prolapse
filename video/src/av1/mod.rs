@@ -391,7 +391,12 @@ impl PictureJob {
     /// Build the descriptor block (pic_s, tile info, global motion, film grain) into `block`
     /// (`desc::DESC_BLOCK_SIZE` bytes). `pitch` = luma pitch of the decode surface in bytes;
     /// `blackwell_b` = the class gate of the stat word and the +0x244 word (`desc::PicInputs`).
-    pub fn build_descriptor(&self, pitch: u32, blackwell_b: bool, block: &mut [u8]) {
+    pub fn build_descriptor(
+        &self,
+        pitch: u32,
+        blackwell_b: bool,
+        block: &mut [u8],
+    ) -> std::result::Result<(), crate::OutOfRange> {
         let mut refs = [desc::RefGeom::default(); 7];
         for (g, rec) in refs.iter_mut().zip(&self.ref_recs) {
             if let Some(r) = rec {
@@ -423,7 +428,7 @@ impl PictureJob {
             &self.hdr,
             &self.tiles,
             &mut block[desc::DESC_TILE_INFO..desc::DESC_GLOBAL_MOTION],
-        );
+        )?;
         desc::build_global_motion(
             &self.hdr,
             &mut block[desc::DESC_GLOBAL_MOTION..desc::DESC_FILM_GRAIN],
@@ -435,5 +440,6 @@ impl PictureJob {
                 &mut block[desc::DESC_FILM_GRAIN..desc::DESC_STATUS],
             );
         }
+        Ok(())
     }
 }
