@@ -5,7 +5,8 @@
 //! fields cross the boundary. Missing evidence and unsupported fields fail before
 //! an ioctl. This is ABI translation, not a hardware-support declaration.
 use crate::rm::{Error, Result};
-use std::{ffi::c_void, mem::size_of, ptr};
+use std::{ffi::c_void, mem::size_of};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Field {
@@ -367,9 +368,10 @@ impl Compat {
         self.layout(name)?;
         Ok(Some(name))
     }
-    /// Private callers supply one of the initialized integer-only logical wire
-    /// types matched by name; a size mismatch is rejected before touching bytes.
-    pub(crate) fn pack<T>(&self, name: &str, value: &T) -> Result<Wire> {
+    /// Callers supply the logical wire type of `name` (an integer-only
+    /// #[repr(C)] struct, checked by the zerocopy bounds); a size mismatch is
+    /// rejected before touching bytes.
+    pub(crate) fn pack<T: IntoBytes + Immutable>(&self, name: &str, value: &T) -> Result<Wire> {
         let logical = data::CANONICAL
             .layout(name)
             .ok_or_else(|| self.unsupported(name, "no canonical schema"))?;
@@ -386,15 +388,10 @@ impl Compat {
             bytes: vec![0; target.size],
         };
         for field in logical.fields {
-            // Read named fields only: do not read Rust's possibly uninitialized padding.
-            // SAFETY: field.offset + field.len <= logical.size == size_of::<T>()
-            // (generated schema, size checked above), inside `*value`.
-            let start = unsafe { (value as *const T).cast::<u8>().add(field.offset) };
-            // SAFETY: in bounds as above; the bytes are a named field of the
-            // wire struct T (never padding), hence initialised. Relies on T
-            // being the schema's type: every caller passes the nv-rm-sys
-            // struct generated for `name`.
-            let input = unsafe { std::slice::from_raw_parts(start, field.len) };
+            // Named fields only (T may carry explicit padding words the
+            // schema does not name). Offsets are within size_of::<T>() by the
+            // generated schema and the size check above.
+            let input = &value.as_bytes()[field.offset..field.offset + field.len];
             if let Some(output) = target.field(field.name) {
                 let n = input.len().min(output.len);
                 wire.bytes[output.offset..output.offset + n].copy_from_slice(&input[..n]);
@@ -430,7 +427,7 @@ impl Wire {
     pub(crate) fn address(&mut self) -> u64 {
         self.bytes.as_mut_ptr() as usize as u64
     }
-    pub(crate) fn unpack<T>(&self, value: &mut T) -> Result<()> {
+    pub(crate) fn unpack<T: FromBytes + IntoBytes>(&self, value: &mut T) -> Result<()> {
         if size_of::<T>() != self.logical.size {
             return Err(Error::Contract(format!(
                 "{}: changed logical size during decode",
@@ -440,39 +437,19 @@ impl Wire {
         for output in self.logical.fields {
             if let Some(input) = self.target.field(output.name) {
                 let n = input.len.min(output.len);
-                // SAFETY: input.offset + n <= target size == bytes.len()
-                // (generated schema).
-                let source = unsafe { self.bytes.as_ptr().add(input.offset) };
-                // SAFETY: output.offset + n <= logical.size == size_of::<T>()
-                // (checked above), inside `*value`.
-                let target = unsafe { (value as *mut T).cast::<u8>().add(output.offset) };
-                // SAFETY: both ranges valid for n bytes and disjoint (owned
-                // Vec vs `*value`); T is an integer-only wire struct (private
-                // callers), so any bytes are a valid field value.
-                unsafe { ptr::copy_nonoverlapping(source, target, n) };
+                value.as_mut_bytes()[output.offset..output.offset + n]
+                    .copy_from_slice(&self.bytes[input.offset..input.offset + n]);
                 // Older RM ASCII names may be 128 bytes; the logical output is
                 // an explicitly truncated 64-byte C string, always terminated.
                 if self.logical.name == "NV2080_CTRL_GPU_GET_NAME_STRING_PARAMS"
                     && output.name == "gpuNameString"
                 {
-                    // SAFETY: the last byte of the named output field, inside
-                    // `*value` (size checked above).
-                    let last = unsafe {
-                        (value as *mut T)
-                            .cast::<u8>()
-                            .add(output.offset + output.len - 1)
-                    };
-                    // SAFETY: in bounds as above; a byte of a char array.
-                    unsafe { last.write(0) };
+                    value.as_mut_bytes()[output.offset + output.len - 1] = 0;
                 }
             } else if self.logical.name == "NV2080_CTRL_FB_GET_STATIC_BAR1_INFO_PARAMS" {
                 // These outputs did not exist in older public contracts. Never
                 // preserve a caller's previous value as an old driver answer.
-                // SAFETY: the named output field, inside `*value` (size
-                // checked above).
-                let field = unsafe { (value as *mut T).cast::<u8>().add(output.offset) };
-                // SAFETY: in bounds as above; zero is a valid integer value.
-                unsafe { ptr::write_bytes(field, 0, output.len) };
+                value.as_mut_bytes()[output.offset..output.offset + output.len].fill(0);
             }
         }
         Ok(())

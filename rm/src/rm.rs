@@ -14,6 +14,7 @@ use std::{
     ptr::NonNull,
     rc::{Rc, Weak},
 };
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 pub use nv_rm_core::error::{Error, Result};
 pub(crate) fn status(operation: &'static str, value: u32) -> Result<()> {
@@ -33,18 +34,20 @@ fn open(path: &str) -> Result<File> {
         .open(path)
         .map_err(|e| Error::Io("open NVIDIA device", e))
 }
-// Kept private: callers must use the exact initialized POD wire type and keep
-// all embedded pointer targets live for this synchronous ioctl.
-pub(crate) fn exchange<T>(
+// Callers pass the exact wire type of the request (integer-only, checked by
+// the zerocopy bounds) and keep embedded pointer targets live for this
+// synchronous ioctl.
+pub(crate) fn exchange<T: FromBytes + IntoBytes + Immutable>(
     fd: RawFd,
     number: u8,
     value: &mut T,
     operation: &'static str,
 ) -> Result<()> {
     let request = abi::iowr(number, size_of::<T>());
-    // SAFETY: private call sites pair each ioctl with its verified C-compatible
-    // writable buffer; kernel copies at most the encoded size. Embedded targets
-    // are borrowed until this synchronous call returns.
+    // SAFETY: `value` is a live, exclusively borrowed buffer of exactly the
+    // size the request encodes, and any bytes the kernel writes are a valid T
+    // (FromBytes). Embedded pointer targets (as u64 fields) are kept alive by
+    // the caller for this synchronous call.
     let result = unsafe { platform::ioctl(fd, request, (value as *mut T).cast()) };
     if result < 0 {
         Err(Error::Io(operation, io::Error::last_os_error()))
@@ -53,7 +56,7 @@ pub(crate) fn exchange<T>(
     }
 }
 
-fn exchange_wire<T>(
+fn exchange_wire<T: FromBytes + IntoBytes + Immutable>(
     fd: RawFd,
     number: u8,
     compat: Compat,
@@ -179,7 +182,12 @@ impl Client {
                 .map(drop)
         })
     }
-    pub(crate) fn control<T>(&self, object: u32, command: u32, parameters: &mut T) -> Result<()> {
+    pub(crate) fn control<T: FromBytes + IntoBytes + Immutable>(
+        &self,
+        object: u32,
+        command: u32,
+        parameters: &mut T,
+    ) -> Result<()> {
         self.port().control(object, command, parameters)
     }
     /// Plain-data handle for public RM controls from threads that never touch
@@ -192,7 +200,12 @@ impl Client {
             compat: self.compat,
         }
     }
-    pub(crate) fn allocate<T>(&self, parent: u32, class: u32, parameters: &mut T) -> Result<u32> {
+    pub(crate) fn allocate<T: FromBytes + IntoBytes + Immutable>(
+        &self,
+        parent: u32,
+        class: u32,
+        parameters: &mut T,
+    ) -> Result<u32> {
         let name = self.compat.allocation_layout(class, size_of::<T>())?;
         let mut parameters_wire = name
             .map(|name| self.compat.pack(name, parameters))
@@ -366,7 +379,12 @@ pub(crate) struct ControlPort {
     compat: Compat,
 }
 impl ControlPort {
-    pub(crate) fn control<T>(&self, object: u32, command: u32, parameters: &mut T) -> Result<()> {
+    pub(crate) fn control<T: FromBytes + IntoBytes + Immutable>(
+        &self,
+        object: u32,
+        command: u32,
+        parameters: &mut T,
+    ) -> Result<()> {
         let name = self.compat.control_layout(command)?;
         let mut parameters_wire = self.compat.pack(name, parameters)?;
         let mut call = abi::Control {

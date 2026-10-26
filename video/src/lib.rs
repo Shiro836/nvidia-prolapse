@@ -574,13 +574,8 @@ pub fn class_gap(codec: u32, class: u32) -> Option<&'static str> {
     )
 }
 
-/// NV0080_CTRL_CMD_BSP_GET_CAPS_V2 (0x801c02, device object) parameters: one NVDEC instance's capsTbl.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct BspCapsV2 {
-    pub caps_tbl: [u8; 8],
-    pub instance_id: u32,
-}
+/// NV0080_CTRL_CMD_BSP_GET_CAPS_V2 parameters (a raw RM wire struct, defined in nv-rm-sys).
+pub use nv_rm_sys::abi::BspCapsV2;
 
 /// What stock does with one NVDEC engine's BSP capsTbl (ELF 0x4fd02; read by the per-engine predicates 0x2c360 / 0x2c470). The bits are reported by GSP per engine at
 /// runtime, they are not a property of the NVDEC class; the class only decides whether capsTbl[3] counts

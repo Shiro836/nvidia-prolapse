@@ -21,9 +21,10 @@ use std::{
     os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
     rc::Rc,
 };
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, Immutable)]
 struct RmObject {
     kind: u32,
     device: u32,
@@ -31,18 +32,20 @@ struct RmObject {
     object: u32,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct ExportObject {
     object: RmObject,
     fd: i32,
     flags: u32,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct ImportObject {
     fd: i32,
     object: RmObject,
 }
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, Immutable)]
 struct Surface {
     layout: u32,
     log2_gobs_x: u32,
@@ -53,11 +56,13 @@ struct Surface {
     padding: [u8; 3],
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct ImportMemory {
     fd: i32,
     surface: Surface,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct ImportGem {
     size: u64,
     parameters: u64,
@@ -66,6 +71,7 @@ struct ImportGem {
     padding: u32,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct ExportGem {
     handle: u32,
     padding: u32,
@@ -73,17 +79,20 @@ struct ExportGem {
     parameters_size: u64,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct Prime {
     handle: u32,
     flags: u32,
     fd: i32,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct Identify {
     handle: u32,
     kind: u32,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct CloseGem {
     handle: u32,
     padding: u32,
@@ -93,9 +102,15 @@ fn request(number: u8, size: usize, direction: u32) -> u32 {
     assert!(size < 16384);
     (direction << 30) | ((size as u32) << 16) | (u32::from(b'd') << 8) | u32::from(number)
 }
-fn drm_ioctl<T>(fd: BorrowedFd<'_>, number: u8, direction: u32, value: &mut T) -> Result<()> {
-    // SAFETY: private calls use initialized repr(C) wire objects and the exact
-    // public ioctl encoded size; nested pointer targets live until return.
+fn drm_ioctl<T: FromBytes + IntoBytes + Immutable>(
+    fd: BorrowedFd<'_>,
+    number: u8,
+    direction: u32,
+    value: &mut T,
+) -> Result<()> {
+    // SAFETY: `value` is a live, exclusively borrowed buffer of exactly the
+    // encoded size; any bytes the kernel writes are a valid T (FromBytes).
+    // Nested pointer targets live until this synchronous call returns.
     let result = unsafe {
         platform::ioctl(
             fd.as_raw_fd(),

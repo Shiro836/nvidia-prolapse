@@ -18,9 +18,10 @@ use std::{
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 #[repr(C, align(8))]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, Immutable)]
 struct Layout {
     max_submitted: u64,
     monitored: u64,
@@ -29,24 +30,28 @@ struct Layout {
     padding: u32,
 }
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct Allocate {
     memory: u32,
     max_submitted_memory: u32,
     flags: u64,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct Bind {
     channel: u32,
     count: u32,
     indices: [u32; 8],
 }
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct Import {
     client: u32,
     surface: u32,
     size: u64,
 }
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct ContextCreate {
     index: u64,
     parameters: u64,
@@ -55,6 +60,7 @@ struct ContextCreate {
     padding: u32,
 }
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct FenceCreate {
     context: u32,
     timeout_ms: u32,
@@ -64,6 +70,7 @@ struct FenceCreate {
 }
 #[cfg(test)]
 #[repr(C, align(8))]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct FenceWait {
     context: u32,
     fd: i32,
@@ -71,12 +78,13 @@ struct FenceWait {
     post: u64,
 }
 #[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
 struct GemClose {
     handle: u32,
     padding: u32,
 }
 #[repr(C, align(8))]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, Immutable)]
 struct SyncFileInfo {
     name: [u8; 32],
     status: i32,
@@ -98,7 +106,7 @@ struct SyncFenceInfo {
 const fn request(group: u8, number: u8, bytes: usize, direction: u32) -> u32 {
     (direction << 30) | ((bytes as u32) << 16) | ((group as u32) << 8) | number as u32
 }
-fn call<T>(
+fn call<T: FromBytes + IntoBytes + Immutable>(
     fd: RawFd,
     group: u8,
     number: u8,
@@ -106,8 +114,10 @@ fn call<T>(
     value: &mut T,
     operation: &'static str,
 ) -> Result<()> {
-    // SAFETY: all private callers supply exact initialized public wire structs.
-    // Nested pointers remain borrowed until this synchronous ioctl returns.
+    // SAFETY: `value` is a live, exclusively borrowed buffer of exactly the
+    // encoded size; any bytes the kernel writes are a valid T (FromBytes).
+    // Nested pointers (u64 fields) stay borrowed until this synchronous ioctl
+    // returns.
     let ret = unsafe {
         crate::platform::ioctl(
             fd,
@@ -964,6 +974,7 @@ mod tests {
     }
     fn set_value(surface: &NativeFenceSurface, value: u64) {
         #[repr(C, align(8))]
+        #[derive(FromBytes, IntoBytes, Immutable)]
         struct Set {
             index: u64,
             value: u64,

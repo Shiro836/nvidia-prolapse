@@ -7,8 +7,10 @@
 //! tools/abi-check.c independently verifies these against NVIDIA's C headers.
 #![allow(dead_code)]
 
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Alloc {
     pub root: u32,
     pub parent: u32,
@@ -19,7 +21,7 @@ pub struct Alloc {
     pub status: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Control {
     pub client: u32,
     pub object: u32,
@@ -30,7 +32,7 @@ pub struct Control {
     pub status: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Free {
     pub root: u32,
     pub parent: u32,
@@ -39,7 +41,7 @@ pub struct Free {
 }
 /// Public nv_ioctl_{alloc,free}_os_event_t (same wire fields).
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct OsEvent {
     pub client: u32,
     pub device: u32,
@@ -48,7 +50,7 @@ pub struct OsEvent {
 }
 /// NV0005_ALLOC_PARAMETERS; data is a numeric OS-event FD, never a pointer.
 #[repr(C, align(8))]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct EventAlloc {
     pub parent_client: u32,
     pub source: u32,
@@ -57,7 +59,7 @@ pub struct EventAlloc {
     pub data: u64,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct EventNotification {
     pub event: u32,
     pub action: u32,
@@ -68,19 +70,19 @@ pub struct EventNotification {
     pub padding1: [u8; 2],
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct EventTrigger {
     pub event: u32,
 }
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Version {
     pub command: u32,
     pub reply: u32,
     pub version: [u8; 64],
 }
 #[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Pci {
     pub domain: u32,
     pub bus: u8,
@@ -91,7 +93,7 @@ pub struct Pci {
     pub device: u16,
 }
 #[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Card {
     pub valid: u8,
     pub padding0: [u8; 3],
@@ -108,7 +110,7 @@ pub struct Card {
     pub padding2: [u8; 2],
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct GpuInfo {
     pub gpu_id: u32,
     pub flags: u32,
@@ -120,7 +122,7 @@ pub struct GpuInfo {
     pub numa_id: i32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct DeviceAlloc {
     pub device_id: u32,
     pub client_share: u32,
@@ -135,14 +137,14 @@ pub struct DeviceAlloc {
     pub padding1: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct ClassList {
     pub count: u32,
     pub padding: u32,
     pub classes: u64,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct MemoryAlloc {
     pub owner: u32,
     pub memory_type: u32,
@@ -171,7 +173,7 @@ pub struct MemoryAlloc {
     pub padding1: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct MapMemory {
     pub client: u32,
     pub device: u32,
@@ -184,7 +186,7 @@ pub struct MapMemory {
     pub flags: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct MapWithFd {
     pub parameters: MapMemory,
     pub fd: i32,
@@ -192,7 +194,7 @@ pub struct MapWithFd {
 }
 
 #[repr(C, align(8))]
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct UnmapMemory {
     pub client: u32,
     pub device: u32,
@@ -203,19 +205,19 @@ pub struct UnmapMemory {
     pub flags: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct PerfBoost {
     pub flags: u32,
     pub duration: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct CopyEngine {
     pub version: u32,
     pub engine_type: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct EnginePartners {
     pub engine_type: u32,
     pub partnership_class: u32,
@@ -225,7 +227,7 @@ pub struct EnginePartners {
 }
 
 #[repr(C, align(8))]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct EngineClassList {
     pub engine_type: u32,
     pub count: u32,
@@ -238,7 +240,7 @@ pub const fn iowr(number: u8, size: usize) -> u32 {
 }
 
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct VaSpace {
     pub index: u32,
     pub flags: u32,
@@ -252,7 +254,7 @@ pub struct VaSpace {
     pub padding1: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct VirtualMemory {
     pub offset: u64,
     pub limit: u64,
@@ -260,7 +262,7 @@ pub struct VirtualMemory {
     pub padding: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct MapDma {
     pub client: u32,
     pub device: u32,
@@ -277,7 +279,7 @@ pub struct MapDma {
     pub padding1: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct UnmapDma {
     pub client: u32,
     pub device: u32,
@@ -291,7 +293,7 @@ pub struct UnmapDma {
     pub padding1: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct ChannelGroup {
     pub error: u32,
     pub ecc_error: u32,
@@ -304,21 +306,21 @@ pub struct ChannelGroup {
 }
 /// NV_BSP_ALLOCATION_PARAMETERS (= NV_NVDEC_ALLOCATION_PARAMETERS, nvos.h).
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct VideoDecoder {
     pub size: u32,
     pub prohibit_multiple_instances: u32,
     pub engine_instance: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct ContextShare {
     pub vaspace: u32,
     pub flags: u32,
     pub subcontext: u32,
 }
 #[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct MemoryDescriptor {
     pub base: u64,
     pub size: u64,
@@ -326,7 +328,7 @@ pub struct MemoryDescriptor {
     pub cache: u32,
 }
 #[repr(C)]
-#[derive(Default, Debug)]
+#[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct Channel {
     pub error: u32,
     pub buffer: u32,
@@ -361,7 +363,7 @@ pub struct Channel {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct GrInfo {
     pub count: u32,
     pub padding: u32,
@@ -373,7 +375,7 @@ pub struct GrInfo {
 
 /// Optional public query; an available ABI does not imply static BAR1 is enabled.
 #[repr(C, align(8))]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct StaticBar1Info {
     pub enabled: u8,
     pub write_combined: u8,
@@ -385,7 +387,7 @@ pub struct StaticBar1Info {
 /// NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_PARAMS (ctrl0080fifo.h);
 /// identical in all 225 public tags (tools/probe-zcull.py).
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct EngineContextProperties {
     pub engine: u32,
     pub alignment: u32,
@@ -397,7 +399,9 @@ pub struct EngineContextProperties {
 /// Same order as Mesa's nv_zcull_device_info / drm_nouveau_get_zcull_info
 /// (nv_device_info.h:17-30) without the trailing ctxsw size/alignment.
 #[repr(C)]
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Default, Clone, Copy, Debug, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
 pub struct ZcullInfo {
     pub width_align_pixels: u32,
     pub height_align_pixels: u32,
@@ -414,7 +418,7 @@ pub struct ZcullInfo {
 /// NV2080_CTRL_GR_CTXSW_ZCULL_BIND_PARAMS (ctrl2080gr.h); identical in all
 /// 225 public tags (tools/probe-zcull.py).
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct ZcullBind {
     pub client: u32,
     pub channel: u32,
@@ -522,4 +526,12 @@ pub fn layouts() -> Vec<(&'static str, usize)> {
             iowr(200, 64 * size_of::<Card>()) as usize,
         ),
     ]
+}
+
+/// NV0080_CTRL_CMD_BSP_GET_CAPS_V2 (0x801c02, device object) parameters: one NVDEC instance's capsTbl.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct BspCapsV2 {
+    pub caps_tbl: [u8; 8],
+    pub instance_id: u32,
 }

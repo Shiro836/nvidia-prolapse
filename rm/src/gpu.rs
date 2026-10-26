@@ -19,6 +19,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 pub(crate) struct Object {
     device: Rc<Device>,
@@ -27,7 +28,7 @@ pub(crate) struct Object {
     _dependencies: Vec<Rc<Object>>,
 }
 impl Object {
-    pub(crate) fn new<T>(
+    pub(crate) fn new<T: FromBytes + IntoBytes + Immutable>(
         device: &Rc<Device>,
         parent: u32,
         class: u32,
