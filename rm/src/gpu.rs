@@ -406,7 +406,13 @@ impl AddressSpace {
         address: Option<u64>,
         kind: u32,
     ) -> Result<GpuMapping> {
-        self.map_internal(memory, offset, length, address, Some(kind))
+        // A pool block maps without a kind; nvkmd's kind 0 means "none".
+        let kind = if memory.pages == crate::rm::PhysicalPages::Huge2M && kind == 0 {
+            None
+        } else {
+            Some(kind)
+        };
+        self.map_internal(memory, offset, length, address, kind)
     }
     fn map_internal(
         &self,

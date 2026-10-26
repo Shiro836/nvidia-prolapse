@@ -780,6 +780,22 @@ rm_mem_alloc_kind(struct nvkmd_dev* base,
       return vk_error(log, VK_ERROR_OUT_OF_HOST_MEMORY);
    uint32_t placement =
      (flags & NVKMD_MEM_GART) ? NV_RM_PLACEMENT_GART : NV_RM_PLACEMENT_VRAM;
+   /* A GPU-internal pool block (nvk_pool_mem.c): one 2 MiB contiguous huge
+    * page of device memory, never mapped or shared (NV_RM_PLACEMENT_VRAM_POOL_
+    * BLOCK in nv_rm.h), bound whole at a 2 MiB aligned VA. */
+   const bool pool_block = flags & NVKMD_MEM_POOL_BLOCK;
+   if (pool_block) {
+      if (size != NVKMD_POOL_BLOCK_SIZE || kind != 0 ||
+          (flags & (NVKMD_MEM_GART | NVKMD_MEM_CAN_MAP | NVKMD_MEM_SHARED))) {
+         free(mem);
+         return vk_errorf(log, VK_ERROR_UNKNOWN,
+                          "pool block: %" PRIu64 " bytes kind %u flags %#x (needs "
+                          "exactly 2 MiB, kind 0, VRAM, not mappable or shared)",
+                          size, kind, flags);
+      }
+      placement = NV_RM_PLACEMENT_VRAM_POOL_BLOCK;
+      alignment = NVKMD_POOL_BLOCK_SIZE;
+   }
    /* Device-local memory is allocated in whole 64 KiB big pages, as the stock
     * driver allocates device-local memory (BIG pages, seen in its RM alloc
     * requests) and as NVK did itself up to Mesa 25.2
