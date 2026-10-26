@@ -1564,6 +1564,8 @@ fn capture_read(
     let mut words = vec![0u8; size as usize];
     let read = buffer.cpu.acquire(
         || Err(Error::Contract("capture: mapping vanished".into())),
+        // Sound only after the GPU handoff: UNVERIFIED: capture copies pushbuffers NVK finished
+        // writing before nv_rm_submit; another app thread could still write a bind (capture mode only).
         |m: &Mapping| m.read_bytes(at, &mut words),
     );
     match read {

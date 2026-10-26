@@ -83,6 +83,21 @@ struct Functions {
     compile: Compile,
     free: Free,
 }
+/// A dlsym result as the function-pointer type its symbol is declared with:
+/// the one conversion std offers no cast for (RUST.md §2 forbids transmute
+/// everywhere else).
+///
+/// # Safety
+/// `address` is non-NULL and is the address of a function whose C signature
+/// is exactly `F`, an `unsafe extern "C" fn` pointer type.
+unsafe fn symbol<F: Copy>(address: *mut c_void) -> F {
+    const { assert!(std::mem::size_of::<F>() == std::mem::size_of::<*mut c_void>()) };
+    // SAFETY: F is a function-pointer type of pointer size (asserted above);
+    // data and function pointers share one representation on every target
+    // this crate builds for (platform.rs); the caller names the signature.
+    unsafe { std::mem::transmute_copy::<*mut c_void, F>(&address) }
+}
+
 static COMPILER: OnceLock<std::result::Result<Mutex<Functions>, String>> = OnceLock::new();
 
 fn functions() -> Result<&'static Mutex<Functions>> {
@@ -113,12 +128,15 @@ fn functions() -> Result<&'static Mutex<Functions>> {
             unsafe { dlclose(handle) };
             return Err("NAK compiler is missing bridge entrypoints".into());
         }
-        // SAFETY: nv_nak_compile is defined with exactly the Compile
-        // signature (nv_nak.h in this tree); data and function pointers have
-        // the same size and representation on every supported target.
-        let compile=unsafe { std::mem::transmute::<*mut c_void,Compile>(compile) };
-        // SAFETY: as above, for nv_nak_free and Free.
-        let free=unsafe { std::mem::transmute::<*mut c_void,Free>(free) };
+        // SAFETY: non-NULL (checked above); nv_nak_compile is declared
+        // `int nv_nak_compile(const uint32_t*, size_t, const char*, uint32_t,
+        // struct nv_nak_result*, char*, size_t)` (mesa/compiler/nv_nak.h:26),
+        // exactly the Compile type.
+        let compile=unsafe { symbol::<Compile>(compile) };
+        // SAFETY: non-NULL (checked above); nv_nak_free is declared
+        // `void nv_nak_free(struct nv_nak_result*)` (mesa/compiler/nv_nak.h:29),
+        // exactly the Free type.
+        let free=unsafe { symbol::<Free>(free) };
         Ok(Mutex::new(Functions{compile,free}))
     });
     loaded.as_ref().map_err(|e| Error::Contract(e.clone()))

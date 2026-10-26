@@ -28,6 +28,7 @@ use crate::{
 };
 use std::{
     collections::{HashMap, VecDeque},
+    mem::ManuallyDrop,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     rc::Rc,
     sync::Arc,
@@ -69,6 +70,7 @@ fn vram(device: &Rc<Device>, space: &AddressSpace, size: usize) -> VResult<VramB
     let mut off = 0;
     while off < size {
         let n = zero.len().min(size - off);
+        // Sound only after the GPU handoff: fresh allocation, zeroed before its VA is handed to any GPU work (new buffer).
         cpu.write_bytes(off, &zero[..n])?;
         off += n;
     }
@@ -97,6 +99,7 @@ impl Allocator for SideAllocator<'_> {
             .iter_mut()
             .find(|b| b.gpu.address() == va)
             .ok_or_else(|| VideoError::Invalid("write to an unknown side buffer".into()))?;
+        // Sound only after the GPU handoff: side buffers are written while building the unit, before the submit that reads them (codec build in decode).
         b.cpu.write_bytes(offset, data)?;
         Ok(())
     }
@@ -130,15 +133,34 @@ type Import = (Rc<Memory>, GpuMapping);
 
 /// Copy-engine context: a backend Queue (copy engine only), its own slot
 /// pool page, and per-copy command buffers.
+///
+/// Teardown order is explicit (Drop): the channel first, then the slot pool,
+/// then its page (memory reference, CPU mapping, GPU mapping), then the RM
+/// event source, then the command buffers and pending imports.
 struct CopyEngine {
-    queue: Queue,
+    queue: ManuallyDrop<Queue>,
     copy_class: u32,
-    _pool: Arc<SlotPool>,
-    _page: (Rc<Memory>, Mapping, GpuMapping),
-    _events: RmEvents,
+    pool: ManuallyDrop<Arc<SlotPool>>,
+    page: ManuallyDrop<(Rc<Memory>, Mapping, GpuMapping)>,
+    events: ManuallyDrop<RmEvents>,
     commands: Vec<(VramBuffer, u64)>,
     /// Imported targets kept alive until their copy retired.
     pending: VecDeque<(u64, Vec<Import>)>,
+}
+
+impl Drop for CopyEngine {
+    fn drop(&mut self) {
+        // SAFETY: each ManuallyDrop field is dropped exactly once, here, and
+        // nothing uses it afterwards (this is the owner's destructor).
+        unsafe { ManuallyDrop::drop(&mut self.queue) };
+        // SAFETY: as above.
+        unsafe { ManuallyDrop::drop(&mut self.pool) };
+        // SAFETY: as above.
+        unsafe { ManuallyDrop::drop(&mut self.page) };
+        // SAFETY: as above.
+        unsafe { ManuallyDrop::drop(&mut self.events) };
+        // `commands` and `pending` drop after this body, in that order.
+    }
 }
 
 impl CopyEngine {
@@ -154,8 +176,8 @@ impl CopyEngine {
         let page_cpu = page_mem.map()?;
         let page_gpu = space.map(&page_mem)?;
         // SAFETY: page_cpu maps the whole PAGE_BYTES allocation and is kept
-        // in `_page`, which drops after `queue` (field order), the pool's
-        // only other user; nothing else accesses the page.
+        // in `page`, which CopyEngine::drop releases after `queue` and the
+        // pool, the page's only users; nothing else accesses the page.
         unsafe { pool.install_page(page_cpu.cpu_address(), page_gpu.address()) }?;
         let retire = pool
             .try_allocate()
@@ -163,11 +185,11 @@ impl CopyEngine {
         let events = RmEvents::new(device)?;
         let queue = Queue::new_with_events(device, space, 1, &events, &pool, retire)?;
         Ok(Self {
-            queue,
+            queue: ManuallyDrop::new(queue),
             copy_class: caps.copy,
-            _pool: pool,
-            _page: (page_mem, page_cpu, page_gpu),
-            _events: events,
+            pool: ManuallyDrop::new(pool),
+            page: ManuallyDrop::new((page_mem, page_cpu, page_gpu)),
+            events: ManuallyDrop::new(events),
             commands: Vec::new(),
             pending: VecDeque::new(),
         })
@@ -466,6 +488,7 @@ impl Session {
         }
         self.ring[k].unchecked = false;
         let mut b = [0u8; 16];
+        // Sound only after the GPU handoff: callers check only slots whose busy_until value completed (the busy_until <= done scan, and decode waits for busy_until first).
         self.ring[k].desc.cpu.read_bytes(off, &mut b)?;
         if let Some(m) = engine_status_error(&b, self.ring[k].picture) {
             self.failed = Some(m.clone());
@@ -665,9 +688,12 @@ impl Session {
         let words = self.codec.build(&job, &ctx, &mut desc)?;
         {
             let slot = &mut self.ring[k];
+            // Sound only after the GPU handoff: ring slot k is reused only after decode waited for its busy_until value.
             slot.desc.cpu.write_bytes(0, &desc)?;
             let bits = slot.bits.as_mut().expect("allocated above");
+            // Sound only after the GPU handoff: as the descriptor above: slot k's previous submit completed.
             bits.cpu.write_bytes(0, &job.bitstream)?;
+            // Sound only after the GPU handoff: as the descriptor above.
             bits.cpu.write_bytes(len, &[0u8; 256])?;
         }
         let value = self.nvdec.submit(words)?;
@@ -681,6 +707,7 @@ impl Session {
                 self.stats.cpu_waits += 1;
                 self.nvdec.wait(&self.drm, value)?;
                 let mut out = vec![0u8; r.len()];
+                // Sound only after the GPU handoff: nvdec.wait(value) above completed the submit that wrote the descriptor.
                 self.ring[k].desc.cpu.read_bytes(r.start, &mut out)?;
                 Some(out)
             }

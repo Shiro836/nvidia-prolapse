@@ -83,6 +83,7 @@ fn alloc_zeroed(
     let mut off = 0;
     while off < size {
         let n = zero.len().min(size - off);
+        // Sound only after the GPU handoff: fresh allocation, zeroed before its VA is handed to any GPU work.
         cpu.write_bytes(off, &zero[..n])?;
         off += n;
     }
@@ -333,6 +334,7 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
     for _ in stream.frames {
         surfaces.push(ch.buffer(surface_size)?);
     }
+    // Sound only after the GPU handoff: fresh descriptor allocation, written before the first submit.
     desc_mem.map()?.write_bytes(0, stream.descriptors)?;
     let mut bits_cpu = bits_mem.map()?;
     let status_cpu = status_mem.map()?;
@@ -355,7 +357,9 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
         if desc_off + 0x300 > stream.descriptors.len() || frame.pos >= 16 {
             return Err(Error::Contract("frame descriptor/slot out of range".into()));
         }
+        // Sound only after the GPU handoff: the previous frame's ch.run (synchronous submit + wait) completed.
         bits_cpu.write_bytes(0, data)?;
+        // Sound only after the GPU handoff: as above.
         bits_cpu.write_bytes(data.len(), &[0u8; 256])?;
         let out_va = surfaces[i].1.address();
         let mut words = Vec::new();
@@ -401,6 +405,7 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
             slots[frame.pos as usize] = None;
         }
         let mut out = vec![0u8; surface_size];
+        // Sound only after the GPU handoff: every frame's ch.run (synchronous submit + wait) completed.
         surfaces[i].0.map()?.read_bytes(0, &mut out)?;
         report.surfaces.push(out);
     }
@@ -562,6 +567,7 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
                         size: usize|
      -> Result<Vec<u8>> {
         let mut out = vec![0u8; size];
+        // Sound only after the GPU handoff: every frame's ch.run (synchronous submit + wait) completed.
         surfaces[i].0.map()?.read_bytes(0, &mut out)?;
         Ok(out)
     };
@@ -641,6 +647,7 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             }
             let probs = st.entropy_table();
             d[VP9_PROBS..VP9_PROBS + probs.as_bytes().len()].copy_from_slice(probs.as_bytes());
+            // Sound only after the GPU handoff: the previous frame's ch.run (synchronous submit + wait) completed.
             desc_cpu.write_bytes(0, &d)?;
             report.descriptors.push(d[..VP9_COUNTS].to_vec());
             // Stock 615.71.09 (a640 key frame, input buffer captured at
@@ -650,7 +657,9 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             let tiles = frame
                 .get(h.uncompressed_size + h.header_size..)
                 .ok_or_else(|| Error::Contract("VP9: headers overrun frame".into()))?;
+            // Sound only after the GPU handoff: as the descriptor above.
             bits_cpu.write_bytes(0, tiles)?;
+            // Sound only after the GPU handoff: as the descriptor above.
             bits_cpu.write_bytes(tiles.len(), &[0u8; 256])?;
 
             let da = desc.address();
@@ -706,6 +715,7 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             report.frame_times.push(ch.run(words)?);
             report.decoded += 1;
             let mut counts_raw = vec![0u8; std::mem::size_of::<Vp9EntropyCounts>()];
+            // Sound only after the GPU handoff: ch.run (synchronous submit + wait) above completed this frame.
             desc_cpu.read_bytes(VP9_COUNTS, &mut counts_raw)?;
             let counts = Vp9EntropyCounts::from_bytes(&counts_raw);
             let mut sw = [0u32; 8];
