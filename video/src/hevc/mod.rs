@@ -15,6 +15,8 @@ use crate::fit;
 use nv_rm_core::conv::{low_u32, usize_from_u32};
 pub mod codec;
 pub mod desc;
+mod error;
+pub use error::HevcError;
 pub mod ps;
 pub mod slice;
 #[cfg(test)]
@@ -24,7 +26,7 @@ use self::desc::{PicState, SessionInputs, StockOpaque};
 use self::ps::{Pps, Sps};
 use self::slice::parse_slice_header;
 use crate::bits::{split_annexb, unescape};
-use crate::{VResult, VideoError, bitstream, unsupported};
+use crate::{VResult, VideoError};
 
 /// NVDEC `SET_APPLICATION_ID` for HEVC (clc9b0.h).
 pub const APP_ID_HEVC: u32 = 7;
@@ -102,24 +104,27 @@ struct SliceNal<'a> {
 
 /// The RBSP after the two-byte NAL unit header (H.265 7.3.1.2) of a `what` NAL; a NAL shorter
 /// than its header is a bitstream error.
-fn payload<'a>(rbsp: &'a [u8], what: &str) -> VResult<&'a [u8]> {
+fn payload<'a>(rbsp: &'a [u8], what: &'static str) -> VResult<&'a [u8]> {
     match rbsp.get(2..) {
         Some(p) => Ok(p),
-        None => bitstream(format!(
-            "HEVC {what} NAL of {} bytes has no NAL unit header",
-            rbsp.len()
-        )),
+        None => Err(HevcError::NoNalHeader {
+            what,
+            len: rbsp.len(),
+        }
+        .into()),
     }
-}
-
-fn bs_err<T>(m: impl Into<String>) -> Result<T, PicErr> {
-    Err(PicErr::V(VideoError::Bitstream(m.into())))
 }
 
 enum PicErr {
     /// A RASL picture after a random access point: not decoded, not output (8.1.3).
     SkipRasl,
     V(VideoError),
+}
+
+impl From<HevcError> for PicErr {
+    fn from(e: HevcError) -> Self {
+        Self::V(e.into())
+    }
 }
 
 impl From<crate::OutOfRange> for PicErr {
@@ -158,16 +163,16 @@ impl Decoder {
         for n in split_annexb(au) {
             let nal = n.nal;
             if nal.len() < 2 {
-                return bitstream("NAL unit shorter than its header");
+                return Err(HevcError::Malformed("NAL unit shorter than its header").into());
             }
             if nal[0] & 0x80 != 0 {
-                return bitstream("forbidden_zero_bit set");
+                return Err(HevcError::Malformed("forbidden_zero_bit set").into());
             }
             let t = (nal[0] >> 1) & 0x3f;
             let layer = ((nal[0] & 1) << 5) | (nal[1] >> 3);
             let tid_plus1 = nal[1] & 7;
             if tid_plus1 == 0 {
-                return bitstream("nuh_temporal_id_plus1 = 0");
+                return Err(HevcError::Malformed("nuh_temporal_id_plus1 = 0").into());
             }
             if layer != 0 {
                 continue; // base-layer decoder: other layers are not decoded (F.8 / 8.1.1)
@@ -194,16 +199,22 @@ impl Decoder {
                     )?;
                     if hdr.first_slice_segment_in_pic {
                         if !slices.is_empty() {
-                            return bitstream("two pictures in one access unit");
+                            return Err(
+                                HevcError::Malformed("two pictures in one access unit").into()
+                            );
                         }
                         nal_type0 = Some(t);
                         tid0 = tid_plus1 - 1;
                     } else if slices.is_empty() {
-                        return bitstream("access unit starts with a non-first slice segment");
+                        return Err(HevcError::Malformed(
+                            "access unit starts with a non-first slice segment",
+                        )
+                        .into());
                     } else if Some(t) != nal_type0 {
-                        return bitstream(
+                        return Err(HevcError::Malformed(
                             "slice segments of one picture with different NAL unit types",
-                        );
+                        )
+                        .into());
                     }
                     if hdr.dependent {
                         let Some(p) = slices
@@ -212,7 +223,10 @@ impl Decoder {
                             .find(|s| !s.hdr.dependent)
                             .map(|s| s.hdr.clone())
                         else {
-                            return bitstream("dependent slice segment without an independent one");
+                            return Err(HevcError::Malformed(
+                                "dependent slice segment without an independent one",
+                            )
+                            .into());
                         };
                         hdr = slice::SliceHeader {
                             first_slice_segment_in_pic: false,
@@ -224,7 +238,7 @@ impl Decoder {
                     slices.push(SliceNal { nal, hdr });
                 }
                 10..=15 | 22 | 23 => {
-                    return unsupported(format!("HEVC reserved VCL NAL unit type {t}"));
+                    return Err(HevcError::ReservedNalType(t).into());
                 }
                 _ => {} // VPS, AUD, EOB, filler, SEI, reserved/unspecified non-VCL
             }
@@ -240,10 +254,10 @@ impl Decoder {
     fn picture(&mut self, t: u8, tid: u8, slices: &[SliceNal]) -> Result<PictureJob, PicErr> {
         let h0 = &slices[0].hdr;
         let Some(pps) = self.pps[usize_from_u32(h0.pps_id)].clone() else {
-            return bs_err("missing PPS");
+            return Err(HevcError::Malformed("missing PPS").into());
         };
         let Some(sps) = self.sps[usize_from_u32(pps.sps_id)].clone() else {
-            return bs_err("missing SPS");
+            return Err(HevcError::Malformed("missing SPS").into());
         };
         let idr = t == 19 || t == 20;
         let bla = (16..=18).contains(&t);
@@ -259,7 +273,10 @@ impl Decoder {
             return Err(PicErr::SkipRasl);
         }
         if self.first_in_cvs && !irap {
-            return bs_err("coded video sequence does not start with an IRAP picture");
+            return Err(HevcError::Malformed(
+                "coded video sequence does not start with an IRAP picture",
+            )
+            .into());
         }
         self.first_in_cvs = false;
         // 8.3.1 picture order count.
@@ -301,10 +318,7 @@ impl Decoder {
                             keep.push(p.id);
                         }
                         None if used => {
-                            return bs_err(format!(
-                                "reference picture POC {} missing from the DPB",
-                                poc + dp
-                            ));
+                            return Err(HevcError::MissingReference(poc + dp).into());
                         }
                         None => {} // "no reference picture" in a Foll list is allowed
                     }
@@ -313,7 +327,7 @@ impl Decoder {
         }
         self.dpb.retain(|d| keep.contains(&d.id));
         let Some(slot) = (0u8..16).find(|s| self.dpb.iter().all(|d| d.slot != *s)) else {
-            return bs_err("DPB holds 16 pictures");
+            return Err(HevcError::Malformed("DPB holds 16 pictures").into());
         };
         // 8.3.4: RefPicListTemp0 = StCurrBefore ++ StCurrAfter (LtCurr is rejected in the slice
         // parser), Temp1 = StCurrAfter ++ StCurrBefore, repeated over all 16 entries.
@@ -334,7 +348,7 @@ impl Decoder {
         for d in &self.dpb {
             let v = poc - d.poc;
             let Ok(v16) = i16::try_from(v) else {
-                return bs_err(format!("POC distance {v} exceeds 16 bits"));
+                return Err(HevcError::PocDistance(v).into());
             };
             diff[usize::from(d.slot)] = v16;
         }

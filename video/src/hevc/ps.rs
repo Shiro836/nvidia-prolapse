@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 //! HEVC parameter sets (H.265 7.3.2.2 SPS, 7.3.2.3 PPS, 7.3.4 scaling_list_data, 7.3.7
 //! st_ref_pic_set) with the derived values the descriptor needs.
+use crate::VResult;
 use crate::bits::BitReader;
 use crate::fit;
-use crate::{VResult, bitstream, unsupported};
+use crate::hevc::HevcError;
 use nv_rm_core::conv::usize_from_u32;
 
 /// Short-term RPS after 7.4.8 derivation: deltas relative to the current POC.
@@ -98,7 +99,7 @@ pub fn st_ref_pic_set(
             }
         }
         if s0.len() > 16 || s1.len() > 16 || s0.len() + s1.len() > 16 {
-            return bitstream("st_ref_pic_set with more than 16 pictures");
+            return Err(HevcError::Malformed("st_ref_pic_set with more than 16 pictures").into());
         }
         Ok((StRps { s0, s1 }, Some(fit(n, "NumDeltaPocs")?)))
     } else {
@@ -212,7 +213,7 @@ impl ScalingList {
                         let d = r.se_range(-128, 127, "scaling_list_delta_coef")?;
                         next = (next + d + 256).rem_euclid(256);
                         if next == 0 {
-                            return bitstream("scaling list coefficient 0");
+                            return Err(HevcError::Malformed("scaling list coefficient 0").into());
                         }
                         s.lists[size][m][i] = fit(next, "ScalingList")?;
                     }
@@ -342,16 +343,14 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
     r.skip(4)?; // sps_video_parameter_set_id
     let max_sub_layers_minus1 = r.u(3)?;
     if max_sub_layers_minus1 > 6 {
-        return bitstream("sps_max_sub_layers_minus1 > 6");
+        return Err(HevcError::Malformed("sps_max_sub_layers_minus1 > 6").into());
     }
     r.skip(1)?;
     let profile_idc = profile_tier_level(r, max_sub_layers_minus1)?;
     // Main (1), Main 10 (2), Main Still Picture (3): VUI and SPS extensions carry nothing the
     // engine descriptor needs for these profiles, so parsing stops after the coding tools.
     if !(1..=3).contains(&profile_idc) {
-        return unsupported(format!(
-            "HEVC profile_idc {profile_idc} (only Main, Main 10, Main Still Picture)"
-        ));
+        return Err(HevcError::Profile(profile_idc).into());
     }
     let id = r.ue_max(15, "sps_seq_parameter_set_id")?;
     let chroma_format_idc = r.ue_max(3, "chroma_format_idc")?;
@@ -361,9 +360,7 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
         false
     };
     if chroma_format_idc != 1 {
-        return unsupported(format!(
-            "HEVC chroma_format_idc {chroma_format_idc} (only 4:2:0)"
-        ));
+        return Err(HevcError::ChromaFormat(chroma_format_idc).into());
     }
     let width = r.ue_max(16888, "pic_width_in_luma_samples")?;
     let height = r.ue_max(16888, "pic_height_in_luma_samples")?;
@@ -377,9 +374,11 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
     let bit_depth_chroma = r.ue_max(8, "bit_depth_chroma_minus8")? + 8;
     // One sample container per surface: luma and chroma depth must agree (8 or 10).
     if bit_depth_luma > 10 || bit_depth_chroma != bit_depth_luma {
-        return unsupported(format!(
-            "HEVC bit depth {bit_depth_luma}/{bit_depth_chroma} (8/8 or 10/10)"
-        ));
+        return Err(HevcError::BitDepth {
+            luma: bit_depth_luma,
+            chroma: bit_depth_chroma,
+        }
+        .into());
     }
     let log2_max_poc_lsb = r.ue_max(12, "log2_max_pic_order_cnt_lsb_minus4")? + 4;
     let sub_info = r.flag()?;
@@ -394,7 +393,7 @@ pub fn parse_sps(rbsp: &[u8]) -> VResult<Sps> {
     let log2_min_cb = r.ue_max(3, "log2_min_luma_coding_block_size_minus3")? + 3;
     let log2_ctb = log2_min_cb + r.ue_max(3, "log2_diff_max_min_luma_coding_block_size")?;
     if !(4..=6).contains(&log2_ctb) {
-        return bitstream(format!("CtbLog2SizeY {log2_ctb}"));
+        return Err(HevcError::CtbSize(log2_ctb).into());
     }
     let log2_min_tb = r.ue_max(3, "log2_min_luma_transform_block_size_minus2")? + 2;
     let log2_max_tb = log2_min_tb + r.ue_max(3, "log2_diff_max_min_luma_transform_block_size")?;
@@ -628,7 +627,9 @@ pub fn parse_pps(rbsp: &[u8]) -> VResult<Pps> {
         let range = r.flag()?;
         let others = r.u(3)?;
         if range || others != 0 {
-            return unsupported("HEVC PPS range/multilayer/3D/SCC extension");
+            return Err(
+                HevcError::Unsupported("HEVC PPS range/multilayer/3D/SCC extension").into(),
+            );
         }
     }
     Ok(Pps {

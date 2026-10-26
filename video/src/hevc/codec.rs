@@ -14,6 +14,7 @@
 use super::Decoder;
 use super::desc::{FilterOffsets, SETUP_SIZE, SessionInputs};
 use crate::fit;
+use crate::hevc::HevcError;
 use crate::{
     Allocator, BuildContext, CODEC_HEVC, CodecDecoder, DecodeJob, Job, NvdecGen, PictureInfo,
     SurfaceLayout, VResult, VideoError, bits,
@@ -174,11 +175,11 @@ impl CodecDecoder for HevcDecoder {
                 continue;
             };
             if j.bit_depth != self.bit_depth {
-                return Err(VideoError::Unsupported(format!(
-                    "HEVC {}-bit picture in a {}-bit session (create the session with the stream's \
-                     bit depth)",
-                    j.bit_depth, self.bit_depth
-                )));
+                return Err(HevcError::SessionBitDepth {
+                    picture: j.bit_depth,
+                    session: self.bit_depth,
+                }
+                .into());
             }
             if j.width > self.max.0.next_multiple_of(8) || j.height > self.max.1.next_multiple_of(8)
             {

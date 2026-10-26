@@ -7,7 +7,8 @@
 //! independently. Buffer offsets inside our own filter buffer and surface geometry are inputs
 //! ([`SessionInputs`]), never stock's numbers.
 use super::ps::{Pps, ScalingList, Sps, diag_scan};
-use crate::{VResult, bitstream, fit, unsupported};
+use crate::hevc::HevcError;
+use crate::{VResult, fit};
 use nv_rm_core::conv::{low_u8, low_u16};
 
 /// Size of the descriptor area (struct + tail, zero padded).
@@ -106,11 +107,14 @@ fn put16(d: &mut [u8], o: usize, v: u16) {
 /// Bitfield packer with range checks (a value that does not fit is a bitstream we cannot describe).
 struct Bits(u32);
 impl Bits {
-    fn set(&mut self, shift: u32, width: u32, v: u32, name: &str) -> VResult<()> {
+    fn set(&mut self, shift: u32, width: u32, v: u32, name: &'static str) -> VResult<()> {
         if v >= 1 << width {
-            return bitstream(format!(
-                "{name} = {v} does not fit its {width}-bit descriptor field"
-            ));
+            return Err(HevcError::FieldWidth {
+                field: name,
+                value: v,
+                width,
+            }
+            .into());
         }
         self.0 |= v << shift;
         Ok(())
@@ -126,9 +130,10 @@ pub fn build(
     op: StockOpaque,
 ) -> VResult<Vec<u8>> {
     if sps.pcm {
-        return unsupported(
+        return Err(HevcError::Unsupported(
             "HEVC PCM (pcm_* descriptor field encoding not verified against stock)",
-        );
+        )
+        .into());
     }
     let mut d = vec![0u8; SETUP_SIZE];
     // 0x30 stream_len: stock max(nBitstreamDataLen, 16) (stock ELF 0x3e364).
@@ -147,7 +152,7 @@ pub fn build(
     put32(&mut d, 0x50, si.filter.sao);
     put32(&mut d, 0x54, si.filter.bsd_ctrl);
     if sps.width > 0xffff || sps.height > 0xffff {
-        return bitstream("picture size exceeds 16 bits");
+        return Err(HevcError::Malformed("picture size exceeds 16 bits").into());
     }
     put16(&mut d, 0x58, fit(sps.width, "pic_width_in_luma_samples")?);
     put16(&mut d, 0x5a, fit(sps.height, "pic_height_in_luma_samples")?);

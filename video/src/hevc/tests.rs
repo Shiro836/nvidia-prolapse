@@ -565,10 +565,13 @@ fn expect_build_unsupported(sps: &Sps, pps: &Pps, feature: &str) {
         &session_inputs(),
         StockOpaque::observed(sps.bit_depth_luma),
     ) {
-        Err(VideoError::Unsupported(m)) => assert!(
-            m.contains(feature),
-            "refusal reason {m:?} does not name {feature:?}"
-        ),
+        Err(e) if e.code() == -2 => {
+            let m = e.message();
+            assert!(
+                m.contains(feature),
+                "refusal reason {m:?} does not name {feature:?}"
+            );
+        }
         Err(e) => panic!("expected Unsupported({feature:?}), got {e:?}"),
         Ok(_) => panic!("expected Unsupported({feature:?}), the descriptor was built"),
     }
@@ -696,10 +699,13 @@ fn slice_long_term_references_are_refused() {
         |i| (i == sps.id).then_some(&sps),
     );
     match r {
-        Err(VideoError::Unsupported(m)) => assert!(
-            m.contains("long-term reference"),
-            "refusal reason {m:?} does not name the feature"
-        ),
+        Err(e) if e.code() == -2 => {
+            let m = e.message();
+            assert!(
+                m.contains("long-term reference"),
+                "refusal reason {m:?} does not name the feature"
+            );
+        }
         Err(e) => panic!("expected Unsupported(long-term), got {e:?}"),
         Ok(_) => panic!("long-term slice references were accepted"),
     }
@@ -721,7 +727,8 @@ fn range_extension_profiles_are_refused() {
     let mut nal = vec![0u8; 2]; // NAL header (skipped by the parser)
     nal.extend_from_slice(&w.bytes());
     match ps::parse_sps(&nal) {
-        Err(VideoError::Unsupported(m)) => {
+        Err(e) if e.code() == -2 => {
+            let m = e.message();
             assert!(
                 m.contains("profile_idc 4"),
                 "reason {m:?} does not name the profile"

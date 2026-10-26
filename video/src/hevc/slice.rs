@@ -3,9 +3,10 @@
 //! syntax: everything after it (list modification, weights, QP, deblocking, entry points) is
 //! parsed by the engine itself (`sw_hdr_skip_length` tells it what the driver consumed).
 use super::ps::{Pps, Sps, StRps, st_ref_pic_set};
+use crate::VResult;
 use crate::bits::BitReader;
 use crate::fit;
-use crate::{VResult, bitstream, unsupported};
+use crate::hevc::HevcError;
 use nv_rm_core::conv::usize_from_u32;
 
 pub const SLICE_B: u32 = 0;
@@ -61,13 +62,14 @@ pub fn parse_slice_header<'a>(
     };
     let pps_id = r.ue_max(63, "slice_pic_parameter_set_id")?;
     let Some(pps) = pps_of(pps_id) else {
-        return bitstream(format!("slice references missing PPS {pps_id}"));
+        return Err(HevcError::MissingPps(pps_id).into());
     };
     let Some(sps) = sps_of(pps.sps_id) else {
-        return bitstream(format!(
-            "PPS {pps_id} references missing SPS {}",
-            pps.sps_id
-        ));
+        return Err(HevcError::MissingSps {
+            pps: pps_id,
+            sps: pps.sps_id,
+        }
+        .into());
     };
     let mut h = SliceHeader {
         first_slice_segment_in_pic: first,
@@ -91,7 +93,7 @@ pub fn parse_slice_header<'a>(
         let ctbs = sps.width_ctbs() * sps.height_ctbs();
         h.segment_address = r.u(ceil_log2(ctbs))?;
         if h.segment_address >= ctbs {
-            return bitstream("slice_segment_address beyond the picture");
+            return Err(HevcError::Malformed("slice_segment_address beyond the picture").into());
         }
     }
     if h.dependent {
@@ -118,11 +120,14 @@ pub fn parse_slice_header<'a>(
             h.rps = rps;
         } else {
             if n == 0 {
-                return bitstream("short_term_ref_pic_set_sps_flag with no SPS sets");
+                return Err(HevcError::Malformed(
+                    "short_term_ref_pic_set_sps_flag with no SPS sets",
+                )
+                .into());
             }
             let idx = usize_from_u32(r.u(ceil_log2(fit(n, "num_short_term_ref_pic_sets")?))?);
             if idx >= n {
-                return bitstream("short_term_ref_pic_set_idx out of range");
+                return Err(HevcError::Malformed("short_term_ref_pic_set_idx out of range").into());
             }
             h.rps = sps.st_rps[idx].clone();
         }
@@ -135,10 +140,11 @@ pub fn parse_slice_header<'a>(
             };
             let num_lt_pics = r.ue()?;
             if num_lt_sps + num_lt_pics > 0 {
-                return unsupported(
+                return Err(HevcError::Unsupported(
                     "HEVC long-term reference pictures in a slice header (sw_hdr_skip_length coverage of the \
                      long-term syntax and the longtermflag bit order are not verified against stock)",
-                );
+                )
+                .into());
             }
         }
         h.rps_syntax_bits = fit(r.pos() - start, "slice RPS syntax bits")?;
