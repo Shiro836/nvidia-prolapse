@@ -36,6 +36,11 @@ fn scaling_lut(num: u8, value: &[u8], scaling: &[u8], lut: &mut [u8]) {
     for i in 0..n - 1 {
         let dy = i32::from(scaling[i + 1]) - i32::from(scaling[i]);
         let dx = i32::from(value[i + 1]) - i32::from(value[i]);
+        // Points must increase (6.8.20); a segment of width 0 or less has no samples to fill,
+        // and its slope would divide by zero.
+        if dx <= 0 {
+            continue;
+        }
         let delta = dy * ((65536 + (dx >> 1)) / dx);
         for x in 0..dx {
             lut[usize::from(value[i]) + x as usize] =
@@ -185,5 +190,20 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
                 o += 2;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two film-grain points with the same value (a non-conformant stream, 6.8.20): the scaling
+    /// LUT divided by the zero segment width and panicked. The segment is empty and skipped.
+    #[test]
+    fn scaling_lut_with_repeated_point_value() {
+        let mut lut = [0u8; 256];
+        scaling_lut(2, &[10, 10], &[20, 30], &mut lut);
+        assert!(lut[..10].iter().all(|&v| v == 20));
+        assert!(lut[10..].iter().all(|&v| v == 30));
     }
 }
