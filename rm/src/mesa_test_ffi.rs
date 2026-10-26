@@ -10,10 +10,11 @@
 //!
 //! What a reference cannot prove is checked here instead:
 //! - Synchronization ids are `Arc::into_raw` pointers (`nv_rm_sync_create`),
-//!   dereferenced by every call that takes one. The live-id registry records
-//!   every id `sync_create` returned and not yet destroyed, and every call
-//!   pins the ids it passes for its duration; an unknown id, or a destroy of
-//!   an id another thread is using, panics before any C call.
+//!   dereferenced by every call that takes one. A [`SyncHandle`] owns one id:
+//!   only `sync_create` makes one, only `sync_destroy` (by value) ends it, and
+//!   every other call and every [`Point`] borrows it, so the borrow checker
+//!   proves no call uses an id after or while it is destroyed. Threads share a
+//!   handle as `Arc<SyncHandle>` and destroy it after `Arc::into_inner`.
 //! - VA release callbacks run whenever the bridge reclaims (any later call,
 //!   or close), so their sink is `&'static`.
 //! - CPU mappings are only reachable through [`CpuMap`], which borrows the
@@ -21,54 +22,62 @@
 //!   bounds-checks every access.
 //!
 //! Threading: every function may be called from any thread (the C ABI is
-//! thread-safe per bridge); the registry is one mutex held only around map
-//! updates, never across a C call.
+//! thread-safe per bridge). No wrapper takes a lock of its own.
 use super::*;
-use std::collections::HashMap;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::ptr;
-use std::sync::LazyLock;
 
-/// Live synchronization ids and how many calls currently use each. Global
-/// because the ids are process-wide pointers, independent of the bridge
-/// (`nv_rm_sync_destroy` ignores its bridge argument).
-static LIVE: LazyLock<Mutex<HashMap<u64, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn live() -> MutexGuard<'static, HashMap<u64, usize>> {
-    LIVE.lock()
-        .expect("sync registry is never locked across a panic")
+/// One synchronization object created by [`sync_create`]: the id is live
+/// while this value exists (no Clone/Copy; [`sync_destroy`] consumes it).
+/// The object itself holds its slot pool (`Arc<SlotPool>`, syncobj.rs), so a
+/// handle stays valid memory even after the bridge that made it is closed.
+#[must_use = "a sync object is destroyed only by sync_destroy"]
+#[derive(Debug)]
+pub(in crate::mesa) struct SyncHandle {
+    id: u64,
 }
-
-/// Pins ids for one C call: each must be live, and stays live (destroy
-/// panics) until the guard drops.
-struct Pinned<I: Iterator<Item = u64> + Clone>(I);
-impl<I: Iterator<Item = u64> + Clone> Pinned<I> {
-    fn new(ids: I) -> Self {
-        let mut map = live();
-        let unknown = ids.clone().find(|id| !map.contains_key(id));
-        if unknown.is_none() {
-            for id in ids.clone() {
-                *map.get_mut(&id).expect("checked above") += 1;
-            }
-        }
-        drop(map);
-        assert!(unknown.is_none(), "sync id {unknown:#x?} is not live");
-        Self(ids)
+impl SyncHandle {
+    /// The payload behind the id, for fixtures that inspect bridge state.
+    pub(in crate::mesa) fn obj(&self) -> Result<&crate::syncobj::SyncObj> {
+        // SAFETY: the id came from nv_rm_sync_create and is destroyed only by
+        // sync_destroy, which consumes this handle; the returned borrow of
+        // `self` ends before that can happen, so the payload is not destroyed
+        // while the reference lives.
+        unsafe { sync_ref(self.id) }
     }
 }
-impl<I: Iterator<Item = u64> + Clone> Drop for Pinned<I> {
-    fn drop(&mut self) {
-        let mut map = live();
-        for id in self.0.clone() {
-            *map.get_mut(&id).expect("pinned ids stay registered") -= 1;
+/// A (sync, value) pair of a wait or signal list; borrows the handle, so the
+/// id stays live for as long as the list exists.
+#[derive(Clone, Copy)]
+pub(in crate::mesa) struct Point<'a> {
+    pub(in crate::mesa) sync: &'a SyncHandle,
+    pub(in crate::mesa) value: u64,
+}
+/// Longest wait or signal list a fixture passes; lists are lowered into a
+/// stack array of the C `SyncPoint` (no allocation per call).
+const MAX_POINTS: usize = 8;
+struct Lowered {
+    points: [SyncPoint; MAX_POINTS],
+    count: usize,
+}
+impl Lowered {
+    fn new(points: &[Point<'_>]) -> Self {
+        assert!(points.len() <= MAX_POINTS, "{} sync points", points.len());
+        let mut lowered = Self {
+            points: [SyncPoint { sync: 0, value: 0 }; MAX_POINTS],
+            count: points.len(),
+        };
+        for (out, point) in lowered.points.iter_mut().zip(points) {
+            *out = SyncPoint {
+                sync: point.sync.id,
+                value: point.value,
+            };
         }
+        lowered
     }
-}
-fn pin(id: u64) -> Pinned<std::iter::Once<u64>> {
-    Pinned::new(std::iter::once(id))
-}
-fn pin_points(points: &[SyncPoint]) -> Pinned<impl Iterator<Item = u64> + Clone + '_> {
-    Pinned::new(points.iter().map(|p| p.sync))
+    fn get(&self) -> &[SyncPoint] {
+        &self.points[..self.count]
+    }
 }
 
 /// The bridge pointer the C ABI takes. Every `nv_rm_*` entry used here only
@@ -267,9 +276,10 @@ impl<'b> CpuMap<'b> {
     /// (one bounds check for the run; BAR1 write-traffic generator).
     pub(in crate::mesa) fn fill_u64_counting(&self, first: u64) -> u64 {
         let count = self.len / size_of::<u64>();
+        let words = self.base.cast::<u64>();
         let mut value = first;
         for i in 0..count {
-            let p = self.base.wrapping_add(i * size_of::<u64>()).cast::<u64>();
+            let p = words.wrapping_add(i);
             // SAFETY: i < len / 8, so the 8 bytes at i * 8 are inside the
             // mapping; 8-aligned base; live while `self` is; volatile because
             // the GPU may access it.
@@ -291,105 +301,109 @@ impl<'b> CpuMap<'b> {
     }
 }
 
-pub(in crate::mesa) fn sync_create(b: &Bridge, flags: u32, initial: u64, out: &mut u64) -> i32 {
-    // SAFETY: live bridge; `out` is an exclusive u64 the call writes.
-    let status = unsafe { nv_rm_sync_create(raw(b), flags, initial, out) };
+/// `Ok(handle)` on status 0, else `Err(status)`.
+pub(in crate::mesa) fn sync_create(
+    b: &Bridge,
+    flags: u32,
+    initial: u64,
+) -> std::result::Result<SyncHandle, i32> {
+    let mut id = 0;
+    // SAFETY: live bridge; `id` is an exclusive u64 the call writes.
+    let status = unsafe { nv_rm_sync_create(raw(b), flags, initial, &mut id) };
     if status == 0 {
-        let previous = live().insert(*out, 0);
-        assert!(previous.is_none(), "nv_rm_sync_create returned a live id");
+        Ok(SyncHandle { id })
+    } else {
+        Err(status)
     }
-    status
 }
-pub(in crate::mesa) fn sync_destroy(b: &Bridge, id: u64) -> i32 {
-    let in_use = live().remove(&id);
-    assert_eq!(
-        in_use,
-        Some(0),
-        "destroy of sync id {id:#x}: unknown (None) or in use by another call"
-    );
-    // SAFETY: `id` came from sync_create and was live and unused; it is now
-    // out of the registry, so no other call can pass it again.
-    unsafe { nv_rm_sync_destroy(raw(b), id) }
+pub(in crate::mesa) fn sync_destroy(b: &Bridge, sync: SyncHandle) -> i32 {
+    // SAFETY: the handle owns a live id (SyncHandle doc); it is consumed
+    // here, so nothing can pass the id again.
+    unsafe { nv_rm_sync_destroy(raw(b), sync.id) }
 }
-pub(in crate::mesa) fn sync_reset(b: &Bridge, id: u64) -> i32 {
-    let _pin = pin(id);
-    // SAFETY: live bridge; `id` is pinned live for the call.
-    unsafe { nv_rm_sync_reset(raw(b), id) }
+pub(in crate::mesa) fn sync_reset(b: &Bridge, sync: &SyncHandle) -> i32 {
+    // SAFETY: live bridge; the borrowed handle keeps the id live.
+    unsafe { nv_rm_sync_reset(raw(b), sync.id) }
 }
-pub(in crate::mesa) fn sync_signal(b: &Bridge, id: u64, value: u64) -> i32 {
-    let _pin = pin(id);
-    // SAFETY: live bridge; `id` is pinned live for the call.
-    unsafe { nv_rm_sync_signal(raw(b), id, value) }
+pub(in crate::mesa) fn sync_signal(b: &Bridge, sync: &SyncHandle, value: u64) -> i32 {
+    // SAFETY: live bridge; the borrowed handle keeps the id live.
+    unsafe { nv_rm_sync_signal(raw(b), sync.id, value) }
 }
-pub(in crate::mesa) fn sync_move(b: &Bridge, dst: u64, src: u64, shared_source: u32) -> i32 {
-    let _pin = Pinned::new([dst, src].into_iter());
-    // SAFETY: live bridge; both ids are pinned live for the call.
-    unsafe { nv_rm_sync_move(raw(b), dst, src, shared_source) }
+pub(in crate::mesa) fn sync_move(
+    b: &Bridge,
+    dst: &SyncHandle,
+    src: &SyncHandle,
+    shared_source: u32,
+) -> i32 {
+    // SAFETY: live bridge; both borrowed handles keep their ids live.
+    unsafe { nv_rm_sync_move(raw(b), dst.id, src.id, shared_source) }
 }
-pub(in crate::mesa) fn sync_get_value(b: &Bridge, id: u64, out: &mut u64) -> i32 {
-    let _pin = pin(id);
-    // SAFETY: live bridge; `id` pinned; `out` is an exclusive u64.
-    unsafe { nv_rm_sync_get_value(raw(b), id, out) }
+pub(in crate::mesa) fn sync_get_value(b: &Bridge, sync: &SyncHandle, out: &mut u64) -> i32 {
+    // SAFETY: live bridge; borrowed handle; `out` is an exclusive u64.
+    unsafe { nv_rm_sync_get_value(raw(b), sync.id, out) }
 }
 pub(in crate::mesa) fn sync_status_many(
     b: &Bridge,
-    points: &[SyncPoint],
+    points: &[Point<'_>],
     flags: u32,
     out: &mut u32,
 ) -> i32 {
-    let _pin = pin_points(points);
-    let (points, count) = array(points);
+    let lowered = Lowered::new(points);
+    let (points, count) = array(lowered.get());
     // SAFETY: live bridge; `points` valid for `count` (or null for 0), every
-    // id in it pinned; `out` is an exclusive u32.
+    // id in it borrowed from a live handle; `out` is an exclusive u32.
     unsafe { nv_rm_sync_status_many(raw(b), points, count, flags, out) }
 }
 pub(in crate::mesa) fn sync_wait_many(
     b: &Bridge,
-    points: &[SyncPoint],
+    points: &[Point<'_>],
     flags: u32,
     timeout_ns: u64,
 ) -> i32 {
-    let _pin = pin_points(points);
-    let (points, count) = array(points);
+    let lowered = Lowered::new(points);
+    let (points, count) = array(lowered.get());
     // SAFETY: live bridge; `points` valid for `count` (or null for 0), every
-    // id in it pinned for the whole (possibly blocking) call.
+    // id in it borrowed from a live handle for the whole (blocking) call.
     unsafe { nv_rm_sync_wait_many(raw(b), points, count, flags, timeout_ns) }
 }
-pub(in crate::mesa) fn sync_import_fd(b: &Bridge, id: u64, fd: BorrowedFd<'_>, opaque: u32) -> i32 {
-    let _pin = pin(id);
-    // SAFETY: live bridge; `id` pinned; `fd` is open for the call (borrowed).
-    unsafe { nv_rm_sync_import_fd(raw(b), id, fd.as_raw_fd(), opaque) }
+pub(in crate::mesa) fn sync_import_fd(
+    b: &Bridge,
+    sync: &SyncHandle,
+    fd: BorrowedFd<'_>,
+    opaque: u32,
+) -> i32 {
+    // SAFETY: live bridge; borrowed handle; `fd` is open for the call.
+    unsafe { nv_rm_sync_import_fd(raw(b), sync.id, fd.as_raw_fd(), opaque) }
 }
 /// `drm` None passes -1 (opaque exports take no DRM fd). The returned
 /// descriptor in `out` (or -1) is the caller's to own.
 pub(in crate::mesa) fn sync_export_fd(
     b: &Bridge,
-    id: u64,
+    sync: &SyncHandle,
     opaque: u32,
     drm: Option<BorrowedFd<'_>>,
     out: &mut i32,
 ) -> i32 {
-    let _pin = pin(id);
-    // SAFETY: live bridge; `id` pinned; `drm` open for the call or -1; `out`
-    // is an exclusive i32.
-    unsafe { nv_rm_sync_export_fd(raw(b), id, opaque, fd_or_none(drm), out) }
+    // SAFETY: live bridge; borrowed handle; `drm` open for the call or -1;
+    // `out` is an exclusive i32.
+    unsafe { nv_rm_sync_export_fd(raw(b), sync.id, opaque, fd_or_none(drm), out) }
 }
 
 pub(in crate::mesa) fn submit_batch(
     b: &Bridge,
     ctx: u64,
     pushes: &[Push],
-    waits: &[SyncPoint],
-    signals: &[SyncPoint],
+    waits: &[Point<'_>],
+    signals: &[Point<'_>],
     out: &mut u64,
 ) -> i32 {
-    let _waits = pin_points(waits);
-    let _signals = pin_points(signals);
+    let (waits, signals) = (Lowered::new(waits), Lowered::new(signals));
     let (pushes, count) = array(pushes);
-    let (waits, wait_count) = array(waits);
-    let (signals, signal_count) = array(signals);
+    let (waits, wait_count) = array(waits.get());
+    let (signals, signal_count) = array(signals.get());
     // SAFETY: live bridge; each array valid for its count (or null for 0),
-    // every sync id in them pinned; `out` is an exclusive u64.
+    // every sync id in them borrowed from a live handle; `out` is an
+    // exclusive u64.
     unsafe {
         nv_rm_submit_batch(
             raw(b),
@@ -408,12 +422,12 @@ pub(in crate::mesa) fn submit_sync(
     b: &Bridge,
     ctx: u64,
     pushes: &[Push],
-    waits: &[SyncPoint],
+    waits: &[Point<'_>],
     out: &mut u64,
 ) -> i32 {
-    let _waits = pin_points(waits);
+    let waits = Lowered::new(waits);
     let (pushes, count) = array(pushes);
-    let (waits, wait_count) = array(waits);
+    let (waits, wait_count) = array(waits.get());
     // SAFETY: as submit_batch.
     unsafe { nv_rm_submit_sync(raw(b), ctx, pushes, count, waits, wait_count, out) }
 }
@@ -426,11 +440,11 @@ pub(in crate::mesa) fn submit(b: &Bridge, ctx: u64, pushes: &[Push], out: &mut u
 pub(in crate::mesa) fn context_signal(
     b: &Bridge,
     ctx: u64,
-    signals: &[SyncPoint],
+    signals: &[Point<'_>],
     out: &mut u64,
 ) -> i32 {
-    let _signals = pin_points(signals);
-    let (signals, count) = array(signals);
+    let signals = Lowered::new(signals);
+    let (signals, count) = array(signals.get());
     // SAFETY: as submit_batch.
     unsafe { nv_rm_context_signal(raw(b), ctx, signals, count, out) }
 }

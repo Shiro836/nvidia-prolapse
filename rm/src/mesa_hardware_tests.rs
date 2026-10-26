@@ -9,7 +9,7 @@ use std::{
     thread,
     time::Duration,
 };
-use test_ffi as c;
+use test_ffi::{self as c, Point, SyncHandle};
 
 /// Safe calls into the C ABI, shared by the sibling fixture modules.
 #[path = "mesa_test_ffi.rs"]
@@ -38,10 +38,8 @@ fn context(b: &Bridge) -> u64 {
     assert_eq!(c::context_create(b, 1, &mut id), 0);
     id
 }
-fn create(b: &Bridge, timeline: bool, initial: u64) -> u64 {
-    let mut id = 0;
-    assert_eq!(c::sync_create(b, u32::from(timeline), initial, &mut id), 0);
-    id
+fn create(b: &Bridge, timeline: bool, initial: u64) -> SyncHandle {
+    c::sync_create(b, u32::from(timeline), initial).expect("nv_rm_sync_create status 0")
 }
 fn fd_count() -> usize {
     std::fs::read_dir("/proc/self/fd").unwrap().count()
@@ -56,7 +54,7 @@ fn clean_exporter_close_publishes_gpu_completion() {
     let signal = create(&producer, true, 0);
     let mut exported = -1;
     assert_eq!(
-        c::sync_export_fd(&producer, signal, 1, None, &mut exported),
+        c::sync_export_fd(&producer, &signal, 1, None, &mut exported),
         0
     );
     assert!(exported >= 0, "opaque export returns a descriptor");
@@ -66,12 +64,12 @@ fn clean_exporter_close_publishes_gpu_completion() {
     let exported = unsafe { OwnedFd::from_raw_fd(exported) };
     let imported = create(&consumer, true, 0);
     assert_eq!(
-        c::sync_import_fd(&consumer, imported, exported.as_fd(), 1),
+        c::sync_import_fd(&consumer, &imported, exported.as_fd(), 1),
         0
     );
     let mut token = 0;
-    let point = SyncPoint {
-        sync: signal,
+    let point = Point {
+        sync: &signal,
         value: 1,
     };
     assert_eq!(c::context_signal(&producer, ctx, &[point], &mut token), 0);
@@ -80,7 +78,7 @@ fn clean_exporter_close_publishes_gpu_completion() {
     drop(producer);
     drop(exported);
     let mut value = 0;
-    assert_eq!(c::sync_get_value(&consumer, imported, &mut value), 0);
+    assert_eq!(c::sync_get_value(&consumer, &imported, &mut value), 0);
     assert_eq!(value, 1);
     assert_eq!(c::sync_destroy(&consumer, imported), 0);
 }
@@ -92,8 +90,8 @@ fn unsignaled_owned_gate_has_bounded_context_teardown() {
     let ctx = context(&bridge);
     let wait = create(&bridge, true, 0);
     let mut token = 0;
-    let point = SyncPoint {
-        sync: wait,
+    let point = Point {
+        sync: &wait,
         value: 1,
     };
     assert_eq!(c::submit_sync(&bridge, ctx, &[], &[point], &mut token), 0);
@@ -119,43 +117,39 @@ fn two_waiters(gpu: bool) -> (Duration, Duration, Duration) {
     let before = fd_count();
     let bridge = open();
     let ctx = context(&bridge);
-    let gate = create(&bridge, true, 0);
-    let fence = create(&bridge, false, 0);
+    let gate = Arc::new(create(&bridge, true, 0));
+    let fence = Arc::new(create(&bridge, false, 0));
     let rounds = 300u64;
     let mut first = Vec::new();
     let mut second = Vec::new();
     for round in 1..=rounds {
         let target = if gpu {
             let mut token = 0;
-            let w = SyncPoint {
-                sync: gate,
+            let w = Point {
+                sync: &gate,
                 value: round,
             };
-            let s = SyncPoint {
-                sync: fence,
+            let s = Point {
+                sync: &fence,
                 value: 0,
             };
             assert_eq!(
                 c::submit_batch(&bridge, ctx, &[], &[w], &[s], &mut token),
                 0
             );
-            SyncPoint {
-                sync: fence,
-                value: 0,
-            }
+            (Arc::clone(&fence), 0)
         } else {
-            SyncPoint {
-                sync: gate,
-                value: round,
-            }
+            (Arc::clone(&gate), round)
         };
         let ready = Arc::new(Barrier::new(3));
         let waiters: Vec<_> = (0..2)
             .map(|_| {
                 let ready = Arc::clone(&ready);
                 let bridge = Arc::clone(&bridge);
+                let (sync, value) = (Arc::clone(&target.0), target.1);
                 thread::spawn(move || {
                     ready.wait();
+                    let target = Point { sync: &sync, value };
                     let r = c::sync_wait_many(&bridge, &[target], 0, u64::MAX);
                     assert_eq!(r, 0);
                     Instant::now()
@@ -169,19 +163,21 @@ fn two_waiters(gpu: bool) -> (Duration, Duration, Duration) {
         }
         thread::sleep(Duration::from_micros(300));
         let start = Instant::now();
-        assert_eq!(c::sync_signal(&bridge, gate, round), 0);
+        assert_eq!(c::sync_signal(&bridge, &gate, round), 0);
         let mut times: Vec<_> = waiters
             .into_iter()
             .map(|t| t.join().unwrap().saturating_duration_since(start))
             .collect();
+        drop(target);
         times.sort();
         first.push(times[0]);
         second.push(times[1]);
         if gpu {
-            assert_eq!(c::sync_reset(&bridge, fence), 0);
+            assert_eq!(c::sync_reset(&bridge, &fence), 0);
         }
     }
     for id in [gate, fence] {
+        let id = Arc::into_inner(id).expect("every waiter thread was joined");
         assert_eq!(c::sync_destroy(&bridge, id), 0);
     }
     assert_eq!(c::context_destroy(&bridge, ctx), 0);
@@ -242,24 +238,24 @@ fn slot_lifetime_recycles_under_gpu_retirement() {
         // Frame: wait previous semaphore signal (detach), signal semaphore +
         // fence + timeline in one batch.
         let waits = if frame > 1 {
-            vec![SyncPoint {
-                sync: semaphore,
+            vec![Point {
+                sync: &semaphore,
                 value: 0,
             }]
         } else {
             vec![]
         };
         let signals = [
-            SyncPoint {
-                sync: semaphore,
+            Point {
+                sync: &semaphore,
                 value: 0,
             },
-            SyncPoint {
-                sync: fence,
+            Point {
+                sync: &fence,
                 value: 0,
             },
-            SyncPoint {
-                sync: timeline,
+            Point {
+                sync: &timeline,
                 value: frame,
             },
         ];
@@ -275,35 +271,35 @@ fn slot_lifetime_recycles_under_gpu_retirement() {
         }
         // Copy-export semantics: reset while the GPU release may be pending.
         if frame % 2 == 0 {
-            let p = SyncPoint {
-                sync: fence,
+            let p = Point {
+                sync: &fence,
                 value: 0,
             };
             assert_eq!(c::sync_wait_many(&bridge, &[p], 0, u64::MAX), 0);
         }
-        assert_eq!(c::sync_reset(&bridge, fence), 0);
+        assert_eq!(c::sync_reset(&bridge, &fence), 0);
         if frame % 100 == 0 {
             // Move: dst takes the pending payload, src gets a fresh slot.
             let dst = create(&bridge, false, 0);
-            assert_eq!(c::sync_move(&bridge, dst, semaphore, 0), 0);
-            let p = SyncPoint {
-                sync: dst,
+            assert_eq!(c::sync_move(&bridge, &dst, &semaphore, 0), 0);
+            let p = Point {
+                sync: &dst,
                 value: 0,
             };
             assert_eq!(c::sync_wait_many(&bridge, &[p], 0, u64::MAX), 0);
             assert_eq!(c::sync_destroy(&bridge, dst), 0);
             // The semaphore lost its signal to dst: re-signal on the CPU so
             // the next frame's wait has a signal operation.
-            assert_eq!(c::sync_signal(&bridge, semaphore, 0), 0);
+            assert_eq!(c::sync_signal(&bridge, &semaphore, 0), 0);
         }
     }
-    let p = SyncPoint {
-        sync: timeline,
+    let p = Point {
+        sync: &timeline,
         value: 3000,
     };
     assert_eq!(c::sync_wait_many(&bridge, &[p], 0, u64::MAX), 0);
     let mut value = 0;
-    assert_eq!(c::sync_get_value(&bridge, timeline, &mut value), 0);
+    assert_eq!(c::sync_get_value(&bridge, &timeline, &mut value), 0);
     assert_eq!(value, 3000);
     // Retire everything, then confirm a single pool page sufficed.
     let token = queue_ref(&bridge.lock().0, ctx).unwrap().last_token();
@@ -340,17 +336,17 @@ fn ring_full_leaves_payloads_untouched() {
     let full_token = loop {
         let target = create(&bridge, false, 0);
         let waits = [
-            SyncPoint {
-                sync: gate,
+            Point {
+                sync: &gate,
                 value: 1,
             },
-            SyncPoint {
-                sync: consumed,
+            Point {
+                sync: &consumed,
                 value: 0,
             },
         ];
-        let signal = SyncPoint {
-            sync: target,
+        let signal = Point {
+            sync: &target,
             value: 0,
         };
         // Only the retry after the ring is full includes the consuming wait.
@@ -366,34 +362,19 @@ fn ring_full_leaves_payloads_untouched() {
         );
         if r == 1 {
             // Retry the same batch with the consuming wait: still full.
-            // SAFETY: `consumed` and `target` are live payloads of this test.
-            let slot_of = |id: u64| match unsafe { sync_ref(id) }.unwrap().lock().payload {
+            let slot_of = |h: &SyncHandle| match h.obj().unwrap().lock().payload {
                 crate::syncobj::Payload::Native(slot) => slot,
                 _ => panic!("native"),
             };
-            let (c_slot, t_slot) = (slot_of(consumed), slot_of(target));
+            let (c_slot, t_slot) = (slot_of(&consumed), slot_of(&target));
             let r2 = c::submit_batch(&bridge, ctx, &[], &waits[..2], &[signal], &mut token);
             assert_eq!(r2, 1, "still full");
-            assert_eq!(slot_of(consumed), c_slot, "consuming wait not committed");
-            assert_eq!(slot_of(target), t_slot);
+            assert_eq!(slot_of(&consumed), c_slot, "consuming wait not committed");
+            assert_eq!(slot_of(&target), t_slot);
             assert_eq!(bridge.core.pool.refs(c_slot), 1);
             assert_eq!(bridge.core.pool.refs(t_slot), 1);
-            // SAFETY: a live payload of this test.
-            assert!(
-                unsafe { sync_ref(consumed) }
-                    .unwrap()
-                    .ready(0, false)
-                    .unwrap()
-                    .0
-            );
-            // SAFETY: a live payload of this test.
-            assert!(
-                unsafe { sync_ref(target) }
-                    .unwrap()
-                    .lock()
-                    .pending
-                    .is_none()
-            );
+            assert!(consumed.obj().unwrap().ready(0, false).unwrap().0);
+            assert!(target.obj().unwrap().lock().pending.is_none());
             assert_eq!(c::sync_destroy(&bridge, target), 0);
             break token;
         }
@@ -401,17 +382,18 @@ fn ring_full_leaves_payloads_untouched() {
         accepted.push(target);
     };
     assert!(accepted.len() > 300, "ring filled after {}", accepted.len());
-    assert_eq!(c::sync_signal(&bridge, gate, 1), 0);
+    assert_eq!(c::sync_signal(&bridge, &gate, 1), 0);
     assert_eq!(c::wait(&bridge, ctx, full_token, u64::MAX), 0);
     let last = queue_ref(&bridge.lock().0, ctx).unwrap().last_token();
     assert_eq!(c::wait(&bridge, ctx, last, u64::MAX), 0);
-    for id in &accepted {
-        let p = SyncPoint {
-            sync: *id,
+    let accepted_count = accepted.len();
+    for id in accepted {
+        let p = Point {
+            sync: &id,
             value: 0,
         };
         assert_eq!(c::sync_wait_many(&bridge, &[p], 0, 0), 0);
-        assert_eq!(c::sync_destroy(&bridge, *id), 0);
+        assert_eq!(c::sync_destroy(&bridge, id), 0);
     }
     for id in [gate, consumed] {
         assert_eq!(c::sync_destroy(&bridge, id), 0);
@@ -421,7 +403,6 @@ fn ring_full_leaves_payloads_untouched() {
     drop(bridge);
     assert_eq!(fd_count(), before);
     println!(
-        "PASS: ring full after {} gated batches, NOT_READY transactional, all signals completed",
-        accepted.len()
+        "PASS: ring full after {accepted_count} gated batches, NOT_READY transactional, all signals completed"
     );
 }
