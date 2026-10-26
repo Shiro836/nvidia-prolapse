@@ -10,6 +10,10 @@ rust-version = "1.99"
 license = "MIT"
 publish = false
 
+[workspace.dependencies]
+# Byte views of wire structs (RUST.md §2): FromBytes/IntoBytes/KnownLayout/Immutable derives.
+zerocopy = { version = "=0.8.62", features = ["derive"] }
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "warn"
