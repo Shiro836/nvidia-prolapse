@@ -40,9 +40,9 @@ profiles = run.profiles
 ROOT = run.ROOT
 MAGIC = b"NVCAP01\0"
 # Cases whose pushbuffers cannot be captured, with the reason; their .push file says so and only the
-# ioctl sequence is compared. The rm capture names its file cap-<pid>-<pci bus/device>-<n>.bin, so two
-# devices on one GPU in one process (interop opens two) create and write the same file.
-NO_PUSH = {"interop": "two devices of one GPU in one process write the same rm capture file"}
+# ioctl sequence is compared. The rm capture writes one file per device and capture
+# (cap-<pid>-<pci bus/device>-<device number>-<n>.bin), so every case is captured today.
+NO_PUSH = {}
 
 
 # Request codes whose count depends on GPU timing (dropped from the ioctl sequence):

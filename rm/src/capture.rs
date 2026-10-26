@@ -29,7 +29,9 @@
 //! file `<dir>/go` exists (checked at most every 200 ms from submit) and stops
 //! after `frames` fence exports (sync-file exports = presents for both the
 //! Android EGL and Vulkan WSI paths) or 30 s. Output:
-//! `<dir>/cap-<pid>-<device>.bin`, records described in `tools/nvcap.py`.
+//! `<dir>/cap-<pid>-<device>-<n>-<sequence>.bin` (`device` = PCI bus/device, `n` = this
+//! process's capture-device count, so two devices on one GPU in one process write separate
+//! files), records described in `tools/nvcap.py`.
 //!
 //! The extra releases change the stream slightly (one extra GPFIFO entry per
 //! submission for the start release); runs that measure FPS use mode `ts`,
@@ -39,6 +41,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) const MAGIC: &[u8; 8] = b"NVCAP01\0";
@@ -53,6 +56,10 @@ pub(crate) const REC_CONTEXT: u32 = 6; // context u64, engines u32, channel clas
 /// (1 texture header pool, 2 sampler pool), entries u32, captured bytes u32,
 /// then the bytes (0 when the pool is not CPU-mapped).
 pub(crate) const REC_POOL: u32 = 7;
+
+/// Capture devices created in this process; numbers each device's files. Two devices of one GPU
+/// (same PCI tag) in one process would otherwise share and interleave one file.
+static DEVICES: AtomicU32 = AtomicU32::new(0);
 
 /// Largest pool copied per binding (32 B entries).
 const POOL_MAX_BYTES: u64 = 1 << 20;
@@ -230,6 +237,8 @@ pub(crate) struct Capture {
     pub binds: BTreeMap<u64, (u64, u64, u64)>,
     epoch: Instant,
     device_tag: usize,
+    /// This process's number for the device (0 = first), from [`DEVICES`].
+    device_index: u32,
     /// (context, engines, channel class) of every context created.
     contexts: Vec<(u64, u32, u32)>,
     scratch: Vec<u8>,
@@ -252,6 +261,10 @@ impl Capture {
             binds: BTreeMap::new(),
             epoch: Instant::now(),
             device_tag,
+            // Relaxed: the counter only has to hand out distinct numbers, which the atomic
+            // read-modify-write guarantees on its own; no other memory is published through it.
+            // fetch_add wraps after 2^32 devices in one process, far beyond any real count.
+            device_index: DEVICES.fetch_add(1, Ordering::Relaxed),
             contexts: Vec::new(),
             scratch: Vec::new(),
             sequence: 0,
@@ -293,9 +306,10 @@ impl Capture {
                 }
                 self.sequence += 1;
                 let path = self.config.dir.join(format!(
-                    "cap-{}-{:x}-{}.bin",
+                    "cap-{}-{:x}-{}-{}.bin",
                     std::process::id(),
                     self.device_tag,
+                    self.device_index,
                     self.sequence
                 ));
                 match File::create(&path) {
