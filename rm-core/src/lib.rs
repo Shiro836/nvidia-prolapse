@@ -13,4 +13,4 @@ pub mod error;
 pub mod push;
 pub mod reclaim;
 
-pub use error::{Error, Result};
+pub use error::{Error, Result, WaitError};
