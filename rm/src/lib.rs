@@ -2,6 +2,20 @@
 //! Real native RM backend. Direct libc/ioctl calls; no NVIDIA userspace DSO,
 //! glibc shim, CUDA, Vulkan loader or existing HAL is loaded by this library.
 //! This is the backend foundation; a full Vulkan ICD is not implemented yet.
+//!
+//! Process model (RUST.md §13). Every descriptor the library opens is
+//! close-on-exec: std's `File`/`try_clone` (O_CLOEXEC, F_DUPFD_CLOEXEC),
+//! memfd_create(MFD_CLOEXEC), eventfd(EFD_CLOEXEC), DRM PRIME export with
+//! DRM_CLOEXEC, and the sync_files nvidia-drm creates with O_CLOEXEC
+//! (open-gpu-kernel-modules kernel-open/nvidia-drm/nvidia-drm-os-interface.c,
+//! nv_drm_create_sync_file). Nothing runs at load time; state is created by
+//! the open entry points and owned by the handles they return. A handle used
+//! in a forked child fails as lost and is never torn down there (process.rs).
+//! The library supports dlclose once every handle is closed: closing joins
+//! the device's watcher thread and releases its mappings and descriptors;
+//! libc drops the atfork handler with the library, and the per-thread
+//! nv_video_last_error buffer's destructor keeps the library loaded until
+//! that thread exits (libc's thread-local destructor accounting).
 #![deny(unsafe_op_in_unsafe_fn)]
 // Debt ledger (RUST.md "Existing code"): every workspace lint this crate still violates.
 #![expect(
@@ -82,6 +96,7 @@ pub use nv_video::nvdec_hevc;
 #[cfg(feature = "diagnostics")]
 pub mod perf_diagnostic;
 pub mod platform;
+mod process;
 mod reactor;
 use nv_rm_core::reclaim;
 pub mod rm;

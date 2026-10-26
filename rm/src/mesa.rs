@@ -293,6 +293,10 @@ pub struct Bridge {
     /// Set by the C-boundary guard when a panic interrupted a call on this
     /// bridge (crate::ffi); never cleared.
     failed: crate::ffi::FailFlag,
+    /// The process that opened the device: a forked child inherits the
+    /// handle but not its RM objects' owner or threads, so it may neither use
+    /// nor tear it down (RUST.md §13).
+    process: crate::process::ProcessBound,
 }
 
 /// The payload behind a C sync id.
@@ -362,6 +366,8 @@ impl Bridge {
             core,
             capture: std::sync::atomic::AtomicBool::new(capture.is_some()),
             failed: crate::ffi::FailFlag::default(),
+            process: crate::process::ProcessBound::new()
+                .map_err(|e| Error::Io("register the fork handler", e))?,
             inner: Mutex::new(Confined(Inner {
                 queues: Vec::new(),
                 acquires: Vec::new(),
@@ -1820,7 +1826,16 @@ fn query_zcull(d: &Device) -> Result<(abi::ZcullInfo, abi::EngineContextProperti
 /// every waiter) and marks the Bridge failed: every later entry point on it
 /// returns VK_ERROR_DEVICE_LOST without touching its state (crate::ffi).
 impl crate::ffi::Failable for Bridge {
+    /// Also true in a forked child: it gets VK_ERROR_DEVICE_LOST and must
+    /// open its own device.
     fn failed(&self) -> bool {
+        if !self.process.is_current() {
+            diag!(
+                "nvk Rust RM: device opened by pid {} used in a forked child; open a new device in this process",
+                self.process.creator()
+            );
+            return true;
+        }
         self.failed.is_set()
     }
     fn mark_failed(&self) {
@@ -1945,13 +1960,12 @@ pub unsafe extern "C" fn nv_rm_close(p: *mut Bridge) {
         // SAFETY: nv_rm.h: `p` is a device from nv_rm_open that the caller
         // gives back here exactly once, with no call on it in flight or later.
         let owned = unsafe { Box::from_raw(p) };
-        if owned.failed.is_set() {
-            // A panic interrupted an earlier call: its state may be
-            // inconsistent, so it is kept (with every RM object and
-            // descriptor it owns) until process exit rather than torn down.
-            diag!(
-                "nv_rm_close: device was marked failed by an internal panic; its resources are kept"
-            );
+        if crate::ffi::Failable::failed(&*owned) {
+            // A panic interrupted an earlier call (its state may be
+            // inconsistent), or this is a forked child (the RM objects and
+            // threads are the parent's): keep it, with every RM object and
+            // descriptor it owns, until process exit rather than tear it down.
+            diag!("nv_rm_close: device is failed or from another process; its resources are kept");
             std::mem::forget(owned);
             return;
         }

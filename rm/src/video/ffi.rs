@@ -7,6 +7,7 @@ use super::{
     session::{Session, SessionInfo, Target},
 };
 use crate::ffi::{FailFlag, Failable};
+use crate::process::ProcessBound;
 use std::{cell::RefCell, ffi::CString, os::fd::IntoRawFd};
 
 thread_local! {
@@ -45,6 +46,8 @@ fn guard(
 pub struct NvVideoDevice {
     device: VideoDevice,
     failed: FailFlag,
+    /// A forked child may neither use nor tear down the parent's device.
+    process: ProcessBound,
 }
 /// Session handle given to C (Box::into_raw; released by
 /// nv_video_session_destroy). Only shared references to the handle exist; the
@@ -53,14 +56,28 @@ pub struct NvVideoDevice {
 pub struct NvVideoSession {
     session: RefCell<Session>,
     failed: FailFlag,
+    /// A forked child may neither use nor tear down the parent's session.
+    process: ProcessBound,
 }
 // SAFETY: a session's RM objects are only reachable through the session; the
 // header requires callers to serialise each session, so moving it between
 // threads never shares its Rc graph (or the RefCell flag) concurrently.
 unsafe impl Send for NvVideoSession {}
+/// The object was marked failed, or a forked child is using its parent's
+/// object (logged: the child must open its own).
+fn unusable(failed: &FailFlag, process: &ProcessBound) -> bool {
+    if !process.is_current() {
+        crate::diag::diag!(
+            "nv-video: object created by pid {} used in a forked child; open a new device in this process",
+            process.creator()
+        );
+        return true;
+    }
+    failed.is_set()
+}
 impl Failable for NvVideoDevice {
     fn failed(&self) -> bool {
-        self.failed.is_set()
+        unusable(&self.failed, &self.process)
     }
     fn mark_failed(&self) {
         self.failed.set();
@@ -68,7 +85,7 @@ impl Failable for NvVideoDevice {
 }
 impl Failable for NvVideoSession {
     fn failed(&self) -> bool {
-        self.failed.is_set()
+        unusable(&self.failed, &self.process)
     }
     fn mark_failed(&self) {
         self.failed.set();
@@ -204,6 +221,8 @@ pub unsafe extern "C" fn nv_video_device_open(
         let handle = NvVideoDevice {
             device: dev,
             failed: FailFlag::default(),
+            process: ProcessBound::new()
+                .map_err(|e| VideoError::NoMemory(format!("register the fork handler: {e}")))?,
         };
         // SAFETY: checked non-NULL, writable (# Safety). The Box is released
         // only by nv_video_device_close.
@@ -226,13 +245,13 @@ pub unsafe extern "C" fn nv_video_device_close(dev: *mut NvVideoDevice) {
     });
 }
 
-/// Drop a handle C gave back, unless a panic marked it failed: its state may
-/// then be inconsistent, so it is kept (with its RM objects) until process
-/// exit instead of being torn down.
+/// Drop a handle C gave back, unless it is failed: a panic may have left its
+/// state inconsistent, or a forked child holds the parent's objects; it is
+/// then kept (with its RM objects) until process exit instead of torn down.
 fn release<T: Failable>(handle: Box<T>, entry: &str) {
     if handle.failed() {
         crate::diag::diag!(
-            "{entry}: object was marked failed by an internal panic; its resources are kept"
+            "{entry}: object is failed or from another process; its resources are kept"
         );
         std::mem::forget(handle);
     } else {
@@ -307,6 +326,8 @@ pub unsafe extern "C" fn nv_video_session_create(
             let handle = NvVideoSession {
                 session: RefCell::new(s),
                 failed: FailFlag::default(),
+                process: ProcessBound::new()
+                    .map_err(|e| VideoError::NoMemory(format!("register the fork handler: {e}")))?,
             };
             // SAFETY: checked non-NULL, writable (# Safety). The Box is
             // released only by nv_video_session_destroy.
