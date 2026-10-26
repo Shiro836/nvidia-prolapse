@@ -1,0 +1,79 @@
+# cargo-fuzz targets for nv-video's bitstream parsers (RUST.md §11). Not a workspace member: it
+# builds with the dated nightly (`cargo +nightly-2026-10-24 fuzz run <target>` from video/).
+[package]
+name = "nv-video-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+nv-video = { path = ".." }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "h264_headers"
+path = "fuzz_targets/h264_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hevc_headers"
+path = "fuzz_targets/hevc_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hevc_reference"
+path = "fuzz_targets/hevc_reference.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vp9_headers"
+path = "fuzz_targets/vp9_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "av1_headers"
+path = "fuzz_targets/av1_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "containers"
+path = "fuzz_targets/containers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hdr_metadata"
+path = "fuzz_targets/hdr_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decoder"
+path = "fuzz_targets/decoder.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"
