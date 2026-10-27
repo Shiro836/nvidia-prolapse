@@ -2080,7 +2080,7 @@ enum Entry {
     /// `OUT_OF_DEVICE_MEMORY`; `vkAllocateMemory` has no `DEVICE_LOST`. NVK
     /// reports every failed allocation as `OUT_OF_DEVICE_MEMORY`
     /// (nvkmd_nouveau_mem.c:169 at Mesa 26.2.5); a broken bridge contract
-    /// stays the generic failure.
+    /// is an implementation failure (`VK_ERROR_UNKNOWN`).
     Alloc,
     /// `nv_rm_import`: `vkAllocateMemory` importing a dma-buf (codes as
     /// [`Entry::Alloc`], plus `INVALID_EXTERNAL_HANDLE`). NVK reports a dma-buf
@@ -2121,8 +2121,18 @@ enum Entry {
     /// export as `VK_ERROR_UNKNOWN` (vk_drm_syncobj.c:376, :397, :413, :429), RM out of memory
     /// and a lost device included.
     SyncFd,
-    /// Every other entry point: paths of a created device, where a lost device
-    /// is `VK_ERROR_DEVICE_LOST` (spec "Lost Device").
+    /// `nv_rm_context_create`, `nv_rm_context_create_shared`: queue creation
+    /// inside `vkCreateDevice`, which lists `INITIALIZATION_FAILED` and
+    /// `DEVICE_LOST`. NVK reports a context it cannot create as
+    /// `INITIALIZATION_FAILED` (nvkmd_nouveau_dev.c:44 for the device).
+    Create,
+    /// Every other entry point: submission, waits and status queries of a
+    /// created device (`vkQueueSubmit`, `vkWaitForFences`, ...), where a lost
+    /// device is `VK_ERROR_DEVICE_LOST` (spec "Lost Device"). Any other failure
+    /// is an implementation failure, `VK_ERROR_UNKNOWN`, the one code every
+    /// command may return (spec "Error Codes") and the one NVK reports for a
+    /// failed submission (nvkmd_nouveau_ctx.c:150 at Mesa 26.2.5); these
+    /// commands have no `INITIALIZATION_FAILED`.
     Device,
 }
 impl Entry {
@@ -2138,21 +2148,27 @@ impl Entry {
                 DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
                 Lost | Refused | Contract => vk::ERROR_INITIALIZATION_FAILED,
             },
+            Self::Create => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+                Lost => vk::ERROR_DEVICE_LOST,
+                Refused | Contract => vk::ERROR_INITIALIZATION_FAILED,
+            },
             Self::Alloc => match failure {
                 HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
                 DeviceMemory | Lost | Refused => vk::ERROR_OUT_OF_DEVICE_MEMORY,
-                Contract => vk::ERROR_INITIALIZATION_FAILED,
+                Contract => vk::ERROR_UNKNOWN,
             },
             Self::Import => match failure {
                 HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
                 DeviceMemory | Lost => vk::ERROR_OUT_OF_DEVICE_MEMORY,
                 Refused => vk::ERROR_INVALID_EXTERNAL_HANDLE,
-                Contract => vk::ERROR_INITIALIZATION_FAILED,
+                Contract => vk::ERROR_UNKNOWN,
             },
             Self::Export => match failure {
                 HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
                 DeviceMemory | Lost | Refused => vk::ERROR_TOO_MANY_OBJECTS,
-                Contract => vk::ERROR_INITIALIZATION_FAILED,
+                Contract => vk::ERROR_UNKNOWN,
             },
             Self::Map => match failure {
                 HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
@@ -2161,25 +2177,22 @@ impl Entry {
             Self::Bind => match failure {
                 HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
                 DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
-                Lost | Refused => vk::ERROR_UNKNOWN,
-                Contract => vk::ERROR_INITIALIZATION_FAILED,
+                Lost | Refused | Contract => vk::ERROR_UNKNOWN,
             },
             Self::Sync => match failure {
                 HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
                 DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
-                Lost | Refused => vk::ERROR_UNKNOWN,
-                Contract => vk::ERROR_INITIALIZATION_FAILED,
+                Lost | Refused | Contract => vk::ERROR_UNKNOWN,
             },
             Self::SyncFd => match failure {
                 HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
-                DeviceMemory | Lost | Refused => vk::ERROR_UNKNOWN,
-                Contract => vk::ERROR_INITIALIZATION_FAILED,
+                DeviceMemory | Lost | Refused | Contract => vk::ERROR_UNKNOWN,
             },
             Self::Device => match failure {
                 HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
                 DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
                 Lost => vk::ERROR_DEVICE_LOST,
-                Refused | Contract => vk::ERROR_INITIALIZATION_FAILED,
+                Refused | Contract => vk::ERROR_UNKNOWN,
             },
         }
     }
@@ -2776,18 +2789,16 @@ pub(crate) unsafe extern "C" fn nv_rm_context_create(
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_context_create", object, move || {
-        report((|| {
-            if out.is_null() {
-                return Err(Error::Contract("null context output".into()));
-            }
-            let b = present(object)?;
-            b.core.live()?;
-            let mut guard = b.lock()?;
-            let id = b.create_context(&mut guard.0, engines, None)?;
-            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-            unsafe { output(out, id) }
-        })())
+    guarded_as(Entry::Create, "nv_rm_context_create", object, move || {
+        if out.is_null() {
+            return Err(Error::Contract("null context output".into()));
+        }
+        let b = present(object)?;
+        b.core.live()?;
+        let mut guard = b.lock()?;
+        let id = b.create_context(&mut guard.0, engines, None)?;
+        // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
+        unsafe { output(out, id) }
     })
 }
 /// Create a context whose channel joins `share`'s TSG on the lowest free
@@ -2809,8 +2820,11 @@ pub(crate) unsafe extern "C" fn nv_rm_context_create_shared(
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_context_create_shared", object, move || {
-        report((|| {
+    guarded_as(
+        Entry::Create,
+        "nv_rm_context_create_shared",
+        object,
+        move || {
             if out.is_null() {
                 return Err(Error::Contract("null context output".into()));
             }
@@ -2820,8 +2834,8 @@ pub(crate) unsafe extern "C" fn nv_rm_context_create_shared(
             let id = b.create_context(&mut guard.0, engines, Some(share))?;
             // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, id) }
-        })())
-    })
+        },
+    )
 }
 /// # Safety
 /// nv_rm.h's contract for every entry point: the device pointer is NULL or a
@@ -3797,18 +3811,21 @@ mod tests {
     use std::mem::{offset_of, size_of};
     #[test]
     fn status_codes_match_the_c_abi() {
-        // nvkmd_rm.c rm_result() returns the status as the VkResult.
+        // nvkmd_rm.c rm_result() returns the status as the VkResult. A failure
+        // of a created device that is neither loss nor out of memory is an
+        // implementation failure, VK_ERROR_UNKNOWN (-13): submission, waits and
+        // status queries have no VK_ERROR_INITIALIZATION_FAILED.
         let io = |errno| Error::Io("op", std::io::Error::from_raw_os_error(errno));
         assert_eq!(vk_status(&Error::DeviceLost("x".into())), -4);
         assert_eq!(vk_status(&io(12)), -1);
-        assert_eq!(vk_status(&io(22)), -3);
-        assert_eq!(vk_status(&Error::Contract("x".into())), -3);
+        assert_eq!(vk_status(&io(22)), -13);
+        assert_eq!(vk_status(&Error::Contract("x".into())), -13);
         assert_eq!(
             vk_status(&Error::Rm {
                 operation: "op",
                 status: 0x1f
             }),
-            -3
+            -13
         );
         let wait = WaitError::Timeout {
             operation: "op",
@@ -3816,7 +3833,7 @@ mod tests {
             limit: Duration::ZERO,
             elapsed: Duration::ZERO,
         };
-        assert_eq!(vk_status(&wait.into()), -3);
+        assert_eq!(vk_status(&wait.into()), -13);
         // RM out of memory or of another resource it allocates from:
         // VK_ERROR_OUT_OF_DEVICE_MEMORY (nvstatuscodes.h 0x51, 0x1a).
         for status in [0x51, 0x1a] {
@@ -3853,9 +3870,9 @@ mod tests {
                     operation: "x",
                     reason: "y",
                 },
-                -3,
+                -13,
             ),
-            (SyncError::GenerationExhausted { operation: "x" }, -3),
+            (SyncError::GenerationExhausted { operation: "x" }, -13),
         ] {
             assert_eq!(vk_status(&error.into()), status);
         }
@@ -3895,33 +3912,33 @@ mod tests {
                 },
                 -2,
             ),
-            (ChannelError::ClassList { reason: "x" }, -3),
+            (ChannelError::ClassList { reason: "x" }, -13),
             (
                 ChannelError::MissingClass {
                     operation: "x",
                     class: ClassId::new(0xc7c0),
                 },
-                -3,
+                -13,
             ),
             (
                 ChannelError::HostClass {
                     class: ClassId::new(0xa06f),
                 },
-                -3,
+                -13,
             ),
             (
                 ChannelError::Unsupported {
                     operation: "x",
                     reason: "y",
                 },
-                -3,
+                -13,
             ),
-            (ChannelError::EngineMask { mask: 0x40 }, -3),
-            (ChannelError::SharedGroupEngine { mask: 0x1 }, -3),
-            (ChannelError::Group { reason: "x" }, -3),
-            (ChannelError::VaHeapCollision { what: "x" }, -3),
-            (ChannelError::SemaphoreAddress { address: 4 }, -3),
-            (ChannelError::HostMethodsTooLarge { words: 1 }, -3),
+            (ChannelError::EngineMask { mask: 0x40 }, -13),
+            (ChannelError::SharedGroupEngine { mask: 0x1 }, -13),
+            (ChannelError::Group { reason: "x" }, -13),
+            (ChannelError::VaHeapCollision { what: "x" }, -13),
+            (ChannelError::SemaphoreAddress { address: 4 }, -13),
+            (ChannelError::HostMethodsTooLarge { words: 1 }, -13),
             (
                 ChannelError::Batch {
                     operation: "x",
@@ -3929,7 +3946,7 @@ mod tests {
                     waits: 0,
                     signals: 0,
                 },
-                -3,
+                -13,
             ),
             (
                 ChannelError::Push {
@@ -3937,15 +3954,15 @@ mod tests {
                     size: 4,
                     flags: 0,
                 },
-                -3,
+                -13,
             ),
-            (ChannelError::SequenceExhausted, -3),
+            (ChannelError::SequenceExhausted, -13),
             (
                 ChannelError::Sem32Range {
                     token: FenceValue::new(1 << 31),
                     retired: FenceValue::new(0),
                 },
-                -3,
+                -13,
             ),
             (
                 ChannelError::Token {
@@ -3953,16 +3970,16 @@ mod tests {
                     token: FenceValue::new(2),
                     issued: FenceValue::new(1),
                 },
-                -3,
+                -13,
             ),
-            (ChannelError::Doorbell, -3),
+            (ChannelError::Doorbell, -13),
             (
                 ChannelError::ResultMismatch {
                     word: 0,
                     actual: 1,
                     expected: 2,
                 },
-                -3,
+                -13,
             ),
         ] {
             assert_eq!(vk_status(&error.into()), status);
@@ -3988,22 +4005,22 @@ mod tests {
                     requested: 2,
                     limit: 3,
                 },
-                -3,
+                -13,
             ),
-            (MemoryError::NotLive { reason: "x" }, -3),
+            (MemoryError::NotLive { reason: "x" }, -13),
             (
                 MemoryError::Invalid {
                     operation: "x",
                     reason: "y",
                 },
-                -3,
+                -13,
             ),
             (
                 MemoryError::BlockLinearKind {
                     kind: 1,
                     generic: 6,
                 },
-                -3,
+                -13,
             ),
             (
                 MemoryError::PoolBlockGrant {
@@ -4013,7 +4030,7 @@ mod tests {
                     requested_size: 1,
                     free: None,
                 },
-                -3,
+                -13,
             ),
             (
                 MemoryError::BlockLinearGrant {
@@ -4023,18 +4040,18 @@ mod tests {
                     kind: 6,
                     free: None,
                 },
-                -3,
+                -13,
             ),
-            (MemoryError::BarAccounting { reason: "x" }, -3),
-            (MemoryError::CpuMapping { reason: "x" }, -3),
-            (MemoryError::UserdLength { length: 1 }, -3),
+            (MemoryError::BarAccounting { reason: "x" }, -13),
+            (MemoryError::CpuMapping { reason: "x" }, -13),
+            (MemoryError::UserdLength { length: 1 }, -13),
             (
                 MemoryError::PatternMismatch {
                     word: 0,
                     actual: 1,
                     expected: 2,
                 },
-                -3,
+                -13,
             ),
             (
                 MemoryError::GpuMappingLimits {
@@ -4042,14 +4059,14 @@ mod tests {
                     length: ByteSize::new(1),
                     allocation_size: ByteSize::new(0),
                 },
-                -3,
+                -13,
             ),
             (
                 MemoryError::KindMismatch {
                     chosen: 0,
                     requested: 6,
                 },
-                -3,
+                -13,
             ),
             (
                 MemoryError::OutOfBounds {
@@ -4058,13 +4075,13 @@ mod tests {
                     len: 4,
                     size: 4,
                 },
-                -3,
+                -13,
             ),
             (
                 MemoryError::GpuVa {
                     address: GpuVa::new(1),
                 },
-                -3,
+                -13,
             ),
         ] {
             assert_eq!(vk_status(&error.into()), status);
@@ -4118,7 +4135,7 @@ mod tests {
             alloc(Error::Io("op", std::io::Error::from_raw_os_error(12))),
             -1
         );
-        assert_eq!(alloc(Error::Contract("null allocation output".into())), -3);
+        assert_eq!(alloc(Error::Contract("null allocation output".into())), -13);
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let status = guarded_as(Entry::Alloc, "test_entry", None, || panic!("injected"));
@@ -4160,10 +4177,10 @@ mod tests {
             -2
         );
         assert_eq!(import(Error::DeviceLost("x".into())), -2);
-        assert_eq!(import(Error::Contract("x".into())), -3);
+        assert_eq!(import(Error::Contract("x".into())), -13);
         // SAFETY: a NULL device is rejected before any pointer is used.
         let status = unsafe { nv_rm_import(std::ptr::null_mut(), 0, -1, std::ptr::null_mut()) };
-        assert_eq!(status, -3, "a NULL output is a broken bridge contract");
+        assert_eq!(status, -13, "a NULL output is a broken bridge contract");
     }
     #[test]
     fn export_failures_follow_nvk() {
@@ -4189,7 +4206,7 @@ mod tests {
             export(Error::Io("op", std::io::Error::from_raw_os_error(12))),
             -1
         );
-        assert_eq!(export(Error::Contract("x".into())), -3);
+        assert_eq!(export(Error::Contract("x".into())), -13);
     }
     #[test]
     fn map_failures_follow_nvk() {
@@ -4283,6 +4300,28 @@ mod tests {
         let host = || Error::Io("op", std::io::Error::from_raw_os_error(12));
         assert_eq!(Entry::Sync.status(&host()), -1);
         assert_eq!(Entry::SyncFd.status(&host()), -1);
+    }
+    #[test]
+    fn queue_creation_keeps_initialization_failed() {
+        // Contexts are created inside vkCreateDevice, which lists
+        // INITIALIZATION_FAILED and DEVICE_LOST.
+        let create = |error: Error| Entry::Create.status(&error);
+        assert_eq!(create(Error::Contract("x".into())), -3);
+        assert_eq!(create(ChannelError::EngineMask { mask: 0x40 }.into()), -3);
+        assert_eq!(create(ChannelError::Stopped.into()), -4);
+        assert_eq!(
+            create(
+                ChannelError::Allocate {
+                    class: ClassId::new(0xc96f),
+                    source: Box::new(Error::Rm {
+                        operation: "op",
+                        status: 0x51,
+                    }),
+                }
+                .into()
+            ),
+            -2
+        );
     }
     #[test]
     fn probing_reports_no_device_loss() {
