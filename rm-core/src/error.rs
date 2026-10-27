@@ -135,6 +135,13 @@ pub enum SyncError {
         /// Why it does not apply.
         reason: &'static str,
     },
+    /// A binary payload whose slot is captured by pending work, or a foreign payload, cannot
+    /// be written in place: the caller retries the operation with a fresh slot.
+    #[error("{operation}: needs a replacement slot")]
+    SlotRequired {
+        /// The operation (binary reset or signal).
+        operation: &'static str,
+    },
     /// Every slot of the semaphore slot pool (GPU-visible memory the payloads live in) is
     /// in use.
     #[error("semaphore slot pool exhausted ({slots} live slots)")]
@@ -160,7 +167,8 @@ impl SyncError {
             | Self::SharedProducerFailed => true,
             Self::Invalid { .. }
             | Self::GenerationExhausted { .. }
-            | Self::SlotsExhausted { .. } => false,
+            | Self::SlotsExhausted { .. }
+            | Self::SlotRequired { .. } => false,
         }
     }
 }

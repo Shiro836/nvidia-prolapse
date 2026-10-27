@@ -25,7 +25,10 @@ use crate::{
     events::{HostListener, RmEvents, TriggerPort},
     gpu::{AddressSpace, GpuMapping, Push, Queue, QueueShared, SemaphoreOp, SubmitStatus},
     reclaim::Reclaim,
-    rm::{ByteSize, Client, Device, Error, FenceValue, GpuVa, Mapping, Memory, Result, WaitError},
+    rm::{
+        ByteSize, Client, Device, Error, FenceValue, GpuVa, Mapping, Memory, Result, SyncError,
+        WaitError,
+    },
     slots::{PAGE_BYTES, Slot, SlotPool, TimelineView},
     syncobj::{Foreign, Shared, SignalPlan, SyncObj, WaitPlan},
     waiters::Waiters,
@@ -432,7 +435,7 @@ impl Bridge {
     /// before device teardown). Requires Inner.
     fn grow(&self, inner: &mut Inner) -> Result<()> {
         if self.core.pool.next_page()?.is_none() {
-            return Err(crate::rm::SyncError::SlotsExhausted {
+            return Err(SyncError::SlotsExhausted {
                 slots: crate::slots::MAX_SLOTS,
             }
             .into());
@@ -3357,8 +3360,11 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_destroy_deferred(p: *mut Bridge, id: 
         unsafe { nv_rm_sync_destroy(p, id) }
     })
 }
-fn needs_slot(error: &Error) -> bool {
-    matches!(error, Error::Contract(m) if m.ends_with("needs a replacement slot"))
+/// The payload must be replaced by a fresh slot (`SyncError::SlotRequired`):
+/// `needs_fresh_slot` is only a hint taken outside the payload lock, so the
+/// operation can find the slot captured after all and is retried with one.
+pub(crate) fn needs_slot(error: &Error) -> bool {
+    matches!(error, Error::Sync(SyncError::SlotRequired { .. }))
 }
 /// # Safety
 /// nv_rm.h's contract for every entry point: the device pointer is NULL or a

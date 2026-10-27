@@ -476,9 +476,8 @@ impl SyncObj {
             }
             _ => {
                 let Some(fresh) = fresh else {
-                    return Err(SyncError::Invalid {
+                    return Err(SyncError::SlotRequired {
                         operation: "binary reset",
-                        reason: "needs a replacement slot",
                     }
                     .into());
                 };
@@ -524,9 +523,8 @@ impl SyncObj {
                 // vk_sync_import_sync_file(-1) signals; a captured slot or a
                 // foreign payload is replaced, never written.
                 let Some(fresh) = fresh else {
-                    return Err(SyncError::Invalid {
+                    return Err(SyncError::SlotRequired {
                         operation: "binary signal",
-                        reason: "needs a replacement slot",
                     }
                     .into());
                 };
@@ -902,6 +900,23 @@ mod tests {
         assert_eq!(pool.refs(slot), 1);
     }
 
+    #[test]
+    fn captured_binary_slot_asks_the_entry_point_for_a_replacement() {
+        // nv_rm_sync_reset/signal take a fresh slot on a hint read outside the
+        // payload lock; when the slot is captured after all, the payload's
+        // error must be the one they retry on.
+        let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
+        let sync = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
+        let Payload::Native(slot) = sync.lock().unwrap().payload else {
+            panic!()
+        };
+        pool.retain(slot);
+        let reset = sync.reset(None).unwrap_err();
+        assert!(crate::mesa::needs_slot(&reset), "{reset}");
+        let signal = sync.signal(0, None).unwrap_err();
+        assert!(crate::mesa::needs_slot(&signal), "{signal}");
+        pool.release(slot);
+    }
     #[test]
     fn binary_status_reset_in_place_only_without_gpu_references() {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
