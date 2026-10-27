@@ -974,9 +974,14 @@ rm_mem_map(struct nvkmd_mem* base,
    int32_t status = nv_rm_map(dev->rm, mem->allocation.id, &address);
    if (status != VK_SUCCESS) {
       /* A rollback can poison Rust ownership while returning its original RM
-       * error. The atomic loss snapshot disambiguates it without another RPC. */
-      if (status == VK_ERROR_DEVICE_LOST || nv_rm_is_lost(dev->rm))
-         return rm_mem_lost(dev, "CPU map", status);
+       * error. The atomic loss snapshot disambiguates it without another RPC.
+       * vkMapMemory has no VK_ERROR_DEVICE_LOST: publish the loss, report the
+       * failed map. */
+      if (status == VK_ERROR_DEVICE_LOST || nv_rm_is_lost(dev->rm)) {
+         rm_mem_lost(dev, "CPU map", status);
+         return vk_errorf(log, VK_ERROR_MEMORY_MAP_FAILED,
+                          "Native Rust RM CPU map failed: device lost");
+      }
       VkResult result = status == VK_ERROR_OUT_OF_HOST_MEMORY ||
                         status == VK_ERROR_OUT_OF_DEVICE_MEMORY ?
                            (VkResult)status : VK_ERROR_MEMORY_MAP_FAILED;
@@ -987,7 +992,7 @@ rm_mem_map(struct nvkmd_mem* base,
        * address is invalid. Do not strand that reference on this error path. */
       status = nv_rm_unmap(dev->rm, mem->allocation.id);
       if (status != VK_SUCCESS)
-         return rm_mem_lost(dev, "null CPU map rollback", status);
+         rm_mem_lost(dev, "null CPU map rollback", status);
       return vk_errorf(log, VK_ERROR_MEMORY_MAP_FAILED,
                        "Native Rust RM CPU map returned a null address");
    }

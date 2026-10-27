@@ -2019,6 +2019,7 @@ mod vk {
     pub(super) const ERROR_OUT_OF_DEVICE_MEMORY: i32 = -2;
     pub(super) const ERROR_INITIALIZATION_FAILED: i32 = -3;
     pub(super) const ERROR_DEVICE_LOST: i32 = -4;
+    pub(super) const ERROR_MEMORY_MAP_FAILED: i32 = -5;
     pub(super) const ERROR_TOO_MANY_OBJECTS: i32 = -10;
     pub(super) const ERROR_INVALID_EXTERNAL_HANDLE: i32 = -1_000_072_003;
 }
@@ -2091,6 +2092,12 @@ enum Entry {
     /// `OUT_OF_HOST_MEMORY`. NVK reports every failed dma-buf export as
     /// `TOO_MANY_OBJECTS` (nvkmd_nouveau_mem.c:293 at Mesa 26.2.5).
     Export,
+    /// `nv_rm_map`: `vkMapMemory`, whose codes are `OUT_OF_HOST_MEMORY`,
+    /// `OUT_OF_DEVICE_MEMORY` and `MEMORY_MAP_FAILED`. NVK reports a failed CPU
+    /// mapping as `MEMORY_MAP_FAILED` (nvkmd_nouveau_mem.c:247 at Mesa 26.2.5),
+    /// RM running out of BAR space included; a lost device is published and
+    /// reported the same way.
+    Map,
     /// Every other entry point: paths of a created device, where a lost device
     /// is `VK_ERROR_DEVICE_LOST` (spec "Lost Device").
     Device,
@@ -2103,9 +2110,13 @@ impl Entry {
     fn result(self, failure: Failure) -> i32 {
         match (self, failure) {
             (
-                Self::Open | Self::Alloc | Self::Import | Self::Export | Self::Device,
+                Self::Open | Self::Alloc | Self::Import | Self::Export | Self::Map | Self::Device,
                 Failure::HostMemory,
             ) => vk::ERROR_OUT_OF_HOST_MEMORY,
+            (
+                Self::Map,
+                Failure::DeviceMemory | Failure::Lost | Failure::Refused | Failure::Contract,
+            ) => vk::ERROR_MEMORY_MAP_FAILED,
             (Self::Export, Failure::DeviceMemory | Failure::Lost | Failure::Refused) => {
                 vk::ERROR_TOO_MANY_OBJECTS
             }
@@ -2402,30 +2413,28 @@ fn next_id(s: &mut Inner) -> Result<u64> {
 pub(crate) unsafe extern "C" fn nv_rm_map(p: *mut Bridge, memory: u64, out: *mut usize) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_map", object, move || {
-        report((|| {
-            if out.is_null() {
-                return Err(Error::Contract("null CPU map output".into()));
-            }
-            let b = present(object)?;
-            b.core.live()?;
-            let mut guard = b.lock()?;
-            let s = &mut guard.0;
-            b.reclaim_locked(s, false);
-            let buffer = s
-                .buffers
-                .get(&memory)
-                .ok_or_else(|| Error::Contract("map unknown RM memory".into()))?;
-            let result = buffer
-                .cpu
-                .acquire(|| buffer.memory.map(), Mapping::cpu_address);
-            if s.device.cpu_mapping_failed() {
-                b.lose_locked(s);
-            }
-            let address = result?;
-            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-            unsafe { output(out, address) }
-        })())
+    guarded_as(Entry::Map, "nv_rm_map", object, move || {
+        if out.is_null() {
+            return Err(Error::Contract("null CPU map output".into()));
+        }
+        let b = present(object)?;
+        b.core.live()?;
+        let mut guard = b.lock()?;
+        let s = &mut guard.0;
+        b.reclaim_locked(s, false);
+        let buffer = s
+            .buffers
+            .get(&memory)
+            .ok_or_else(|| Error::Contract("map unknown RM memory".into()))?;
+        let result = buffer
+            .cpu
+            .acquire(|| buffer.memory.map(), Mapping::cpu_address);
+        if s.device.cpu_mapping_failed() {
+            b.lose_locked(s);
+        }
+        let address = result?;
+        // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
+        unsafe { output(out, address) }
     })
 }
 /// # Safety
@@ -4142,6 +4151,41 @@ mod tests {
             -1
         );
         assert_eq!(export(Error::Contract("x".into())), -3);
+    }
+    #[test]
+    fn map_failures_follow_nvk() {
+        // vkMapMemory may return OUT_OF_HOST_MEMORY, OUT_OF_DEVICE_MEMORY or
+        // MEMORY_MAP_FAILED (not DEVICE_LOST); NVK reports a failed CPU map as
+        // MEMORY_MAP_FAILED (nvkmd_nouveau_mem.c:247).
+        let map = |error: Error| Entry::Map.status(&error);
+        for error in [
+            Error::Rm {
+                operation: "RM map memory",
+                status: 0x51,
+            },
+            Error::Rm {
+                operation: "RM map memory",
+                status: 0x1f,
+            },
+            MemoryError::BarPressure {
+                used: 1,
+                requested: 2,
+                limit: 2,
+            }
+            .into(),
+            MemoryError::CleanupFailed.into(),
+            Error::DeviceLost("x".into()),
+            Error::Contract("x".into()),
+        ] {
+            assert_eq!(map(error), -5);
+        }
+        assert_eq!(
+            map(Error::Io(
+                "mmap NVIDIA allocation",
+                std::io::Error::from_raw_os_error(12)
+            )),
+            -1
+        );
     }
     #[test]
     fn probing_reports_no_device_loss() {

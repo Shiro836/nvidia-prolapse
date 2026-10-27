@@ -64,7 +64,8 @@ test_memory_cleanup(void)
       memory_reset_case(&vk);
       memory_api.map_status = original ? VK_ERROR_INITIALIZATION_FAILED : VK_ERROR_DEVICE_LOST;
       memory_api.publish_loss = original;
-      assert(rm_mem_map(&mem.base, &vk.base, 0, NULL, &address) == VK_ERROR_DEVICE_LOST);
+      /* vkMapMemory has no VK_ERROR_DEVICE_LOST; the loss is published. */
+      assert(rm_mem_map(&mem.base, &vk.base, 0, NULL, &address) == VK_ERROR_MEMORY_MAP_FAILED);
       assert(address == NULL);
       memory_expect_lost(&vk, "CPU map");
    }
@@ -76,7 +77,7 @@ test_memory_cleanup(void)
    memory_reset_case(&vk);
    memory_api.address = 0;
    memory_api.unmap_status = VK_ERROR_INITIALIZATION_FAILED;
-   assert(rm_mem_map(&mem.base, &vk.base, 0, NULL, &address) == VK_ERROR_DEVICE_LOST);
+   assert(rm_mem_map(&mem.base, &vk.base, 0, NULL, &address) == VK_ERROR_MEMORY_MAP_FAILED);
    assert(address == NULL && memory_api.unmaps == 1);
    memory_expect_lost(&vk, "null CPU map rollback");
 
