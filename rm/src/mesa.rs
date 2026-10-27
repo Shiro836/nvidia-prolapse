@@ -432,9 +432,10 @@ impl Bridge {
     /// before device teardown). Requires Inner.
     fn grow(&self, inner: &mut Inner) -> Result<()> {
         if self.core.pool.next_page()?.is_none() {
-            return Err(Error::Contract(
-                "semaphore slot pool exhausted (1M live slots)".into(),
-            ));
+            return Err(crate::rm::SyncError::SlotsExhausted {
+                slots: crate::slots::MAX_SLOTS,
+            }
+            .into());
         }
         let memory = inner
             .device
@@ -2049,7 +2050,9 @@ impl Failure {
             return Self::DeviceMemory;
         }
         match error {
-            Error::Io(_, error) if error.raw_os_error() == Some(12) => Self::HostMemory,
+            Error::Io(_, error) if error.kind() == std::io::ErrorKind::OutOfMemory => {
+                Self::HostMemory
+            }
             Error::Contract(_) => Self::Contract,
             Error::Io(..)
             | Error::Rm { .. }
@@ -3818,6 +3821,14 @@ mod tests {
         let io = |errno| Error::Io("op", std::io::Error::from_raw_os_error(errno));
         assert_eq!(vk_status(&Error::DeviceLost("x".into())), -4);
         assert_eq!(vk_status(&io(12)), -1);
+        // A failed host allocation in our own code is out of host memory too.
+        assert_eq!(
+            vk_status(&Error::Io(
+                "op",
+                std::io::Error::new(std::io::ErrorKind::OutOfMemory, "try_reserve")
+            )),
+            -1
+        );
         assert_eq!(vk_status(&io(22)), -13);
         assert_eq!(vk_status(&Error::Contract("x".into())), -13);
         assert_eq!(
@@ -3873,6 +3884,8 @@ mod tests {
                 -13,
             ),
             (SyncError::GenerationExhausted { operation: "x" }, -13),
+            // The slot pool is GPU-visible memory: full is out of device memory.
+            (SyncError::SlotsExhausted { slots: 1 << 20 }, -2),
         ] {
             assert_eq!(vk_status(&error.into()), status);
         }

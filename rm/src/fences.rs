@@ -202,7 +202,10 @@ fn sync_status_with(
     entries
         .try_reserve_exact(usize_from_u32(count))
         .map_err(|error| {
-            Error::Contract(format!("allocate sync_file fence information: {error}"))
+            Error::Io(
+                "allocate sync_file fence information",
+                io::Error::new(io::ErrorKind::OutOfMemory, error),
+            )
         })?;
     entries.resize(usize_from_u32(count), SyncFenceInfo::default());
     inspect(&mut entries)

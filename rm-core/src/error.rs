@@ -79,8 +79,9 @@ impl Error {
     }
 
     /// RM ran out of memory or of another resource it allocates objects from
-    /// ([`status::NO_MEMORY`], [`status::INSUFFICIENT_RESOURCES`]): what the C ABI reports
-    /// as `VK_ERROR_OUT_OF_DEVICE_MEMORY`. An RM allocation follows the failure it wraps.
+    /// ([`status::NO_MEMORY`], [`status::INSUFFICIENT_RESOURCES`]), or the semaphore slot
+    /// pool is full: what the C ABI reports as `VK_ERROR_OUT_OF_DEVICE_MEMORY`. An RM
+    /// allocation follows the failure it wraps.
     pub fn is_out_of_device_memory(&self) -> bool {
         match self {
             Self::Rm { status, .. } => {
@@ -89,6 +90,7 @@ impl Error {
             Self::Channel(ChannelError::Allocate { source, .. }) => {
                 source.is_out_of_device_memory()
             }
+            Self::Sync(SyncError::SlotsExhausted { .. }) => true,
             Self::Io(..)
             | Self::Contract(_)
             | Self::DeviceLost(_)
@@ -133,6 +135,13 @@ pub enum SyncError {
         /// Why it does not apply.
         reason: &'static str,
     },
+    /// Every slot of the semaphore slot pool (GPU-visible memory the payloads live in) is
+    /// in use.
+    #[error("semaphore slot pool exhausted ({slots} live slots)")]
+    SlotsExhausted {
+        /// The pool's capacity.
+        slots: usize,
+    },
     /// A binary payload's generation counter reached its limit.
     #[error("{operation}: binary payload generation exhausted")]
     GenerationExhausted {
@@ -149,7 +158,9 @@ impl SyncError {
             | Self::Closed(_)
             | Self::ProducerError { .. }
             | Self::SharedProducerFailed => true,
-            Self::Invalid { .. } | Self::GenerationExhausted { .. } => false,
+            Self::Invalid { .. }
+            | Self::GenerationExhausted { .. }
+            | Self::SlotsExhausted { .. } => false,
         }
     }
 }

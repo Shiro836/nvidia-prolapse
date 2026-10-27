@@ -143,8 +143,7 @@ impl VideoError {
 /// (`NV_VIDEO_E_DEVICE_LOST`). A lost device is never reported as out of memory.
 impl From<nv_rm_core::Error> for VideoError {
     fn from(e: nv_rm_core::Error) -> Self {
-        let host_enomem =
-            matches!(&e, nv_rm_core::Error::Io(_, io) if io.raw_os_error() == Some(12));
+        let host_enomem = matches!(&e, nv_rm_core::Error::Io(_, io) if io.kind() == std::io::ErrorKind::OutOfMemory);
         if !e.is_device_lost() && (e.is_out_of_device_memory() || host_enomem) {
             Self::NoMemory(e.to_string())
         } else {

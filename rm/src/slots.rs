@@ -34,6 +34,8 @@ pub(crate) const PAGE_BYTES: usize = 64 * 1024;
 pub(crate) const SLOTS_PER_PAGE: usize = PAGE_BYTES / SLOT_BYTES;
 /// 256 pages = 1M slots (16 MiB SYS). Exhaustion is a named error.
 pub(crate) const MAX_PAGES: usize = 256;
+/// Slots the pool can hold.
+pub(crate) const MAX_SLOTS: usize = MAX_PAGES * SLOTS_PER_PAGE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Slot(pub(crate) u32);
@@ -175,9 +177,7 @@ impl SlotPool {
         let mut free = self.free_list()?;
         let index = free.pages;
         if index >= MAX_PAGES {
-            return Err(Error::Contract(
-                "semaphore slot pool exhausted (1M live slots)".into(),
-            ));
+            return Err(SyncError::SlotsExhausted { slots: MAX_SLOTS }.into());
         }
         let page = Page {
             cpu,
