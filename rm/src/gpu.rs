@@ -1914,6 +1914,12 @@ impl Queue {
         self.lost = true;
         self.shared.lost.store(true, Ordering::Release);
     }
+    /// The state `retire_completion` or a failed `submit` leaves behind (this
+    /// channel lost, the device not yet told), without a GPU fault.
+    #[cfg(test)]
+    pub(crate) fn mark_lost_for_test(&mut self) {
+        self.mark_lost();
+    }
     /// SYS-memory-only retirement: pops retired batches, frees their ring
     /// entries, overflow segments and semaphore-slot references. Amortized on
     /// the submitting caller (stock retires temporaries at end of submit too).

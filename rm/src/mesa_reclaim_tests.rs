@@ -185,6 +185,39 @@ fn pending_sync_file(
     fd
 }
 
+/// A channel lost on its own (not yet published to the device) reports
+/// VK_ERROR_DEVICE_LOST to a fence export, and the export publishes the loss:
+/// the C status query and wait-status snapshot then report it to Mesa. No GPU
+/// fault is involved: the channel's work has retired and the channel is then
+/// marked lost on the CPU, as retirement or a failed submission does. (The
+/// work must have retired: teardown treats a lost channel as stopped.)
+#[test]
+#[ignore = "local NVIDIA GPU: fence export from a lost channel reports and publishes device loss"]
+fn lost_channel_fence_export_reports_device_lost() {
+    let pci = selected_pci();
+    let drm = render_node(pci);
+    let bridge = open(pci);
+    let ctx = context(&bridge);
+    let sem = create(&bridge, false, 0);
+    let token = submit(&bridge, ctx, &[], &[], &[point(&sem, 0)]);
+    assert_eq!(c::wait(&bridge, ctx, token, 5_000_000_000), 0);
+    queue_slot(&mut bridge.lock().unwrap().0.queues, ctx)
+        .unwrap()
+        .mark_lost_for_test();
+    assert_eq!(c::is_lost(&bridge), 0, "the device is not told yet");
+    let mut fd = -1;
+    assert_eq!(
+        c::context_fence(&bridge, ctx, token, drm.as_fd(), &mut fd),
+        -4,
+        "VK_ERROR_DEVICE_LOST"
+    );
+    assert_eq!(fd, -1);
+    assert_eq!(c::is_lost(&bridge), 1, "the loss is published");
+    assert_eq!(c::check_status(&bridge), -4);
+    assert_eq!(c::sync_destroy(&bridge, sem), 0);
+    assert_eq!(c::context_destroy(&bridge, ctx), 0);
+}
+
 /// 5a. The Android cycle: GPU work gated on a foreign sync_file whose producer
 /// signal comes from the thread that frees unrelated memory afterwards. The
 /// former synchronous all-queue drain blocked that thread forever (until a

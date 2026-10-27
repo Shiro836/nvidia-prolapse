@@ -181,6 +181,17 @@ pub(in crate::mesa) fn wait(b: &Bridge, ctx: u64, token: u64, timeout_ns: u64) -
     // SAFETY: live bridge; ids and token are plain values.
     unsafe { nv_rm_wait(raw(b), ctx, token, timeout_ns) }
 }
+pub(in crate::mesa) fn context_fence(
+    b: &Bridge,
+    ctx: u64,
+    token: u64,
+    drm: BorrowedFd<'_>,
+    out: &mut i32,
+) -> i32 {
+    // SAFETY: live bridge; `drm` is open for the call; `out` is an exclusive
+    // i32 the call writes.
+    unsafe { nv_rm_context_fence(raw(b), ctx, token, drm.as_raw_fd(), out) }
+}
 pub(in crate::mesa) fn poll(b: &Bridge, ctx: u64, token: u64, complete: &mut u32) -> i32 {
     // SAFETY: live bridge; `complete` is an exclusive u32 the call writes.
     unsafe { nv_rm_poll(raw(b), ctx, token, complete) }

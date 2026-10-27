@@ -521,6 +521,14 @@ impl Bridge {
         }
         Ok(())
     }
+    /// A failed `Queue::submit` marked its channel lost (partially written
+    /// ring, failed overflow mapping, or a channel already lost): the device
+    /// cannot continue, on every path that submits.
+    #[track_caller]
+    fn submit_failed(&self, inner: &mut Inner, error: &Error) -> Error {
+        self.lose_locked(inner);
+        Error::DeviceLost(error.to_string())
+    }
     #[track_caller]
     fn lose_locked(&self, inner: &mut Inner) {
         self.core.mark_lost();
@@ -1247,12 +1255,7 @@ impl Bridge {
         });
         let status = match result {
             Ok(status) => status,
-            Err(error) => {
-                // The queue marked its channel lost (partially written ring or
-                // failed overflow mapping): the device cannot continue.
-                self.lose_locked(inner);
-                return Err(Error::DeviceLost(error.to_string()));
-            }
+            Err(error) => return Err(self.submit_failed(inner, &error)),
         };
         if let SubmitStatus::Submitted(_) = status {
             // Allocated references now belong to payloads/gates/points via
@@ -1388,7 +1391,7 @@ impl Bridge {
                             std::io::Error::from_raw_os_error(12),
                         ));
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(self.submit_failed(inner, &error)),
                 };
                 record_acquires(inner, context, token.get(), [Acquire::Binary(slot)]);
                 let queue = queue_ref(inner, context)?;
@@ -1425,7 +1428,7 @@ impl Bridge {
                                 "external fence export capacity exhausted",
                                 std::io::Error::from_raw_os_error(12),
                             )),
-                            Err(error) => Err(error),
+                            Err(error) => Err(self.submit_failed(inner, &error)),
                         };
                     }
                 };
@@ -1980,12 +1983,29 @@ impl crate::ffi::Failable for Bridge {
 }
 /// The shared C-boundary guard (crate::ffi::guard) for an entry point on
 /// `bridge`, failing with VK_ERROR_DEVICE_LOST.
+///
+/// An entry point that reports VK_ERROR_DEVICE_LOST publishes the loss on
+/// its device before returning: Vulkan treats the logical device as lost
+/// from then on (spec "Lost Device"), and Mesa learns it on its next status
+/// or wait query (nvkmd_rm.c rm_wait_status, rm_check_status). Publication
+/// is CPU-only (Core::mark_lost); stopping submissions follows on the next
+/// locked call. The guard's own failure value skips this: that object is
+/// already failed, or it belongs to the parent of a forked child, whose
+/// wakeup descriptors must not be touched.
 fn guarded(entry: &'static str, bridge: Option<&Bridge>, f: impl FnOnce() -> i32) -> i32 {
     crate::ffi::guard(
         entry,
         bridge.map(|b| -> &dyn crate::ffi::Failable { b }),
         || -4,
-        f,
+        || {
+            let status = f();
+            if status == -4
+                && let Some(bridge) = bridge
+            {
+                bridge.core.mark_lost();
+            }
+            status
+        },
     )
 }
 /// The bridge argument of an entry point, or the named error for NULL.
