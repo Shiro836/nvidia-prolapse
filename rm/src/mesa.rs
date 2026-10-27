@@ -2012,25 +2012,107 @@ fn guarded(entry: &'static str, bridge: Option<&Bridge>, f: impl FnOnce() -> i32
 fn present(bridge: Option<&Bridge>) -> Result<&Bridge> {
     bridge.ok_or_else(|| Error::Contract("null RM bridge".into()))
 }
-/// The `VkResult` an `nv_rm_*` entry point returns for `error` (`nv_rm.h`; `nvkmd_rm.c`
-/// passes it through as the `VkResult`): `VK_ERROR_DEVICE_LOST` (-4) for a lost
-/// device, `VK_ERROR_OUT_OF_HOST_MEMORY` (-1) for an `ENOMEM` syscall, and
-/// `VK_ERROR_INITIALIZATION_FAILED` (-3) for every other failure.
+/// `VkResult` values the entry points return (Vulkan registry `vk.xml`, enum
+/// `VkResult`); `nvkmd_rm.c` passes them to Mesa as they are.
+mod vk {
+    pub(super) const ERROR_OUT_OF_HOST_MEMORY: i32 = -1;
+    pub(super) const ERROR_INITIALIZATION_FAILED: i32 = -3;
+    pub(super) const ERROR_DEVICE_LOST: i32 = -4;
+}
+/// What a failed entry point's error means to the application, before the
+/// entry point picks the `VkResult` its Vulkan commands may return.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+    /// A host allocation failed (a syscall returned `ENOMEM`).
+    HostMemory,
+    /// The device is lost (`Error::is_device_lost`).
+    Lost,
+    /// Any other failure.
+    Other,
+}
+impl Failure {
+    fn of(error: &Error) -> Self {
+        if error.is_device_lost() {
+            return Self::Lost;
+        }
+        match error {
+            Error::Io(_, error) if error.raw_os_error() == Some(12) => Self::HostMemory,
+            Error::Io(..)
+            | Error::Rm { .. }
+            | Error::Contract(_)
+            | Error::Wait(_)
+            | Error::DeviceLost(_)
+            | Error::Sync(_)
+            | Error::Channel(_)
+            | Error::Memory(_) => Self::Other,
+        }
+    }
+}
+/// The Vulkan commands an entry point serves. A failure may only become a
+/// `VkResult` that every one of them lists in its "Return Codes" (`vk.xml`
+/// `errorcodes`); where Mesa's NVK maps the same kernel failure, the entry
+/// point follows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Entry {
+    /// `nv_rm_open`: physical-device probing (`vkEnumeratePhysicalDevices`) and
+    /// `vkCreateDevice`. Their common codes are `OUT_OF_HOST_MEMORY`,
+    /// `OUT_OF_DEVICE_MEMORY` and `INITIALIZATION_FAILED`;
+    /// `vkEnumeratePhysicalDevices` has no `DEVICE_LOST`. NVK reports a device it
+    /// cannot open as `INITIALIZATION_FAILED` (nvkmd_nouveau_dev.c:44 at Mesa
+    /// 26.2.5).
+    Open,
+    /// Every other entry point: paths of a created device, where a lost device
+    /// is `VK_ERROR_DEVICE_LOST` (spec "Lost Device").
+    Device,
+}
+impl Entry {
+    /// The `VkResult` this entry point returns for `error`.
+    fn status(self, error: &Error) -> i32 {
+        self.result(Failure::of(error))
+    }
+    fn result(self, failure: Failure) -> i32 {
+        match (self, failure) {
+            (Self::Open | Self::Device, Failure::HostMemory) => vk::ERROR_OUT_OF_HOST_MEMORY,
+            (Self::Open, Failure::Lost | Failure::Other) | (Self::Device, Failure::Other) => {
+                vk::ERROR_INITIALIZATION_FAILED
+            }
+            (Self::Device, Failure::Lost) => vk::ERROR_DEVICE_LOST,
+        }
+    }
+}
+/// The `VkResult` of a failed [`Entry::Device`] entry point (`nv_rm.h`).
 fn vk_status(error: &Error) -> i32 {
-    if error.is_device_lost() {
-        return -4;
-    }
-    match error {
-        Error::Io(_, error) if error.raw_os_error() == Some(12) => -1,
-        Error::Io(..)
-        | Error::Rm { .. }
-        | Error::Contract(_)
-        | Error::Wait(_)
-        | Error::DeviceLost(_)
-        | Error::Sync(_)
-        | Error::Channel(_)
-        | Error::Memory(_) => -3,
-    }
+    Entry::Device.status(error)
+}
+/// The shared C-boundary guard for an entry point whose body returns a
+/// `Result`: a failure becomes `entry`'s `VkResult`, and a lost device is
+/// published on `bridge` whatever that result is (Mesa learns it on its next
+/// status or wait query, as for [`guarded`]). A panic marks `bridge` failed
+/// and returns `entry`'s result for a lost device.
+fn guarded_as(
+    entry: Entry,
+    name: &'static str,
+    bridge: Option<&Bridge>,
+    f: impl FnOnce() -> Result<()>,
+) -> i32 {
+    crate::ffi::guard(
+        name,
+        bridge.map(|b| -> &dyn crate::ffi::Failable { b }),
+        || entry.result(Failure::Lost),
+        || match f() {
+            Ok(()) => 0,
+            Err(error) => {
+                diag!("nvk Rust RM: {error}");
+                let failure = Failure::of(&error);
+                if failure == Failure::Lost
+                    && let Some(bridge) = bridge
+                {
+                    bridge.core.mark_lost();
+                }
+                entry.result(failure)
+            }
+        },
+    )
 }
 fn report(result: Result<()>) -> i32 {
     match result {
@@ -2101,20 +2183,18 @@ pub(crate) unsafe extern "C" fn nv_rm_open(
     out: *mut *mut Bridge,
     info: *mut Info,
 ) -> i32 {
-    guarded("nv_rm_open", None, move || {
-        report((|| {
-            if out.is_null() || info.is_null() {
-                return Err(Error::Contract("null RM open output".into()));
-            }
-            let (b, i) = Bridge::new([domain, bus, device, function])?;
-            // SAFETY: nv_rm.h: `info` is a writable NvRmInfo for the call
-            // (non-NULL checked above); Info is its #[repr(C)] layout.
-            unsafe { info.write(i) };
-            // SAFETY: nv_rm.h: `out` is writable for the call (non-NULL
-            // checked above). The Box is released only by nv_rm_close.
-            unsafe { out.write(Box::into_raw(Box::new(b))) };
-            Ok(())
-        })())
+    guarded_as(Entry::Open, "nv_rm_open", None, move || {
+        if out.is_null() || info.is_null() {
+            return Err(Error::Contract("null RM open output".into()));
+        }
+        let (b, i) = Bridge::new([domain, bus, device, function])?;
+        // SAFETY: nv_rm.h: `info` is a writable NvRmInfo for the call
+        // (non-NULL checked above); Info is its #[repr(C)] layout.
+        unsafe { info.write(i) };
+        // SAFETY: nv_rm.h: `out` is writable for the call (non-NULL
+        // checked above). The Box is released only by nv_rm_close.
+        unsafe { out.write(Box::into_raw(Box::new(b))) };
+        Ok(())
     })
 }
 /// Destroys a device made by nv_rm_open.
@@ -3901,6 +3981,32 @@ mod tests {
         assert_eq!(offset_of!(Info, name), 88);
         assert_eq!(offset_of!(Allocation, cpu_address), 16);
         assert_eq!(size_of::<SyncPoint>(), 16);
+    }
+    #[test]
+    fn probing_reports_no_device_loss() {
+        // vkEnumeratePhysicalDevices may not return VK_ERROR_DEVICE_LOST; a GPU
+        // that cannot be opened is VK_ERROR_INITIALIZATION_FAILED, as NVK
+        // reports it (nvkmd_nouveau_dev.c:44).
+        let open = |error: Error| Entry::Open.status(&error);
+        assert_eq!(open(Error::DeviceLost("x".into())), -3);
+        assert_eq!(
+            open(Error::Rm {
+                operation: "op",
+                status: 0x0f
+            }),
+            -3
+        );
+        assert_eq!(open(ChannelError::Stopped.into()), -3);
+        assert_eq!(open(Error::Contract("x".into())), -3);
+        assert_eq!(
+            open(Error::Io("op", std::io::Error::from_raw_os_error(12))),
+            -1
+        );
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let status = guarded_as(Entry::Open, "test_entry", None, || panic!("injected"));
+        std::panic::set_hook(hook);
+        assert_eq!(status, -3);
     }
     #[test]
     fn caller_panic_becomes_device_lost_instead_of_unwinding_into_c() {
