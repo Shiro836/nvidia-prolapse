@@ -280,7 +280,13 @@ fn has(p: &Built, m: u32) -> bool {
 
 #[test]
 fn per_generation_method_lists_and_fields() {
-    for (class, host, h264_app, noninc, m4c8, bw_b, av1) in PER_CLASS {
+    // Under Miri (RUST.md Gate: one test at most 1 min) Turing and Blackwell
+    // only: the legacy and the NEW_H264 picture setup, without and with AV1;
+    // Ampere and Ada take the same encoder paths with other field flags.
+    let classes = PER_CLASS
+        .into_iter()
+        .filter(|&(class, ..)| !cfg!(miri) || matches!(class, 0xc4b0 | 0xcfb0));
+    for (class, host, h264_app, noninc, m4c8, bw_b, av1) in classes {
         // H.264 progressive High: NEW_H264 (8) on Blackwell, legacy (3, 0x410/0x500/0x418) elsewhere.
         let pics = run(CODEC_H264, class, host, H264, (160, 144), 8).unwrap();
         assert_eq!(pics.len(), 4);

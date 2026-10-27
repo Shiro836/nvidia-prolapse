@@ -487,6 +487,22 @@ pub(crate) fn measured_versions() -> impl Iterator<Item = Compat> {
 mod tests {
     use super::*;
     use crate::abi;
+    /// The measured releases a test walks. Natively all of them; under Miri
+    /// (RUST.md Gate: one test at most 1 min) the first release of each
+    /// distinct profile, since packing and decoding depend only on the
+    /// profile.
+    fn releases() -> impl Iterator<Item = &'static str> {
+        data::VERSIONS
+            .iter()
+            .enumerate()
+            .filter(|&(index, (_, profile))| {
+                !cfg!(miri)
+                    || !data::VERSIONS[..index]
+                        .iter()
+                        .any(|(_, earlier)| std::ptr::eq(*earlier, *profile))
+            })
+            .map(|(_, &(version, _))| version)
+    }
     #[test]
     fn optional_static_bar1_exact_layouts_and_missing_outputs() {
         const NAME: &str = "NV2080_CTRL_FB_GET_STATIC_BAR1_INFO_PARAMS";
@@ -951,7 +967,7 @@ mod tests {
         let mut clients = 0;
         let mut external = 0;
         let mut fences = 0;
-        for &(version, _) in data::VERSIONS {
+        for version in releases() {
             let c = Compat::for_version(version).unwrap();
             if c.require_client_abi().is_err() {
                 continue;
@@ -1085,20 +1101,23 @@ mod tests {
             external += usize::from(crate::external::validate_compat(c).is_ok());
             fences += usize::from(crate::fences::validate_compat(c).is_ok());
         }
-        assert_eq!(clients, 225);
-        assert_eq!(external, 225);
-        assert_eq!(fences, 137);
+        if !cfg!(miri) {
+            assert_eq!(clients, 225);
+            assert_eq!(external, 225);
+            assert_eq!(fences, 137);
+        }
     }
     #[test]
     fn exact_membership_and_unknown_version_are_distinct() {
         assert_eq!(data::VERSIONS.len(), 335);
-        assert_eq!(
-            data::VERSIONS
-                .iter()
-                .filter(|(v, _)| Compat::for_version(v).unwrap().require_client_abi().is_ok())
-                .count(),
-            225
-        );
+        let client_abi = releases()
+            .filter(|v| Compat::for_version(v).unwrap().require_client_abi().is_ok())
+            .count();
+        if cfg!(miri) {
+            assert!(client_abi > 0);
+        } else {
+            assert_eq!(client_abi, 225);
+        }
         assert!(Compat::for_version("580.94.13").is_ok());
         assert!(Compat::for_version("580.94.14").is_err());
         assert!(Compat::for_version("615.999").is_err());
@@ -1161,7 +1180,7 @@ mod tests {
     }
     #[test]
     fn channel_fields_relocate_and_nonzero_removed_features_fail() {
-        for &(version, _) in data::VERSIONS {
+        for version in releases() {
             let c = Compat::for_version(version).unwrap();
             if c.layout("NV_CHANNELGPFIFO_ALLOCATION_PARAMETERS").is_err() {
                 continue;
@@ -1316,7 +1335,10 @@ mod tests {
             wire.bytes[field.offset..field.offset + field.len]
                 .copy_from_slice(&value.to_ne_bytes()[..field.len]);
         }
-        for c in measured_versions().filter(|c| c.require_client_abi().is_ok()) {
+        for c in releases()
+            .map(|version| Compat::for_version(version).unwrap())
+            .filter(|c| c.require_client_abi().is_ok())
+        {
             let mut gpc = [0u64; 3];
             let mut wire = c.pack(c.control_layout(0x2080122a).unwrap(), &gpc).unwrap();
             put(&mut wire, "grRouteInfo.flags", 3);

@@ -580,13 +580,16 @@ pub(crate) mod tests {
 
     #[test]
     fn concurrent_allocation_and_release_never_duplicate_live_slots() {
+        // Under Miri a shorter run (RUST.md Gate: one test at most 1 min)
+        // still drives allocation, reuse and the bulk drain on every thread.
+        let rounds: u32 = if cfg!(miri) { 1_000 } else { 20_000 };
         let (pool, _pages) = HostPages::pool(TimelineView::Native64, 2);
         let threads: Vec<_> = (0..4)
             .map(|_| {
                 let pool = Arc::clone(&pool);
                 std::thread::spawn(move || {
                     let mut live = Vec::new();
-                    for i in 0..20_000u32 {
+                    for i in 0..rounds {
                         if i % 3 != 2 {
                             let s = pool.try_allocate().unwrap().unwrap();
                             // A live slot's count is exactly ours.
