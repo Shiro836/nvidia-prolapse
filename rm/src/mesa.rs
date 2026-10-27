@@ -2107,6 +2107,20 @@ enum Entry {
     /// which every command may return; a lost device is published and reported
     /// the same way.
     Bind,
+    /// `nv_rm_sync_create`, `nv_rm_sync_signal`, `nv_rm_sync_reset`: CPU-side
+    /// payload operations of `vkCreateFence`/`vkCreateSemaphore`,
+    /// `vkSignalSemaphore` and `vkResetFences`, none of which lists
+    /// `DEVICE_LOST`. NVK's payloads (Mesa's DRM syncobj type) report a failed
+    /// signal or reset as `VK_ERROR_UNKNOWN` (vk_drm_syncobj.c:148, :179 at Mesa
+    /// 26.2.5); a lost device is published and reported the same way.
+    Sync,
+    /// `nv_rm_sync_import_fd`, `nv_rm_sync_export_fd`:
+    /// `vkImport{Semaphore,Fence}FdKHR` and `vkGet{Semaphore,Fence}FdKHR`, whose
+    /// codes are `OUT_OF_HOST_MEMORY` plus `INVALID_EXTERNAL_HANDLE` (import) or
+    /// `TOO_MANY_OBJECTS` (export). NVK's payloads report every failed import or
+    /// export as `VK_ERROR_UNKNOWN` (vk_drm_syncobj.c:376, :397, :413, :429), RM out of memory
+    /// and a lost device included.
+    SyncFd,
     /// Every other entry point: paths of a created device, where a lost device
     /// is `VK_ERROR_DEVICE_LOST` (spec "Lost Device").
     Device,
@@ -2148,6 +2162,17 @@ impl Entry {
                 HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
                 DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
                 Lost | Refused => vk::ERROR_UNKNOWN,
+                Contract => vk::ERROR_INITIALIZATION_FAILED,
+            },
+            Self::Sync => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+                Lost | Refused => vk::ERROR_UNKNOWN,
+                Contract => vk::ERROR_INITIALIZATION_FAILED,
+            },
+            Self::SyncFd => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory | Lost | Refused => vk::ERROR_UNKNOWN,
                 Contract => vk::ERROR_INITIALIZATION_FAILED,
             },
             Self::Device => match failure {
@@ -3260,25 +3285,23 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_create(
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_sync_create", object, move || {
-        report((|| {
-            if out.is_null() || flags & !7 != 0 {
-                return Err(Error::Contract("invalid sync create arguments".into()));
+    guarded_as(Entry::Sync, "nv_rm_sync_create", object, move || {
+        if out.is_null() || flags & !7 != 0 {
+            return Err(Error::Contract("invalid sync create arguments".into()));
+        }
+        let b = present(object)?;
+        b.core.live()?;
+        let slot = b.slot()?;
+        let sync = match SyncObj::new(&b.core.pool, flags & 1 != 0, initial, slot) {
+            Ok(sync) => sync,
+            Err(error) => {
+                b.core.pool.release(slot);
+                return Err(error);
             }
-            let b = present(object)?;
-            b.core.live()?;
-            let slot = b.slot()?;
-            let sync = match SyncObj::new(&b.core.pool, flags & 1 != 0, initial, slot) {
-                Ok(sync) => sync,
-                Err(error) => {
-                    b.core.pool.release(slot);
-                    return Err(error);
-                }
-            };
-            let id = u64_from_usize(Arc::into_raw(Arc::new(sync)).expose_provenance());
-            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-            unsafe { output(out, id) }
-        })())
+        };
+        let id = u64_from_usize(Arc::into_raw(Arc::new(sync)).expose_provenance());
+        // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
+        unsafe { output(out, id) }
     })
 }
 /// # Safety
@@ -3330,31 +3353,29 @@ fn needs_slot(error: &Error) -> bool {
 pub(crate) unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: u64) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_sync_reset", object, move || {
-        report((|| {
-            let b = present(object)?;
-            b.core.live()?;
-            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
-            let sync = unsafe { sync_ref(id) }?;
-            let mut fresh = if sync.needs_fresh_slot()? {
-                Some(b.slot()?)
-            } else {
-                None
-            };
-            loop {
-                match sync.reset(fresh.take()) {
-                    Ok((unused, changed)) => {
-                        if let Some(slot) = unused {
-                            b.core.pool.release(slot);
-                        }
-                        b.broadcast(changed);
-                        return Ok(());
+    guarded_as(Entry::Sync, "nv_rm_sync_reset", object, move || {
+        let b = present(object)?;
+        b.core.live()?;
+        // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+        let sync = unsafe { sync_ref(id) }?;
+        let mut fresh = if sync.needs_fresh_slot()? {
+            Some(b.slot()?)
+        } else {
+            None
+        };
+        loop {
+            match sync.reset(fresh.take()) {
+                Ok((unused, changed)) => {
+                    if let Some(slot) = unused {
+                        b.core.pool.release(slot);
                     }
-                    Err(error) if needs_slot(&error) => fresh = Some(b.slot()?),
-                    Err(error) => return Err(error),
+                    b.broadcast(changed);
+                    return Ok(());
                 }
+                Err(error) if needs_slot(&error) => fresh = Some(b.slot()?),
+                Err(error) => return Err(error),
             }
-        })())
+        }
     })
 }
 /// # Safety
@@ -3408,33 +3429,31 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_move(
 pub(crate) unsafe extern "C" fn nv_rm_sync_signal(p: *mut Bridge, id: u64, value: u64) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_sync_signal", object, move || {
-        report((|| {
-            let b = present(object)?;
-            b.core.live()?;
-            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
-            let sync = unsafe { sync_ref(id) }?;
-            let mut fresh = if !sync.timeline && sync.needs_fresh_slot()? {
-                Some(b.slot()?)
-            } else {
-                None
-            };
-            loop {
-                match sync.signal(value, fresh.take()) {
-                    Ok((unused, changed)) => {
-                        if let Some(slot) = unused {
-                            b.core.pool.release(slot);
-                        }
-                        b.broadcast(changed);
-                        // Dekker: store above, then wake local waiters if any.
-                        b.core.waiters.notify();
-                        return Ok(());
+    guarded_as(Entry::Sync, "nv_rm_sync_signal", object, move || {
+        let b = present(object)?;
+        b.core.live()?;
+        // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+        let sync = unsafe { sync_ref(id) }?;
+        let mut fresh = if !sync.timeline && sync.needs_fresh_slot()? {
+            Some(b.slot()?)
+        } else {
+            None
+        };
+        loop {
+            match sync.signal(value, fresh.take()) {
+                Ok((unused, changed)) => {
+                    if let Some(slot) = unused {
+                        b.core.pool.release(slot);
                     }
-                    Err(error) if needs_slot(&error) => fresh = Some(b.slot()?),
-                    Err(error) => return Err(error),
+                    b.broadcast(changed);
+                    // Dekker: store above, then wake local waiters if any.
+                    b.core.waiters.notify();
+                    return Ok(());
                 }
+                Err(error) if needs_slot(&error) => fresh = Some(b.slot()?),
+                Err(error) => return Err(error),
             }
-        })())
+        }
     })
 }
 /// # Safety
@@ -3553,23 +3572,21 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_import_fd(
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_sync_import_fd", object, move || {
-        report((|| {
-            let b = present(object)?;
-            b.core.live()?;
-            if fd < 0 {
-                return Err(Error::Contract("invalid synchronization import fd".into()));
-            }
-            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
-            let sync = unsafe { sync_ref(id) }?;
-            // SAFETY: nv_rm.h: a descriptor argument is open for the whole call; the borrow ends with it.
-            let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-            if opaque != 0 {
-                sync.import_opaque(fd)
-            } else {
-                sync.import_sync_file(fd)
-            }
-        })())
+    guarded_as(Entry::SyncFd, "nv_rm_sync_import_fd", object, move || {
+        let b = present(object)?;
+        b.core.live()?;
+        if fd < 0 {
+            return Err(Error::Contract("invalid synchronization import fd".into()));
+        }
+        // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+        let sync = unsafe { sync_ref(id) }?;
+        // SAFETY: nv_rm.h: a descriptor argument is open for the whole call; the borrow ends with it.
+        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+        if opaque != 0 {
+            sync.import_opaque(fd)
+        } else {
+            sync.import_sync_file(fd)
+        }
     })
 }
 /// # Safety
@@ -3588,36 +3605,34 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_export_fd(
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_sync_export_fd", object, move || {
-        report((|| {
-            if out.is_null() {
-                return Err(Error::Contract("null synchronization fd output".into()));
+    guarded_as(Entry::SyncFd, "nv_rm_sync_export_fd", object, move || {
+        if out.is_null() {
+            return Err(Error::Contract("null synchronization fd output".into()));
+        }
+        let b = present(object)?;
+        b.core.live()?;
+        if b.capture.load(Ordering::Relaxed)
+            && let Some(cap) = b.lock()?.0.capture.as_mut()
+        {
+            cap.mark(0, id, 2 + opaque);
+        }
+        let fd = if opaque != 0 {
+            // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
+            let shared = unsafe { sync_ref(id) }?.share()?;
+            if shared.has_local_work() {
+                let mut guard = b.lock()?;
+                b.ensure_watcher_host(&mut guard.0)?;
+                drop(guard);
+                b.core.watcher.publish(&b.core, Arc::clone(&shared))?;
             }
-            let b = present(object)?;
-            b.core.live()?;
-            if b.capture.load(Ordering::Relaxed)
-                && let Some(cap) = b.lock()?.0.capture.as_mut()
-            {
-                cap.mark(0, id, 2 + opaque);
-            }
-            let fd = if opaque != 0 {
-                // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
-                let shared = unsafe { sync_ref(id) }?.share()?;
-                if shared.has_local_work() {
-                    let mut guard = b.lock()?;
-                    b.ensure_watcher_host(&mut guard.0)?;
-                    drop(guard);
-                    b.core.watcher.publish(&b.core, Arc::clone(&shared))?;
-                }
-                Some(shared.export()?)
-            } else {
-                // SAFETY: nv_rm.h: `id` is live and `drm_fd` negative or open
-                // for the call.
-                unsafe { b.export_sync_file(id, drm_fd) }?
-            };
-            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-            unsafe { output(out, fd.map_or(-1, IntoRawFd::into_raw_fd)) }
-        })())
+            Some(shared.export()?)
+        } else {
+            // SAFETY: nv_rm.h: `id` is live and `drm_fd` negative or open
+            // for the call.
+            unsafe { b.export_sync_file(id, drm_fd) }?
+        };
+        // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
+        unsafe { output(out, fd.map_or(-1, IntoRawFd::into_raw_fd)) }
     })
 }
 /// Reserve a binary signal for a deferred (submit-thread) submission: `dst`
@@ -4246,6 +4261,28 @@ mod tests {
             bind(Error::Io("op", std::io::Error::from_raw_os_error(12))),
             -1
         );
+    }
+    #[test]
+    fn sync_failures_follow_mesa() {
+        // vkCreateFence, vkSignalSemaphore, vkResetFences and the sync fd
+        // import/export commands have no DEVICE_LOST; Mesa's DRM syncobj
+        // payloads, which NVK uses, report their failures as VK_ERROR_UNKNOWN
+        // (vk_drm_syncobj.c).
+        let lost = || Error::from(SyncError::Closed("x"));
+        let oom = || Error::Rm {
+            operation: "op",
+            status: 0x51,
+        };
+        let refused = || Error::from(SyncError::GenerationExhausted { operation: "x" });
+        assert_eq!(Entry::Sync.status(&lost()), -13);
+        assert_eq!(Entry::Sync.status(&refused()), -13);
+        assert_eq!(Entry::Sync.status(&oom()), -2);
+        assert_eq!(Entry::SyncFd.status(&lost()), -13);
+        assert_eq!(Entry::SyncFd.status(&refused()), -13);
+        assert_eq!(Entry::SyncFd.status(&oom()), -13);
+        let host = || Error::Io("op", std::io::Error::from_raw_os_error(12));
+        assert_eq!(Entry::Sync.status(&host()), -1);
+        assert_eq!(Entry::SyncFd.status(&host()), -1);
     }
     #[test]
     fn probing_reports_no_device_loss() {
