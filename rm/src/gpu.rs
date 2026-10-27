@@ -1881,7 +1881,7 @@ impl Queue {
     /// ordinary submission or status query.
     pub(crate) fn check_error(&mut self) -> Result<()> {
         if self.lost {
-            return Err(ChannelError::LostChannel {
+            return Err(ChannelError::Lost {
                 operation: "scan the channel error notifier",
             }
             .into());
@@ -1919,7 +1919,7 @@ impl Queue {
     /// the submitting caller (stock retires temporaries at end of submit too).
     pub(crate) fn retire_completion(&mut self) -> Result<()> {
         if self.lost {
-            return Err(ChannelError::LostChannel {
+            return Err(ChannelError::Lost {
                 operation: "retire completed batches",
             }
             .into());
@@ -1959,7 +1959,7 @@ impl Queue {
     /// `drm_fd` is negative (rejected) or an open descriptor for the whole call.
     pub(crate) unsafe fn context_fence(&self, drm_fd: i32, token: u64) -> Result<OwnedFd> {
         if self.lost {
-            return Err(ChannelError::LostChannel {
+            return Err(ChannelError::Lost {
                 operation: "export a context fence",
             }
             .into());

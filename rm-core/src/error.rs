@@ -228,21 +228,13 @@ pub enum ChannelError {
         /// The newest retired value.
         retired: FenceValue,
     },
-    /// Submissions on this channel were stopped (device loss).
+    /// Submissions on this channel were stopped because the device was lost.
     #[error("cannot submit to a stopped RM channel")]
     Stopped,
-    /// The queue's channel was marked lost (its error notifier reported an RC error, or its
-    /// completion broke the timeline).
+    /// The queue's channel was marked lost (its error notifier reported an RC error, its
+    /// completion broke the timeline, or a submission failed after writing part of the ring).
     #[error("{operation}: persistent RM channel is lost")]
     Lost {
-        /// The operation.
-        operation: &'static str,
-    },
-    /// The same lost channel, reported by the channel's own loss scan, retirement and fence
-    /// export. Their callers report the loss themselves; this status keeps the
-    /// `VK_ERROR_INITIALIZATION_FAILED` these paths returned.
-    #[error("{operation}: persistent RM channel is lost")]
-    LostChannel {
         /// The operation.
         operation: &'static str,
     },
@@ -310,12 +302,20 @@ pub enum ChannelError {
 }
 
 impl ChannelError {
-    /// Whether this failure makes the device unusable (`Error::is_device_lost`).
+    /// Whether this failure makes the device unusable (`Error::is_device_lost`): a channel
+    /// that already ran and stopped working. Vulkan reports that as `VK_ERROR_DEVICE_LOST`
+    /// (spec "Lost Device"); Mesa's NVK does the same for a channel the kernel killed
+    /// (`nvkmd_nouveau_ctx.c` exec flush: `-ENODEV` -> `VK_ERROR_DEVICE_LOST`). An RM
+    /// allocation follows the failure it wraps.
     pub fn is_device_lost(&self) -> bool {
         match self {
-            Self::Lost { .. } => true,
-            Self::Allocate { .. }
-            | Self::ClassList { .. }
+            Self::Lost { .. }
+            | Self::Stopped
+            | Self::Rc { .. }
+            | Self::Timeline { .. }
+            | Self::PutReadback { .. } => true,
+            Self::Allocate { source, .. } => source.is_device_lost(),
+            Self::ClassList { .. }
             | Self::MissingClass { .. }
             | Self::HostClass { .. }
             | Self::Unsupported { .. }
@@ -329,12 +329,7 @@ impl ChannelError {
             | Self::Push { .. }
             | Self::SequenceExhausted
             | Self::Sem32Range { .. }
-            | Self::Stopped
-            | Self::LostChannel { .. }
-            | Self::Rc { .. }
             | Self::Token { .. }
-            | Self::Timeline { .. }
-            | Self::PutReadback { .. }
             | Self::Doorbell
             | Self::ResultMismatch { .. } => false,
         }

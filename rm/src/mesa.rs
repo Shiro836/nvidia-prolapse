@@ -3620,8 +3620,8 @@ mod tests {
             elapsed: Duration::ZERO,
         };
         assert_eq!(vk_status(&wait.into()), -3);
-        // Synchronization failures keep the status their old DeviceLost or
-        // Contract form had.
+        // A poisoned or closed payload and a failed producer are device loss;
+        // an operation that does not apply is a refused request.
         for (error, status) in [
             (SyncError::Poisoned { object: "x" }, -4),
             (SyncError::Closed("x"), -4),
@@ -3638,38 +3638,116 @@ mod tests {
         ] {
             assert_eq!(vk_status(&error.into()), status);
         }
-        // Channel and memory failures keep the status their old DeviceLost or
-        // Contract form had: only a lost queue channel and a broken CPU-map
-        // cleanup are device loss.
-        let lost = |operation| ChannelError::Lost { operation };
-        assert_eq!(vk_status(&lost("x").into()), -4);
-        for error in [
-            ChannelError::LostChannel { operation: "x" },
-            ChannelError::Stopped,
-            ChannelError::Rc {
-                error: 31,
-                put: 0,
-                sequence: 0,
-                host_class: 0xc96f,
-                info16: 0,
-                status: 0xffff,
-                timestamp: 0,
-            },
-            ChannelError::Allocate {
-                class: ClassId::new(0xc96f),
-                source: Box::new(Error::DeviceLost("x".into())),
-            },
-            ChannelError::Token {
-                operation: "x",
-                token: FenceValue::new(2),
-                issued: FenceValue::new(1),
-            },
-            ChannelError::Timeline { reason: "x" },
-            ChannelError::SequenceExhausted,
-            ChannelError::Doorbell,
+        // A channel that already ran and stopped working is device loss
+        // (VK_ERROR_DEVICE_LOST); a request the channel or RM refused is not.
+        for (error, status) in [
+            (ChannelError::Lost { operation: "x" }, -4),
+            (ChannelError::Stopped, -4),
+            (
+                ChannelError::Rc {
+                    error: 31,
+                    put: 0,
+                    sequence: 0,
+                    host_class: 0xc96f,
+                    info16: 0,
+                    status: 0xffff,
+                    timestamp: 0,
+                },
+                -4,
+            ),
+            (ChannelError::Timeline { reason: "x" }, -4),
+            (ChannelError::PutReadback { visible: 1, put: 2 }, -4),
+            (
+                ChannelError::Allocate {
+                    class: ClassId::new(0xc96f),
+                    source: Box::new(Error::DeviceLost("x".into())),
+                },
+                -4,
+            ),
+            (
+                ChannelError::Allocate {
+                    class: ClassId::new(0xc96f),
+                    source: Box::new(Error::Rm {
+                        operation: "op",
+                        status: 0x51,
+                    }),
+                },
+                -3,
+            ),
+            (ChannelError::ClassList { reason: "x" }, -3),
+            (
+                ChannelError::MissingClass {
+                    operation: "x",
+                    class: ClassId::new(0xc7c0),
+                },
+                -3,
+            ),
+            (
+                ChannelError::HostClass {
+                    class: ClassId::new(0xa06f),
+                },
+                -3,
+            ),
+            (
+                ChannelError::Unsupported {
+                    operation: "x",
+                    reason: "y",
+                },
+                -3,
+            ),
+            (ChannelError::EngineMask { mask: 0x40 }, -3),
+            (ChannelError::SharedGroupEngine { mask: 0x1 }, -3),
+            (ChannelError::Group { reason: "x" }, -3),
+            (ChannelError::VaHeapCollision { what: "x" }, -3),
+            (ChannelError::SemaphoreAddress { address: 4 }, -3),
+            (ChannelError::HostMethodsTooLarge { words: 1 }, -3),
+            (
+                ChannelError::Batch {
+                    operation: "x",
+                    entries: 0,
+                    waits: 0,
+                    signals: 0,
+                },
+                -3,
+            ),
+            (
+                ChannelError::Push {
+                    address: 2,
+                    size: 4,
+                    flags: 0,
+                },
+                -3,
+            ),
+            (ChannelError::SequenceExhausted, -3),
+            (
+                ChannelError::Sem32Range {
+                    token: FenceValue::new(1 << 31),
+                    retired: FenceValue::new(0),
+                },
+                -3,
+            ),
+            (
+                ChannelError::Token {
+                    operation: "x",
+                    token: FenceValue::new(2),
+                    issued: FenceValue::new(1),
+                },
+                -3,
+            ),
+            (ChannelError::Doorbell, -3),
+            (
+                ChannelError::ResultMismatch {
+                    word: 0,
+                    actual: 1,
+                    expected: 2,
+                },
+                -3,
+            ),
         ] {
-            assert_eq!(vk_status(&error.into()), -3);
+            assert_eq!(vk_status(&error.into()), status);
         }
+        // A broken CPU-map cleanup is device loss; every other memory failure
+        // is a refused request.
         for (error, status) in [
             (MemoryError::CleanupFailed, -4),
             (
@@ -3692,6 +3770,66 @@ mod tests {
                 -3,
             ),
             (MemoryError::NotLive { reason: "x" }, -3),
+            (
+                MemoryError::Invalid {
+                    operation: "x",
+                    reason: "y",
+                },
+                -3,
+            ),
+            (
+                MemoryError::BlockLinearKind {
+                    kind: 1,
+                    generic: 6,
+                },
+                -3,
+            ),
+            (
+                MemoryError::PoolBlockGrant {
+                    attr: 0,
+                    size: 0,
+                    requested_attr: 1,
+                    requested_size: 1,
+                    free: None,
+                },
+                -3,
+            ),
+            (
+                MemoryError::BlockLinearGrant {
+                    size: 0,
+                    format: 0,
+                    attr: 0,
+                    kind: 6,
+                    free: None,
+                },
+                -3,
+            ),
+            (MemoryError::BarAccounting { reason: "x" }, -3),
+            (MemoryError::CpuMapping { reason: "x" }, -3),
+            (MemoryError::UserdLength { length: 1 }, -3),
+            (
+                MemoryError::PatternMismatch {
+                    word: 0,
+                    actual: 1,
+                    expected: 2,
+                },
+                -3,
+            ),
+            (
+                MemoryError::GpuMappingLimits {
+                    offset: 0,
+                    length: ByteSize::new(1),
+                    allocation_size: ByteSize::new(0),
+                },
+                -3,
+            ),
+            (
+                MemoryError::KindMismatch {
+                    chosen: 0,
+                    requested: 6,
+                },
+                -3,
+            ),
             (
                 MemoryError::OutOfBounds {
                     access: "x",
