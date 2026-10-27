@@ -92,7 +92,7 @@ impl<M> Drop for Slot<M> {
     }
 }
 impl<M: Lease> Slot<M> {
-    pub fn acquire<T>(
+    pub(crate) fn acquire<T>(
         &self,
         make: impl FnOnce() -> Result<M>,
         address: impl FnOnce(&M) -> T,
@@ -124,7 +124,7 @@ impl<M: Lease> Slot<M> {
                 .expect("the mapping was made above if it was missing"),
         ))
     }
-    pub fn release(&self) -> Result<()> {
+    pub(crate) fn release(&self) -> Result<()> {
         let mut entry = self.entry.borrow_mut();
         let refs = entry
             .refs
@@ -151,10 +151,10 @@ impl<M: Lease> Slot<M> {
         }
         Ok(())
     }
-    pub fn refs(&self) -> u32 {
+    pub(crate) fn refs(&self) -> u32 {
         self.entry.borrow().refs
     }
-    pub fn evict(&self) -> Result<bool> {
+    pub(crate) fn evict(&self) -> Result<bool> {
         let mut entry = self.entry.borrow_mut();
         if entry.refs != 0 {
             return Ok(false);
@@ -191,7 +191,7 @@ impl<M> Default for Registry<M> {
     }
 }
 impl<M: Lease> Registry<M> {
-    pub fn slot(self: &Rc<Self>) -> Rc<Slot<M>> {
+    pub(crate) fn slot(self: &Rc<Self>) -> Rc<Slot<M>> {
         Rc::new_cyclic(|identity| Slot {
             entry: RefCell::new(Entry {
                 mapping: None,
@@ -203,7 +203,7 @@ impl<M: Lease> Registry<M> {
             identity: identity.clone(),
         })
     }
-    pub fn evict_one(&self) -> Result<bool> {
+    pub(crate) fn evict_one(&self) -> Result<bool> {
         // O(1), no allocation/scan or registry borrow across RM cleanup. A
         // failed head remains owned/indexed; Device poison prevents reuse.
         let head = self.ends.borrow().head.upgrade();

@@ -8,7 +8,7 @@ use std::{
 };
 
 #[derive(Clone, Debug)]
-pub struct Shader {
+pub(crate) struct Shader {
     pub code: Vec<u8>,
     pub registers: u32,
     pub shared_size: u32,
@@ -142,7 +142,7 @@ fn functions() -> Result<&'static Mutex<Functions>> {
     loaded.as_ref().map_err(|e| Error::Contract(e.clone()))
 }
 
-pub fn compile(words: &[u32], entry: &CStr) -> Result<Shader> {
+pub(crate) fn compile(words: &[u32], entry: &CStr) -> Result<Shader> {
     if words.len() < 5 || words[0] != 0x07230203 {
         return Err(Error::Contract("invalid SPIR-V header".into()));
     }

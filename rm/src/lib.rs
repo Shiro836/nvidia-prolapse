@@ -43,7 +43,6 @@
     clippy::wildcard_enum_match_arm,
     missing_debug_implementations,
     missing_docs,
-    unreachable_pub,
     unused_qualifications,
     reason = "pre-standard code; cleanup tracked"
 )]
@@ -59,8 +58,8 @@
 pub use nv_rm_sys::abi;
 pub mod capabilities;
 mod capture;
-pub mod compat;
-pub mod compiler;
+pub(crate) mod compat;
+pub(crate) mod compiler;
 mod compute;
 mod cpu_map_cache;
 pub(crate) mod diag;
@@ -71,13 +70,13 @@ mod external;
 mod fences;
 mod ffi;
 pub mod gpu;
-pub mod mesa;
+pub(crate) mod mesa;
 pub mod nvdec;
 pub use nv_rm_sys::nvdec_drv;
 pub use nv_video::nvdec_hevc;
 #[cfg(feature = "diagnostics")]
 pub mod perf_diagnostic;
-pub mod platform;
+pub(crate) mod platform;
 mod process;
 mod reactor;
 use nv_rm_core::reclaim;

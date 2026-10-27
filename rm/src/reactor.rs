@@ -51,7 +51,7 @@ pub(crate) struct Dispatch {
 }
 pub(crate) struct WakeFd(OwnedFd);
 impl WakeFd {
-    pub fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         // Linux UAPI EFD_CLOEXEC | EFD_NONBLOCK. The RM event FD stays blocking.
         // SAFETY: no pointer arguments.
         let fd = unsafe { eventfd(0, 0o2000000 | 0o4000) };
@@ -64,7 +64,7 @@ impl WakeFd {
         // SAFETY: a successful eventfd returns a new descriptor nobody else owns.
         Ok(Self(unsafe { OwnedFd::from_raw_fd(fd) }))
     }
-    pub fn notify(&self) -> Result<()> {
+    pub(crate) fn notify(&self) -> Result<()> {
         let value = 1u64;
         loop {
             // SAFETY: writes 8 bytes from a live local u64 to an owned fd.
@@ -81,7 +81,7 @@ impl WakeFd {
             }
         }
     }
-    pub fn drain(&self) -> Result<()> {
+    pub(crate) fn drain(&self) -> Result<()> {
         let mut value = 0u64;
         loop {
             // SAFETY: reads at most 8 bytes into a live local u64 from an owned fd.

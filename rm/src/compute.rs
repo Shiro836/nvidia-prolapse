@@ -41,7 +41,7 @@ pub(crate) struct ComputeJob {
     _descriptor_cpu: Mapping,
 }
 impl ComputeJob {
-    pub fn new(
+    pub(crate) fn new(
         device: &Rc<Device>,
         space: &AddressSpace,
         output: u64,
