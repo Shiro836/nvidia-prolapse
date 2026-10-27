@@ -1,0 +1,344 @@
+# nvkmd backend in Rust (design)
+
+Status: design, not started. Replaces `mesa/nvkmd_rm.c` (1,353 lines) and its use of
+`mesa/nv_rm.h` with a Rust crate that implements NVK's `nvkmd` vtable directly and calls the
+`rm` crate's Rust API. Pinned Mesa: `ddaf85e` (26.2.5) plus the patch stack in `mesa/`
+(`rm-integration.patch` adds `has_sparse`, `has_rm_compression`, the `notify_lost` hook,
+`vk_sync_type::reserve_signal`; the compute-queue patches add `max_shared_ctx`,
+`create_shared_ctx`, `NVKMD_MEM_POOL_BLOCK`). Line numbers below are `nvkmd_rm.c` at 833571a
+unless a file is named.
+
+## 1. Inventory
+
+### 1.1 Entry points NVK reaches, and what `nvkmd_rm.c` does
+
+Callers are NVK files in `src/nouveau/vulkan/` (through the `nvkmd.h` inline wrappers or the
+`nvkmd.c` core functions, which keep refcounts, `map_cnt`, the `mems` list and VM logging).
+
+| vtable entry | NVK callers | `nvkmd_rm.c` behaviour | `nv_rm_*` |
+|---|---|---|---|
+| `nvkmd_try_create_pdev_for_drm` → `nvkmd_rm_try_create_pdev` (416) | nvk_physical_device.c | PCI + NVIDIA vendor + render node, else `INCOMPATIBLE_DRIVER`; opens render node `O_CLOEXEC`; `drmGetVersion` name must be `nvidia-drm`; `fstat` for `render_dev`; opens RM once to read `NvRmInfo`, closes it; fills `nv_device_info` (incl. `nv_device_info_init_shared_mem_sizes`, `nc_atom_size_B = util_cache_granularity()`, ZCULL when `has_zcull_info`), `nvkmd_info` (`has_dma_buf`, `has_alloc_tiled` for kind 0x06/0xfe, `has_rm_compression` for 0x06, `max_shared_ctx`, `sm_isa_version`, shader pipe counts), `bind_align_B = 4096`, two sync types | `open`, `close` |
+| pdev `destroy` (326) | nvk_physical_device.c | close fd, free | — |
+| pdev `get_vram_used` (333) | nvk_physical_device.c | returns 0 (`has_get_vram_used` stays false) | — |
+| pdev `get_drm_primary_fd` | nvk_wsi.c | not set (NULL → -1) | — |
+| pdev `create_dev` (360) | nvk_device.c | reopens render node, opens RM, VA window `[1<<34, 1<<40)`, `mems` list + mutex, `va_mutex` + `util_vma_heap`; when `log->device` is a logical device: installs `check_status`, `notify_lost`, `notify_lost_data = rm` | `open` (+`close` on failure) |
+| dev `destroy` (563) | nvk_device.c | clears the three hooks, closes RM (runs deferred VA releases into the heap), closes fd, `util_vma_heap_finish` | `close` |
+| dev `get_gpu_timestamp` (585) | nvk_device.c | 0 + stderr line on failure | `timestamp` |
+| dev `get_drm_fd` (594) | nvk_device.c | render node fd | — |
+| dev `alloc_mem` / `alloc_tiled_mem` (861, 872, policy in 769) | nvk_device_memory.c, nvk_queue.c, nvk_mem_arena.c, nvk_device.c, nvk_cmd_draw.c (+ `alloc_mapped_mem` users) | placement: GART / VRAM / POOL_BLOCK (exactly 2 MiB, kind 0, not GART/mappable/shared, align 2 MiB) / VRAM_COMPRESSIBLE (kind 0, VRAM, not mappable/shared, generic kind 0x06, 64 KiB multiple); VRAM rounded to 64 KiB size and alignment; tiled: kind must be the generic kind, tile `& ~0x70 == 0`, `tile >> 4 <= 5`, pre-Turing mappable block-linear VRAM refused; `nvkmd_mem_init(flags | COHERENT, size, 4096)`; own VA via `nvkmd_dev_alloc_va` + `nvkmd_va_bind_mem`; rollback frees and publishes loss if the free fails | `alloc`, `free` |
+| dev `import_dma_buf` (904) | nvk_device_memory.c | borrows the fd; flags `LOCAL|SHARED|CAN_MAP|COHERENT`; own VA, align 4096 | `import`, `free` |
+| dev `alloc_va` (599) | nvk_buffer.c, nvk_image.c, nvk_mem_arena.c | `SPARSE` unsupported; size ≤ window−4095, rounded to 4 KiB, align ≥ 4 KiB power of two; `ALLOC_FIXED` via `util_vma_heap_alloc_addr`, else `util_vma_heap_alloc`; heap under `va_mutex` | — |
+| dev `create_ctx` / `create_shared_ctx` (1326, 1334, 1285) | nvk_queue.c, nvk_upload_queue.c | `BIND` engine → no channel; else context (shared: share must be a channel ctx of the same dev) | `context_create`, `context_create_shared` |
+| mem `free` (950) | via `nvkmd_mem_unref` (10 files) | `nvkmd_va_free`, RM free (loss on failure), destroy `map_mutex` | `free` |
+| mem `map` (962) | via `nvkmd_mem_map` (nvk_heap.c, nvk_host_copy.c, nvk_device_memory.c, nvk_mem_arena.c) | fixed maps unsupported; maps the shared lazy CPU mapping; `DEVICE_LOST` or RM-lost → loss; OOM statuses pass through, rest `MEMORY_MAP_FAILED`; NULL address → unmap + `MEMORY_MAP_FAILED` | `map`, `unmap`, `is_lost` |
+| mem `unmap` (998) | via `nvkmd_mem_unmap` | loss on failure | `unmap` |
+| mem `overmap` (1009) | nvk_device_memory.c | unsupported (`has_overmap` false) | — |
+| mem `sync_to_gpu` / `sync_from_gpu` (1031) | via `nvkmd_mem_sync_*` | abort: every allocation is `COHERENT`, so `nvkmd.c` never calls them | — |
+| mem `export_dma_buf` (1020) | nvk_device_memory.c | | `export` |
+| mem `log_handle` (1038) | nvkmd.c (NVK_DEBUG_VM) | allocation id, truncated to 32 bits | — |
+| va `free` (733) | nvk_mem_arena.c, nvk_buffer.c, nvk_image.c | hands every binding to one deferred VA free; the range returns to the heap from `rm_va_release` (719) on whichever thread retires it; loss on failure (range stays reserved); stack array of 16 ids, calloc above | `va_free` |
+| va `bind_mem` (679) | via `nvkmd_va_bind_mem` | range checks, unbind overlap first, bind with the VA's kind, append binding | `bind` |
+| va `unbind` (645) | via `nvkmd_va_unbind` / ctx `bind` | partial overlap unsupported; immediate unbind of covered bindings in list order | `unbind` |
+| ctx `destroy` (1261) | nvk_queue.c, nvk_upload_queue.c | discards unsubmitted pushes, bounded context destroy (stderr on failure) | `context_destroy` |
+| ctx `wait` (1155) | nvk_queue.c | flushes pending pushes first; bind ctx: CPU `vk_sync_wait_many(COMPLETE, UINT64_MAX)`; else records `(id, value)` (skips timeline value 0; non-RM sync unsupported) | — (deferred to submit) |
+| ctx `exec` (1186) | nvk_queue.c, nvk_mem_stream.c | validates 4-byte alignment, `0 < size < 8 MiB`; appends `NvRmExec{addr,size,flags}` | — |
+| ctx `bind` (1205) | nvk_buffer.c, nvk_image.c | flush, then `nvkmd_va_bind_mem`/`nvkmd_va_unbind` per bind | — |
+| ctx `signal` (1225) | nvk_mem_stream.c, nvk_queue.c | bind ctx: flush + `vk_sync_signal` each; else builds points (calloc per call), flush with signals | — |
+| ctx `flush` (1136) / `sync` (1142) | not called by NVK at this pin (only from the other ctx entries) | flush: validates every 1000-entry chunk boundary (no `INCOMPLETE` last entry) first, empty submit when only waits/signals, submits chunks, signals on the final chunk; on `VK_NOT_READY` waits for the oldest token (`UINT64_MAX`) and retries; keeps only the unaccepted suffix. sync: flush + wait last token | `submit_batch`, `wait` |
+
+### 1.2 The two `vk_sync_type`s (284-323)
+
+`rm_sync_type` (binary + timeline, opaque fd import/export) and `rm_sync_file_type` (binary,
+sync_file import/export); both copied into the pdev and listed in `sync_types`. Payload
+`struct nvkmd_rm_sync { struct vk_sync base; uint64_t id; }` (the id is the RM's payload
+reference). The type check used by ctx `wait`/`signal` is `sync->type->init == rm_sync_init`.
+
+| op | behaviour | `nv_rm_*` |
+|---|---|---|
+| `init` | flags map 1:1 (static asserts 142-144) | `sync_create` |
+| `finish` | drop payload ref; failure → stderr + `vk_device_set_lost` | `sync_destroy_deferred` |
+| `signal`, `get_value` (timeline type only), `reset`, `move` (shared flag of src) | pass-through | `sync_signal`, `sync_get_value`, `sync_reset`, `sync_move` |
+| `reserve_signal` | `*reserved = ok && done` | `sync_reserve` |
+| `wait_many` | `rm_wait_status` before and after; stack array of 16 points (calloc above); deadline → timeout via `os_time_get_nano`; 2 → `VK_TIMEOUT` | `sync_wait_many` |
+| `import_opaque_fd` / `export_opaque_fd` | borrow / return owned fd (`opaque = 1`) | `sync_import_fd`, `sync_export_fd` |
+| `import_sync_file` / `export_sync_file` | same, `opaque = 0`, export passes the render fd | same |
+
+### 1.3 Status handling
+
+- `rm_result` (73): 0 → `VK_SUCCESS`, else the negative status *is* the `VkResult`, logged with
+  `vk_errorf` ("Native Rust RM %s failed"). The mapping from RM errors to statuses lives in
+  `rm/src/mesa.rs` `vk_status` (being reworked per Vulkan's per-command error lists).
+- `unsupported` (80): `VK_ERROR_FEATURE_NOT_PRESENT`, named.
+- `rm_mem_lost` (92): void cleanup paths: stderr, then `vk_device_set_lost` when a logical
+  device exists, else `nv_rm_mark_lost`; returns `DEVICE_LOST`.
+- `rm_wait_status` (105): Mesa's lost counter (`vk_device_is_lost_no_report`), then
+  `nv_rm_is_lost` → `vk_device_set_lost`. `rm_check_status` (339) does the same through
+  `nv_rm_check_status`. `rm_notify_lost` (353) mirrors Mesa-side loss (`vk_device.c` and
+  `vk_queue.c` both call `vk_device_notify_lost`) into `nv_rm_mark_lost`.
+- Since 833571a the RM side publishes loss itself whenever an entry returns
+  `VK_ERROR_DEVICE_LOST` (the `guarded` wrapper in `mesa.rs`), so Mesa sees it on its next
+  status or wait query.
+
+### 1.4 What else uses `nv_rm.h`
+
+`nvkmd_rm.c` uses 30 of the 39 entries. The other nine (`sync_destroy`, `sync_status_many`,
+`submit_sync`, `context_signal`, `submit_waits`, `submit`, `poll`, `context_fence`, `exec`) are
+used only by tests in this repo (`rm/src/mesa_test_ffi.rs`, `mesa/bridge-check.c`) and by
+waydroid-nvidia's opt-in gallium driver (`gallium-nvrm`, 18 entries, not in this repo). See
+question Q1.
+
+## 2. Shape of the Rust side
+
+### 2.1 Crates (RUST.md §1)
+
+| crate | role | unsafe |
+|---|---|---|
+| `nvkmd-sys` | bindgen output of the pinned, patched headers: `nvkmd.h`, `vk_sync.h`, the used part of `vk_device.h`/`vk_object.h`/`vk_log.h`, `nvk_device` (only `vk` and `nvkmd`; every other member opaque), `nv_device_info.h`, `util/vma.h`, `xf86drm.h` (`drmDevice`, `drmVersion`). Generated per target, committed. No logic | none (types + `extern` decls) |
+| `nvkmd-rm-logic` | pure policy, `#![forbid(unsafe_code)]`: placement/size/alignment choice, tiled-kind validation, VA request validation, binding-list overlap rules, push validation and the 1000-entry continuation chunking with accepted-prefix retention, wait filtering, `Info` → device/KMD info derivation | forbidden |
+| `nvkmd-rm` | boundary, `staticlib`: the ops tables and `vk_sync_type`s, `extern "C"` entries, object recovery, calls into Mesa C and into `rm` | all of it, in one module `ffi` |
+
+Bindings are generated by `tools/gen-nvkmd-bindings.py` with the bindgen version Mesa's build
+already pins, from the exact compile flags of `nvkmd.c` in each target's
+`compile_commands.json` (layouts depend on `HAVE_FUTEX` and pointer width), for
+`x86_64-linux-android`, `i686-linux-android` and the host. bindgen's generated layout
+assertions are the compile-time asserts of §4 on every target; `mesa/build.py` regenerates
+after `meson setup` and fails when the committed file differs (stale bindings after a pin
+bump cannot build). Committing them keeps `cargo test --workspace` independent of a Mesa build.
+
+### 2.2 Objects across the boundary
+
+Each NVK-visible object is a `#[repr(C)]` Rust struct whose first field is the bindgen base
+struct, allocated in Rust and handed to Mesa as `&mut base`:
+
+| object | Rust owner | created / destroyed | holds |
+|---|---|---|---|
+| `RmPdev` | `Box`, raw in Mesa | `try_create_pdev` / pdev `destroy` (the only `Box::from_raw`) | render fd (`OwnedFd`, `O_CLOEXEC`), `CString` render path, `Info`, the two `vk_sync_type`s and the NULL-terminated `sync_types` array |
+| `RmDev` | `Box`, raw in Mesa | `create_dev` / dev `destroy` | `rm::Device`, `Option<NonNull<vk_device>>` (logical device only), render fd, `Arc<VaHeap>` |
+| `RmMem` | `Box`; lifetime is Mesa's refcount (`nvkmd_mem_unref` → `free`) | alloc / import / `free` | `rm::MemoryId` (owning: freed only by `RmDev::free_memory(self)`) |
+| `RmVa` | `Box` | `alloc_va` / va `free` | `Vec<Binding{offset, size, MappingId}>` in insertion order (C list order; unbind order is preserved) |
+| `RmCtx` | `Box` | `create_ctx` / ctx `destroy` | `Option<rm::ContextId>` (None = bind ctx), `Vec<Push>`, `Vec<WaitPoint>`, `Vec<SignalPoint>` scratch (capacity kept), last `Token` |
+| `RmSync` | in place in Mesa's `vk_sync` allocation (`size = size_of::<RmSync>()`) | `init` writes `Arc<SyncObj>` with `ptr::write`; `finish` reads it back and drops it | the payload `Arc` |
+
+Recovering our type from a Mesa pointer checks the ops pointer first (the Rust form of
+`NVKMD_DECL_SUBCLASS`'s assert, nvkmd.h:399-406) and returns `Err`/the entry's failure value
+on mismatch; for syncs the check is `sync.type_` against the two types stored in our pdev.
+Device-from-`vk_device` (`rm_sync_device`, 125) stays `container_of(vk, nvk_device, vk)->nvkmd`
+using bindgen offsets.
+
+Destroy order is written out: dev `destroy` clears `notify_lost`/`notify_lost_data`/
+`check_status`, closes the RM device (which may still release VA ranges into the heap, so the
+heap is an `Arc` the RM holds through its release sink), closes the fd, then finishes the heap
+(as 563-583). Mesa's inline-only helpers (`simple_mtx_init/destroy`, `list_inithead`) get three
+small non-inline functions in `nvkmd.c` next to the existing `nvkmd_mem_init`:
+`nvkmd_dev_init`, `nvkmd_dev_finish`, `nvkmd_mem_finish` (~20 C lines in
+`rm-integration.patch`; forcing interface: Mesa's `static inline` mutex/list API in
+`util/simple_mtx.h`, `util/list.h`).
+
+Calls into Mesa C from Rust: `__vk_errorf`, `_vk_device_set_lost` (variadic, always with a
+literal `"%s"` format), `nvkmd_mem_init`, `nvkmd_dev_alloc_va`, `nvkmd_va_bind_mem`,
+`nvkmd_va_free`, `nvkmd_va_unbind`, `vk_sync_wait_many`, `vk_sync_signal`, `util_vma_heap_*`,
+`nv_device_info_init_shared_mem_sizes`, `util_cache_granularity`, `drmGetVersion`/
+`drmFreeVersion`. Mesa builds with hidden visibility, so these resolve only at static link
+time: the crate must be linked into `libvulkan_nouveau.so` (a staticlib), it cannot be a
+separate cdylib. Mesa's lost counter (`vk_device_is_lost_no_report`, inline:
+`p_atomic_read(&device->_lost.lost) > 0`) is read as `AtomicI32::from_ptr` at the bindgen
+offset with `Acquire`.
+
+### 2.3 Where `unsafe` lives
+
+Only `nvkmd-rm/src/ffi/`: the `extern "C"` entries and `vk_sync_type` callbacks, pointer
+validation and object recovery, the in-place sync payload, `extern` calls into Mesa/libdrm, the
+fallible `Box` helper below, and `unsafe impl Send/Sync` for `RmDev` (raw `vk_device` pointer:
+Vulkan requires the device to outlive every nvkmd call, and Mesa's notify hook contract permits
+calls from any thread). Every entry runs inside the shared panic guard (moved from `rm::ffi` to
+a public module so both crates use one implementation). Failure values: the entry's `VkResult`
+(`VK_ERROR_DEVICE_LOST` for a panic, device marked failed); void callbacks that have a logical
+device publish loss through `vk_device_set_lost`, the same channel their RM-failure path uses
+today; the rest (`pdev destroy`, `get_vram_used`, mem `sync_*`) abort with the message.
+
+C returns `VK_ERROR_OUT_OF_HOST_MEMORY` when `calloc` fails; `Box::new` aborts and
+`Box::try_new` is unstable on 1.99.1 (checked). A `try_box` helper in `ffi` (`alloc` + null
+check) keeps the C result; app-sized arrays use `Vec::try_reserve`.
+
+### 2.4 Using the RM crate's types directly
+
+`rm/src/mesa.rs` today is both the device logic (`Bridge`, `Core`, `Inner`, submit, sync,
+reclaim) and the `nv_rm_*` C ABI. It splits into:
+
+- **`rm::device` (public Rust API):** `Device` (today's `Bridge`), with typed handles instead
+  of `u64`: `MemoryId`, `MappingId`, `ContextId`, `Token` (`FenceValue`), `GpuVa`/`ByteSize`
+  (nv-rm-core) for addresses and sizes, `Placement` and `EngineMask` enums, and sync payloads as
+  `&SyncObj`/`Arc<SyncObj>` (the C ids are `Arc::into_raw` pointers today, which is why
+  `sync_ref` and most of `submit`/`wait_points` are `unsafe`; with references they become safe
+  functions). Results are `Result<T, rm::Error>`.
+- **Loss publication inside the API:** every public `Device` method returns through one
+  wrapper that publishes loss (`Core::mark_lost`) before returning an error that maps to
+  `VK_ERROR_DEVICE_LOST`. 833571a does this in the C-ABI guard; moving it into the API means
+  the C shim and the Rust backend cannot diverge.
+- **`Error → VkResult`** is one function on `rm::Error` returning a typed result (bindgen's
+  `VkResult`), used by the shim and by `nvkmd-rm`; `rm_result`'s logging stays in `nvkmd-rm`.
+- **VA release:** `ReclaimItem::Va` stops holding a C function pointer and `*mut c_void`
+  (`mesa.rs` 190-205) and calls a `VaSink` trait object the device is opened with
+  (`Arc<VaHeap>` in the backend; the shim wraps the C callback). That removes the raw `data`
+  pointer from `Confined`'s Send argument.
+- **What disappears from `mesa.rs`:** `Info`/`Allocation`/`SyncPoint` `#[repr(C)]` mirrors,
+  `input`/`output`, `sync_pointer`/`sync_ref`, `status_of`, `report`, the `i32` status codes,
+  and the entries only `nvkmd_rm.c` used, once the C backend is deleted (subject to Q1). The
+  remaining C ABI moves to its own module (`rm/src/capi.rs`) so the Rust backend's staticlib
+  contains no `#[no_mangle]` RM symbols.
+
+The backend is generic over a small trait `RmApi` (the ~30 device operations it uses, with
+associated handle/payload types). Production instantiates it with `rm::Device` (monomorphised,
+no dynamic dispatch). The differential harness (§4.1) instantiates it with an adapter over the
+existing C fake RM. This is also the written list of what the backend needs from the RM.
+
+## 3. Build integration
+
+NIL and NAK show how Mesa links Rust into NVK: a Rust `static_library` with `rust_abi: 'c'`
+(`src/nouveau/nil/meson.build:78-86`, `src/nouveau/compiler/meson.build:92-120`), bindings via
+`rust.bindgen` (`nil/meson.build:41-69`, `compiler/meson.build:43-73`), reached by NVK through
+`idep_nil`/`idep_nak` (`vulkan/meson.build:143-144`). Both staticlibs already link into
+`libvulkan_nouveau.so` together (checked in the Android build: two `crate-type staticlib`
+targets). Our crate depends on Cargo packages and the `rm` crate, so Cargo builds it (as it
+builds `rm` today in `mesa/build.py:344-357`); meson only links the archive:
+
+- `rm-integration.patch` adds a meson option `nvk-rm-backend` (`c` | `rust`) and
+  `nvk-rm-rust-lib` (path). `c`: `nvkmd/rm/nvkmd_rm.c` compiled as now. `rust`: no C source;
+  `libvulkan_nouveau` gets `link_args: [<path>/libnvkmd_rm.a, '-Wl,--exclude-libs,libnvkmd_rm.a']`
+  so nothing from our archive (Rust std, `rm`) enters the dynamic symbol table.
+- With the Rust backend `-lnv_bionic_native` is dropped from `libvulkan_nouveau`: the RM is
+  linked in statically. `libnv_bionic_native.so` stays for Codec2 (`nv_video_*`) and any
+  remaining C users; a process loading both has two independent RM instances (separate RM
+  clients, fork counters and loggers; `-Bsymbolic` keeps each library's references local).
+- `mesa/build.py --nvkmd {c,rust}` (default `c` until the gate), builds `-p nvkmd-rm
+  --target <triple>` first, passes the archive path, and uses separate build dirs
+  (`build/nvk-<target>-<backend>`, plus the per-branch `NVRM_GL_DIR_SUFFIX`) so both builds
+  coexist for A/B. `tests/vulkan/run.py` and `capture.py` take the same switch.
+- Exported-symbol test: `nm -D --defined-only libvulkan_nouveau.so` of the two builds is
+  identical (the C build already leaks ~2,300 Rust symbols from NAK/NIL; ours adds none). The
+  only global C symbol in `libnvkmd_rm.a` is `nvkmd_rm_try_create_pdev` (`create_shared_ctx`
+  is reached through the ops table only; no NVK file calls `nvkmd_rm_create_shared_ctx`).
+- Load time (§13): no constructors, no threads; the RM's lazily started watcher and the
+  `pthread_atfork` registration behave as in `libnv_bionic_native.so` today.
+
+## 4. Verification
+
+### 4.1 Differential, entry level: the offline fake-RM harness
+
+`mesa/tests/run-pdev-preflight.py` compiles the production `nvkmd_rm.c` with pinned Mesa
+runtime sources against fake DRM/RM functions with exact argument expectations (pdev probing,
+partial-init cleanup, wait deadlines/ANY/ALL/pending, loss publication, ring retries, sync
+reset/move, fd forwarding, memory and cleanup, submit fusion with 0/1/1000/1001/2000 pushes,
+THREADED_ON_DEMAND). The harness gets `--backend rust`: the same objects and `.inc` suites,
+with `nvkmd_rm.o` replaced by a test staticlib that instantiates `nvkmd-rm` with an `RmApi`
+adapter over the same fake `nv_rm_*` functions. Gate per step: every suite passes on both
+backends, and the fake's recorded call log (entry, arguments, returned status, in order) is
+byte-identical between them. Injected failures (`rm_error`, `rm_lost`, `calloc_fail`) make
+this the coverage for error paths no GPU run reaches. Diagnostics are compared by content
+class, not text (`vk_errorf` carries the source file:line; stderr becomes `log`).
+
+### 4.2 Differential, system level: capture
+
+`tests/vulkan/capture.py record` on each build, then `capture.py diff` C vs Rust: the ioctl
+sequence and every pushbuffer byte for the 42 cases (same build self-diff is 0/42 today). Gate:
+0/42. VA addresses appear in pushbuffers, so the first port keeps `util_vma_heap` (called
+through FFI) to get identical addresses by construction. `drmGetVersion` stays the libdrm call
+for the same reason (its two `DRM_IOCTL_VERSION` calls are in the trace). Non-ioctl syscalls
+(`fstat` vs `statx` from `std::fs`) are not compared and may differ.
+
+### 4.3 Per-entry unit and ABI tests
+
+- `nvkmd-rm-logic`: table tests per policy function with expected values taken from the C
+  branches (each test names the `nvkmd_rm.c` line it pins): placement for every flag/kind/size
+  combination incl. 64 KiB rounding and the pool block, tiled-kind acceptance, `alloc_va`
+  bounds incl. `size > window - 4095` and fixed-address alignment, partial-overlap detection,
+  chunking at 999/1000/1001 with trailing `INCOMPLETE` runs and prefix retention after a
+  failure at chunk k. Full Miri (forbid-unsafe crate).
+- `nvkmd-rm` boundary: ops tables have the same NULL/non-NULL slots as the C tables;
+  `vk_sync_type` `size`/`features` equal the C values; object recovery rejects a foreign ops
+  pointer; in-place payload init/finish and `try_box` run under Miri over heap-allocated Mesa
+  structs (syscall-free).
+- ABI: bindgen layout asserts compile for all three targets (`cargo check --target
+  i686-linux-android` in the gate); `mesa/build.py` fails on stale bindings; the symbol-list
+  test of §3.
+
+### 4.4 Hot path: CPU per submit ≤ C (RUST.md §14)
+
+The per-frame path is ctx `exec`/`wait`/`signal` → `flush` → `submit_batch`, sync
+`wait_many`, mem `map`. The port allocates nothing per call there (scratch `Vec`s with kept
+capacity; C `calloc`s the signal array on every `signal` call, 1245). Measured by a new
+`tests/vulkan/native-vulkan-submit-cost.c`: 200,000 `vkQueueSubmit2` of one tiny command buffer
+with one already-signalled timeline wait and one signal, then the same with
+`vkWaitSemaphores` and `vkMapMemory`/`vkUnmapMemory` loops; reports
+`CLOCK_THREAD_CPUTIME_ID` of the submitting thread and process CPU (`getrusage`, includes
+Mesa's submit thread) per operation. Five interleaved runs per backend on an idle GPU (no other
+GPU clients, `nvidia-smi` utilisation 0 before each run). Pass: Rust median ≤ C median + the
+spread of the C runs. Numbers go into the switch commit; a frame-level check on a shipped
+workload (CPU time per frame) follows on the device.
+
+### 4.5 Regression and live
+
+After the switch builds: tests/vulkan `run.py --target all` on both backends, the dEQP-VK
+sample against the C-backend build of the same commit (expected changes: none), live Waydroid
+checks, 0 new `NVRM: Xid`.
+
+## 5. Steps
+
+Each step is one commit (or a short series) that passes the workspace gate, the pdev-preflight
+suites on the C backend, and the checks named. Estimates are focused working hours.
+
+| # | step | checks | est. |
+|---|---|---|---|
+| 0 | rebase onto the in-flight status-mapping and teardown-after-loss changes in `rm/src/mesa.rs`/`gpu.rs` | — | — |
+| 1 | `rm`: split `mesa.rs` into `rm::device` (typed Rust API, loss publication inside, `Error → VkResult`, `VaSink`) and `rm/src/capi.rs` (the unchanged `nv_rm_*` shim over it). Pure refactor | rm tests + Miri on touched unsafe modules, pdev-preflight, capture 0/42, `nm` of `libnv_bionic_native.so` identical | 5 h |
+| 2 | `nvkmd-sys`: generator script, committed bindings for 3 targets, stale check in `build.py` | layout asserts on 3 targets, regen is a no-op | 3 h |
+| 3 | build plumbing: meson option, `build.py --nvkmd`, link spike with an archive holding only the guard (three Rust staticlibs in one `.so`, `--exclude-libs`) | both Android targets link, `nm -D` unchanged | 2 h |
+| 4 | `nvkmd-rm-logic` | unit tables, full Miri | 4 h |
+| 5 | `nvkmd-rm`: pdev + dev entries, panic guard, `try_box`, harness adapter + `--backend rust` | pdev-preflight pdev/loss suites on both, call logs identical | 5 h |
+| 6 | memory + VA entries (heap via `util_vma_heap`, `VaSink`) | memory-api, memory-cleanup suites; call logs | 5 h |
+| 7 | sync types + `check_status`/`notify_lost` | sync-api, sync-properties, wait-loss, loss-notification suites | 5 h |
+| 8 | ctx entries (hot path) | submit-fusion, submit-on-demand suites | 5 h |
+| 9 | switch gate: both backends on 3 targets | capture 0/42, run.py all, `nm -D`, submit-cost bench (idle GPU), Miri, then dEQP sample + live | 4 h + regression run |
+| 10 | after the gate: delete `nvkmd_rm.c`/`nvkmd_rm.h`, the `c` option, `NvRm*` ABI asserts, the `nv_rm_*` entries no remaining user needs (Q1); port `bridge-check.c`, `external-check.c` and `mesa_test_ffi.rs` to tests on the Rust API; the harness keeps the adapter over the C fake (or a Rust fake) | gate, capture 0/42 | 4 h |
+| 11 | separate later commits, each with its own test: Rust VA heap (differential vs `util_vma_heap` on recorded alloc/free sequences), DRM version query by ioctl in Rust, bugs found during 1–8 | own tests | — |
+
+About 47 h before the regression run. Steps 2-4 are independent of each other after step 1.
+
+### Risks
+
+- **fd lifetimes.** Imports borrow (`BorrowedFd` scoped to the call; `nvk_AllocateMemory`
+  closes the app fd only after success); exports become raw only on the success return, so no
+  error path leaks or double-closes; render-node fds are `OwnedFd` opened `O_CLOEXEC` (std
+  does). The sync_file watcher's dup lifetime stays inside `rm`, untouched.
+- **fork/zygote (§13).** A pdev made in a zygote holds an fd and plain data only; every RM
+  device records its process (`ProcessBound`, one atomic load per call) and a call from a forked
+  child fails with `VK_ERROR_DEVICE_LOST` without touching the parent's objects, as through the
+  C ABI today. Sync payloads and contexts reach the RM only through their device, so they
+  inherit that check.
+- **Loss publication (833571a).** Moves from the C guard into the Rust API (step 1); step 1's
+  capture and pdev-preflight loss suites must stay green, and step 7 keeps both reads in
+  `rm_wait_status` (Mesa's counter first, then the RM flag) in the same order.
+- **Teardown after loss** is being changed in `rm` now; the dev `destroy` port calls the same
+  close path and inherits the fix, so step 0 is a hard prerequisite.
+- **Three Rust std copies in one `.so`** (NAK, NIL, ours): works for two today; step 3 proves
+  three before anything depends on it.
+- **Panics into C:** every callback is guarded; release keeps `panic = "unwind"`.
+- **Header drift on a Mesa pin bump:** stale bindings fail the build (§2.1); the `nvk_device`
+  offset is the one layout from a non-nvkmd header and is pinned by the same check.
+- **Lock order** stays RM `Inner` → VA heap mutex; the heap lock is never held across an RM
+  call (the `VaHeap` API takes it internally per operation).
+
+## 6. Open questions
+
+- **Q1: the `nv_rm.h` C ABI after the switch.** waydroid-nvidia's opt-in native GL driver
+  (`gallium-nvrm`) uses 18 `nv_rm_*` entries (incl. `submit_waits`, `context_fence`, `poll`).
+  This repo does not carry it. Either (a) `libnv_bionic_native.so` keeps exporting the entries
+  it uses for the `rust-migrate` integration, or (b) the entries go away with `nvkmd_rm.c` and
+  the native GL mode stays on waydroid-nvidia's own copy of the RM until it is ported or
+  dropped. Proposal: (b) for every entry `gallium-nvrm` does not use, (a) for the 18 it does,
+  until that decision is made.
+- **Q2: RUST.md §4 for void callbacks.** §4 says interfaces with no error return abort on a
+  panic. Several nvkmd void callbacks (mem `free`/`unmap`, va `free`, sync `finish`, ctx
+  `destroy`) report RM failures today by publishing device loss. Proposal: treat device loss as
+  their failure channel for panics too (§2.3), abort only where no device exists. Needs a
+  one-line RUST.md clarification if accepted.
