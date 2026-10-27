@@ -42,8 +42,8 @@ impl PerformanceVote {
     fn request(&self, flags: u32, duration: u32) -> rm::Result<()> {
         let mut params = BoostParameters { flags, duration };
         let mut call = abi::Control {
-            client: self.device.client.root,
-            object: self.device.subdevice,
+            client: self.device.client.root.get(),
+            object: self.device.subdevice.get(),
             command: 0x2080200a,
             parameters: u64_from_usize((&raw mut params).expose_provenance()),
             size: 8,

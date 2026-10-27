@@ -12,7 +12,7 @@ use crate::diag::diag;
 use crate::{
     abi,
     compat::Compat,
-    rm::{self, Device, Error, Result},
+    rm::{self, ClassId, Device, Error, Result, RmHandle},
 };
 use std::{
     any::Any,
@@ -37,7 +37,7 @@ struct SourceResources {
     device: Rc<Device>,
     fd: File,
     error_fd: File,
-    listener: u32,
+    listener: RmHandle,
     state: Lifecycle,
 }
 
@@ -49,8 +49,8 @@ pub(crate) struct ChannelEvents {
 }
 struct ChannelResources {
     source: Rc<EventSource>,
-    channel: u32,
-    listener: u32,
+    channel: RmHandle,
+    listener: RmHandle,
     _owner: Rc<dyn Any>,
 }
 
@@ -152,8 +152,8 @@ fn rc_index(compat: Compat, class: u32) -> Result<u32> {
 
 fn os_event(device: &Device, fd: RawFd, allocate: bool) -> Result<()> {
     let mut params = abi::OsEvent {
-        client: device.client.root,
-        device: device.handle,
+        client: device.client.root.get(),
+        device: device.handle.get(),
         fd: u32::try_from(fd)
             .map_err(|error| Error::Contract(format!("negative RM event FD: {error}")))?,
         status: 0,
@@ -179,12 +179,12 @@ fn notification(device: &Device, action: u32) -> Result<()> {
         },
     )
 }
-fn listener(device: &Device, parent: u32, fd: RawFd, index: u32) -> Result<u32> {
+fn listener(device: &Device, parent: RmHandle, fd: RawFd, index: u32) -> Result<RmHandle> {
     device.client.allocate(
         parent,
-        5,
+        ClassId::new(5),
         &mut abi::EventAlloc {
-            parent_client: device.client.root,
+            parent_client: device.client.root.get(),
             source: 0,
             class: 0x79,
             notify_index: index,
@@ -214,7 +214,7 @@ impl RmEvents {
                 device: Rc::clone(device),
                 fd,
                 error_fd,
-                listener: 0,
+                listener: RmHandle::new(0),
                 state: Lifecycle::default(),
             }),
         };
@@ -250,7 +250,7 @@ impl RmEvents {
 
     pub(crate) fn attach_channel<T: 'static>(
         &self,
-        channel: u32,
+        channel: RmHandle,
         channel_class: u32,
         owner: Rc<T>,
     ) -> Result<ChannelEvents> {
@@ -291,7 +291,7 @@ impl AsRawFd for RmEvents {
 pub(crate) struct HostListener {
     source: Rc<EventSource>,
     fd: Option<File>,
-    listener: u32,
+    listener: RmHandle,
     os_event: bool,
 }
 impl RmEvents {
@@ -307,7 +307,7 @@ impl RmEvents {
         let mut owned = HostListener {
             source: Rc::clone(&self.source),
             fd: Some(fd),
-            listener: 0,
+            listener: RmHandle::new(0),
             os_event: false,
         };
         os_event(&r.device, raw, true)?;
@@ -343,7 +343,7 @@ impl Drop for HostListener {
             .expect("an event source holds its resources until it is dropped")
             .device;
         let raw = self.as_raw_fd();
-        if self.listener != 0
+        if self.listener != RmHandle::new(0)
             && let Err(error) = device.client.free(device.subdevice, self.listener)
         {
             // Keep the descriptor/OS event alive: RM may still post to it.
@@ -365,7 +365,7 @@ impl Drop for HostListener {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TriggerPort {
     port: rm::ControlPort,
-    subdevice: u32,
+    subdevice: RmHandle,
 }
 impl TriggerPort {
     /// Test stand-in with no RM client behind it (`ControlPort::detached`).
@@ -373,7 +373,7 @@ impl TriggerPort {
     pub(crate) fn detached() -> Self {
         Self {
             port: rm::ControlPort::detached(),
-            subdevice: 0,
+            subdevice: RmHandle::new(0),
         }
     }
     pub(crate) fn trigger(&self) -> Result<()> {

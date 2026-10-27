@@ -23,7 +23,7 @@ use super::{
 use crate::{
     events::RmEvents,
     gpu::{AddressSpace, GpuMapping, Push, Queue, SemaphoreOp, SubmitStatus, method},
-    rm::{Device, Mapping, Memory},
+    rm::{Device, FenceValue, GpuVa, Mapping, Memory},
     slots::{PAGE_BYTES, SlotPool, TimelineView},
 };
 use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
@@ -60,7 +60,7 @@ fn vram(device: &Rc<Device>, space: &AddressSpace, size: usize) -> VResult<VramB
         .allocate_vram(size)
         .map_err(|e| VideoError::NoMemory(format!("VRAM {size} bytes: {e}")))?;
     let gpu = space.map(&memory)?;
-    if gpu.address() & 0xff != 0 || gpu.address() >> 40 != 0 {
+    if gpu.address().get() & 0xff != 0 || gpu.address().get() >> 40 != 0 {
         return Err(VideoError::DeviceLost(
             "NVDEC buffers need 256-byte aligned 40-bit VAs".into(),
         ));
@@ -91,13 +91,13 @@ impl Allocator for SideAllocator<'_> {
         let b = vram(self.device, self.space, size)?;
         let va = b.gpu.address();
         self.out.push(b);
-        Ok(va)
+        Ok(va.get())
     }
     fn write(&mut self, va: u64, offset: usize, data: &[u8]) -> VResult<()> {
         let b = self
             .out
             .iter_mut()
-            .find(|b| b.gpu.address() == va)
+            .find(|b| b.gpu.address() == GpuVa::new(va))
             .ok_or_else(|| VideoError::Invalid("write to an unknown side buffer".into()))?;
         // Sound only after the GPU handoff: side buffers are written while building the unit, before the submit that reads them (codec build in decode).
         b.cpu.write_bytes(offset, data)?;
@@ -185,7 +185,7 @@ impl CopyEngine {
         // SAFETY: page_cpu maps the whole PAGE_BYTES allocation and is kept
         // in `page`, which CopyEngine::drop releases after `queue` and the
         // pool, the page's only users; nothing else accesses the page.
-        unsafe { pool.install_page(page_cpu.cpu_address(), page_gpu.address()) }?;
+        unsafe { pool.install_page(page_cpu.cpu_address(), page_gpu.address().get()) }?;
         let retire = pool
             .try_allocate()?
             .ok_or_else(|| VideoError::DeviceLost("empty semaphore slot page".into()))?;
@@ -202,7 +202,7 @@ impl CopyEngine {
         })
     }
     fn retired(&self, token: u64) -> VResult<bool> {
-        Ok(token == 0 || self.queue().shared().retired(token)?)
+        Ok(token == 0 || self.queue().shared().retired(FenceValue::new(token))?)
     }
     fn reap(&mut self) -> VResult<()> {
         while let Some((t, _)) = self.pending.front() {
@@ -427,8 +427,8 @@ impl Session {
         for _ in 0..count {
             let s = vram(&device, &space, layout.size)?;
             surface_refs.push(SurfaceRef {
-                luma: s.gpu.address(),
-                chroma: s.gpu.address() + layout.chroma_offset,
+                luma: s.gpu.address().get(),
+                chroma: s.gpu.address().get() + layout.chroma_offset,
             });
             surfaces.push(s);
         }
@@ -680,8 +680,11 @@ impl Session {
         let ctx = BuildContext {
             decoder_class: self.nvdec.decoder_class,
             host_class: self.nvdec.host_class,
-            descriptor: self.ring[k].desc.gpu.address(),
-            bitstream: self.ring[k].bits.as_ref().map_or(0, |b| b.gpu.address()),
+            descriptor: self.ring[k].desc.gpu.address().get(),
+            bitstream: self.ring[k]
+                .bits
+                .as_ref()
+                .map_or(0, |b| b.gpu.address().get()),
             bitstream_len: len,
             picture_index: self.picture_index,
             current,
@@ -864,7 +867,7 @@ impl Session {
                     mem.size
                 )));
             }
-            plane_va[p] = va.address() + t.offset[p];
+            plane_va[p] = va.address().get() + t.offset[p];
         }
         // The target must be free (acquire fence, an arbitrary dma-fence sync_file from
         // the caller). Waited on the CPU: one poll(2) on the fd, which returns immediately
@@ -971,7 +974,7 @@ impl Session {
         // Command buffer: reuse one whose copy retired.
         let mut reusable = None;
         for (i, (_, tok)) in self.copy.commands.iter().enumerate() {
-            if *tok == 0 || self.copy.queue().shared().retired(*tok)? {
+            if *tok == 0 || self.copy.queue().shared().retired(FenceValue::new(*tok))? {
                 reusable = Some(i);
                 break;
             }
@@ -991,7 +994,7 @@ impl Session {
         }
         crate::platform::device_full_barrier();
         let push = Push {
-            address: cmd.gpu.address(),
+            address: cmd.gpu.address().get(),
             size: u32::try_from(w.len() * 4)
                 .expect("copy command buffers hold a few hundred words"),
             flags: 0,
@@ -1021,17 +1024,17 @@ impl Session {
                 return Err(VideoError::Again("copy queue full".into()));
             }
         };
-        self.copy.commands[ci].1 = token;
-        self.surface_copy[surface] = token;
-        self.copy.pending.push_back((token, imports));
-        if self.copy.retired(token)? {
+        self.copy.commands[ci].1 = token.get();
+        self.surface_copy[surface] = token.get();
+        self.copy.pending.push_back((token.get(), imports));
+        if self.copy.retired(token.get())? {
             return Ok(None);
         }
         // SAFETY: the session's own DRM file, open while `self` lives.
         let fd = unsafe {
             self.copy
                 .queue()
-                .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), token)
+                .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), token.get())
         }?;
         Ok(Some(fd))
     }
@@ -1045,12 +1048,12 @@ impl Drop for Session {
             crate::diag::diag!("nv_video session teardown: {error}");
         }
         let last = self.copy.queue().last_token();
-        if last != 0 {
+        if last != FenceValue::new(0) {
             // SAFETY: the session's own DRM file, open while `self` lives.
             let fence = unsafe {
                 self.copy
                     .queue()
-                    .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), last)
+                    .context_fence(std::os::fd::AsRawFd::as_raw_fd(&self.drm), last.get())
             };
             let waited = fence.map_err(|error| error.to_string()).and_then(|fd| {
                 wait_sync_file(std::os::fd::AsRawFd::as_raw_fd(&fd), Duration::from_secs(2))

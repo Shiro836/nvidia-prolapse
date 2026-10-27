@@ -12,5 +12,7 @@ pub mod conv;
 pub mod error;
 pub mod push;
 pub mod reclaim;
+pub mod units;
 
 pub use error::{ChannelError, Error, MemoryError, Result, SyncError, WaitError};
+pub use units::{ByteSize, ClassId, FenceValue, GpuVa, RmHandle};

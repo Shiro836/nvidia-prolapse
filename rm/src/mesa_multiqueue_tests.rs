@@ -93,14 +93,14 @@ impl Work {
         // Root table of the NAK bridge: binding 0 address + size at 0,
         // push constants at 1024.
         let mut constants = vec![0u8; 1152];
-        constants[..8].copy_from_slice(&out_va.address().to_le_bytes());
+        constants[..8].copy_from_slice(&out_va.address().get().to_le_bytes());
         constants[8..12].copy_from_slice(&u32::try_from(INVOCATIONS * 4).unwrap().to_le_bytes());
         constants[1024..1028].copy_from_slice(&iters.to_le_bytes());
         constants[1028..1032].copy_from_slice(&seed.to_le_bytes());
         let job = ComputeJob::compiled(
             device,
             space,
-            done_va.address(),
+            done_va.address().get(),
             program,
             &constants,
             [GROUPS, 1, 1],
@@ -129,7 +129,7 @@ impl Work {
             push_cpu.write_u32(i * 4, *word).unwrap();
         }
         let push = Push {
-            address: push_va.address(),
+            address: push_va.address().get(),
             size: u32::try_from(words.len() * 4).unwrap(),
             flags: 0,
         };

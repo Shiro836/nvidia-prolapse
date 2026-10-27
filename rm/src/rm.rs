@@ -18,6 +18,7 @@ use std::{
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 pub use nv_rm_core::error::{ChannelError, Error, MemoryError, Result, SyncError, WaitError};
+pub use nv_rm_core::units::{ByteSize, ClassId, FenceValue, GpuVa, RmHandle};
 pub(crate) fn status(operation: &'static str, value: u32) -> Result<()> {
     if value == 0 {
         Ok(())
@@ -95,7 +96,7 @@ fn parse_runtime_version(text: &str) -> Result<String> {
 
 pub struct Client {
     pub(crate) control: File,
-    pub(crate) root: u32,
+    pub(crate) root: RmHandle,
     pub version: String,
     pub(crate) compat: Compat,
     pub(crate) cpu_page_size: usize,
@@ -146,7 +147,7 @@ impl Client {
         }
         Ok(Rc::new(Self {
             control,
-            root: alloc.object,
+            root: RmHandle::new(alloc.object),
             version,
             compat,
             cpu_page_size,
@@ -185,7 +186,7 @@ impl Client {
     }
     pub(crate) fn control<T: FromBytes + IntoBytes + Immutable>(
         &self,
-        object: u32,
+        object: RmHandle,
         command: u32,
         parameters: &mut T,
     ) -> Result<()> {
@@ -203,11 +204,11 @@ impl Client {
     }
     pub(crate) fn allocate<T: FromBytes + IntoBytes + Immutable>(
         &self,
-        parent: u32,
-        class: u32,
+        parent: RmHandle,
+        class: ClassId,
         parameters: &mut T,
-    ) -> Result<u32> {
-        let name = self.compat.allocation_layout(class, size_of::<T>())?;
+    ) -> Result<RmHandle> {
+        let name = self.compat.allocation_layout(class.get(), size_of::<T>())?;
         let mut parameters_wire = name
             .map(|name| self.compat.pack(name, parameters))
             .transpose()?;
@@ -217,9 +218,9 @@ impl Client {
             None => (0, 0),
         };
         let mut call = abi::Alloc {
-            root: self.root,
-            parent,
-            class,
+            root: self.root.get(),
+            parent: parent.get(),
+            class: class.get(),
             parameters: address,
             size,
             ..Default::default()
@@ -239,20 +240,20 @@ impl Client {
         if call.object == 0 {
             return Err(Error::Contract("RM returned zero allocation handle".into()));
         }
-        Ok(call.object)
+        Ok(RmHandle::new(call.object))
     }
     /// Allocate with a fixed-size byte payload whose public layout the caller
     /// verified against this release's measured layout (`layout_size`).
     pub(crate) fn allocate_bytes(
         &self,
-        parent: u32,
-        class: u32,
+        parent: RmHandle,
+        class: ClassId,
         payload: &mut [u8],
-    ) -> Result<u32> {
+    ) -> Result<RmHandle> {
         let mut call = abi::Alloc {
-            root: self.root,
-            parent,
-            class,
+            root: self.root.get(),
+            parent: parent.get(),
+            class: class.get(),
             parameters: u64_from_usize(payload.as_mut_ptr().expose_provenance()),
             size: wire_size(payload.len())?,
             ..Default::default()
@@ -269,7 +270,7 @@ impl Client {
         if call.object == 0 {
             return Err(Error::Contract("RM returned zero allocation handle".into()));
         }
-        Ok(call.object)
+        Ok(RmHandle::new(call.object))
     }
     pub(crate) fn map_dma(&self, parameters: &mut abi::MapDma) -> Result<()> {
         self.compat
@@ -298,11 +299,11 @@ impl Client {
         )?;
         status("unmap GPU VA", parameters.status)
     }
-    pub(crate) fn free(&self, parent: u32, object: u32) -> Result<()> {
+    pub(crate) fn free(&self, parent: RmHandle, object: RmHandle) -> Result<()> {
         let mut call = abi::Free {
-            root: self.root,
-            parent,
-            object,
+            root: self.root.get(),
+            parent: parent.get(),
+            object: object.get(),
             status: 0,
         };
         exchange_wire(
@@ -340,19 +341,20 @@ impl Client {
         self.control(self.root, 0x205, &mut info)?;
         let mut parameters = abi::DeviceAlloc {
             device_id: info.device_instance,
-            client_share: self.root,
+            client_share: self.root.get(),
             ..Default::default()
         };
-        let handle = self.allocate(self.root, 0x80, &mut parameters)?;
-        let subdevice = match self.allocate(handle, 0x2080, &mut info.subdevice_instance) {
-            Ok(handle) => handle,
-            Err(error) => {
-                if let Err(cleanup) = self.free(self.root, handle) {
-                    diag!("cleanup: {cleanup}");
+        let handle = self.allocate(self.root, ClassId::new(0x80), &mut parameters)?;
+        let subdevice =
+            match self.allocate(handle, ClassId::new(0x2080), &mut info.subdevice_instance) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    if let Err(cleanup) = self.free(self.root, handle) {
+                        diag!("cleanup: {cleanup}");
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         Ok(Rc::new(Device {
             client: Rc::clone(self),
             handle,
@@ -377,7 +379,7 @@ impl Client {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ControlPort {
     fd: RawFd,
-    root: u32,
+    root: RmHandle,
     compat: Compat,
 }
 impl ControlPort {
@@ -387,7 +389,7 @@ impl ControlPort {
     pub(crate) fn detached() -> Self {
         Self {
             fd: -1,
-            root: 0,
+            root: RmHandle::default(),
             compat: crate::compat::measured_versions()
                 .next()
                 .expect("the compat table lists at least one release"),
@@ -395,15 +397,15 @@ impl ControlPort {
     }
     pub(crate) fn control<T: FromBytes + IntoBytes + Immutable>(
         &self,
-        object: u32,
+        object: RmHandle,
         command: u32,
         parameters: &mut T,
     ) -> Result<()> {
         let name = self.compat.control_layout(command)?;
         let mut parameters_wire = self.compat.pack(name, parameters)?;
         let mut call = abi::Control {
-            client: self.root,
-            object,
+            client: self.root.get(),
+            object: object.get(),
             command,
             parameters: parameters_wire.address(),
             size: wire_size(parameters_wire.len())?,
@@ -424,7 +426,7 @@ impl ControlPort {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        if let Err(error) = self.free(0, self.root) {
+        if let Err(error) = self.free(RmHandle::new(0), self.root) {
             diag!("RM client cleanup: {error}");
         }
     }
@@ -432,8 +434,8 @@ impl Drop for Client {
 
 pub struct Device {
     pub(crate) client: Rc<Client>,
-    pub(crate) handle: u32,
-    pub(crate) subdevice: u32,
+    pub(crate) handle: RmHandle,
+    pub(crate) subdevice: RmHandle,
     pub(crate) subdevice_instance: u32,
     pub(crate) events: RefCell<Weak<crate::events::EventSource>>,
     _gpu: File,
@@ -584,7 +586,7 @@ impl Device {
         let generic_kind = self.generic_kind()?;
         let size = u64_from_usize(POOL_BLOCK_SIZE);
         let mut parameters = abi::MemoryAlloc {
-            owner: self.client.root,
+            owner: self.client.root.get(),
             memory_type: 0,
             flags: pool_block::FLAGS,
             attr: pool_block::ATTR,
@@ -595,7 +597,9 @@ impl Device {
             limit: size - 1,
             ..Default::default()
         };
-        let handle = self.client.allocate(self.handle, 0x40, &mut parameters)?;
+        let handle = self
+            .client
+            .allocate(self.handle, ClassId::new(0x40), &mut parameters)?;
         let granted = parameters.attr & pool_block::ATTR_CHECKED;
         if granted != pool_block::ATTR & pool_block::ATTR_CHECKED || parameters.size != size {
             let status = self.client.free(self.handle, handle);
@@ -672,7 +676,7 @@ impl Device {
             )
         };
         let mut parameters = abi::MemoryAlloc {
-            owner: self.client.root,
+            owner: self.client.root.get(),
             memory_type: 0,
             // IGNORE_BANK_PLACEMENT | ALIGNMENT_FORCE | MEMORY_HANDLE_PROVIDED
             // | MAP_NOT_REQUIRED | PERSISTENT_VIDMEM (nvos.h).
@@ -687,7 +691,11 @@ impl Device {
         };
         let handle = self.client.allocate(
             self.handle,
-            if system { 0x3e } else { 0x40 },
+            if system {
+                ClassId::new(0x3e)
+            } else {
+                ClassId::new(0x40)
+            },
             &mut parameters,
         )?;
         if let Some(kind) = block_linear_kind {
@@ -814,9 +822,10 @@ impl Device {
             }
             let mut params = [1u8, 0u8]; // bBar1Mapping, bPriv
             self.client
-                .allocate_bytes(self.subdevice, class, &mut params)?
+                .allocate_bytes(self.subdevice, ClassId::new(class), &mut params)?
         } else {
-            self.client.allocate(self.subdevice, class, &mut ())?
+            self.client
+                .allocate(self.subdevice, ClassId::new(class), &mut ())?
         };
         Rc::new(Memory {
             device: Rc::clone(self),
@@ -841,7 +850,7 @@ impl Device {
     /// the within-page physical offset in pLinearAddress.
     pub(crate) fn map_channel_userd(
         self: &Rc<Self>,
-        channel: u32,
+        channel: RmHandle,
         owner: Rc<dyn std::any::Any>,
     ) -> Result<Mapping> {
         Rc::new(Memory {
@@ -873,8 +882,8 @@ impl Drop for Device {
 }
 pub struct Memory {
     pub(crate) device: Rc<Device>,
-    pub(crate) handle: u32,
-    parent: u32,
+    pub(crate) handle: RmHandle,
+    parent: RmHandle,
     pub size: usize,
     system: bool,
     owned: bool,
@@ -893,7 +902,7 @@ impl Memory {
     /// ownership; this wrapper releases it through the usual RM free path.
     pub(crate) fn from_imported(
         device: Rc<Device>,
-        handle: u32,
+        handle: RmHandle,
         size: usize,
         system: bool,
     ) -> Rc<Self> {
@@ -973,9 +982,9 @@ impl Memory {
         };
         let mut request = abi::MapWithFd {
             parameters: abi::MapMemory {
-                client: device.client.root,
-                device: device.handle,
-                memory: self.handle,
+                client: device.client.root.get(),
+                device: device.handle.get(),
+                memory: self.handle.get(),
                 length: u64_from_usize(self.size),
                 flags: if self.owned { 0 } else { 1 << 17 }, // NVOS33 FIFO_MAPPING_ENABLE
                 ..Default::default()
@@ -2239,7 +2248,7 @@ mod pool_block_tests {
         let space = crate::gpu::AddressSpace::new(&device).unwrap();
         let gpu = space.map(&memory).unwrap();
         assert_eq!(
-            gpu.address() % u64_from_usize(POOL_BLOCK_SIZE),
+            gpu.address().get() % u64_from_usize(POOL_BLOCK_SIZE),
             0,
             "mapped at a 2 MiB VA"
         );

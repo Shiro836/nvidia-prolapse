@@ -12,7 +12,7 @@ use super::{VResult, VideoError};
 use crate::{
     fences::NativeFenceSurface,
     gpu::{AddressSpace, Object, method},
-    rm::{Device, Mapping, Memory},
+    rm::{ClassId, Device, Mapping, Memory},
 };
 use nv_rm_core::conv::{const_u32_from_usize, high_u32, low_u32, u64_from_usize};
 use std::{os::fd::AsRawFd, rc::Rc, time::Duration};
@@ -80,42 +80,42 @@ impl NvdecChannel {
         // kernel_channel.c:741-785 (TSG engine == channel engine);
         // kernel_fifo_gp102.c:144-160 (NVDEC needs a SYNC subcontext).
         let mut group_params = crate::abi::ChannelGroup {
-            vaspace: space.vaspace.handle,
+            vaspace: space.vaspace.handle.get(),
             engine: NV2080_ENGINE_TYPE_NVDEC0,
             ..Default::default()
         };
         let group = Object::new(
             device,
             device.handle,
-            0xa06c,
+            ClassId::new(0xa06c),
             &mut group_params,
             vec![Rc::clone(&space.vaspace)],
         )?;
         let mut context_params = crate::abi::ContextShare {
-            vaspace: space.vaspace.handle,
+            vaspace: space.vaspace.handle.get(),
             flags: 0,
             subcontext: 0,
         };
         let context = Object::new(
             device,
             group.handle,
-            0x9067,
+            ClassId::new(0x9067),
             &mut context_params,
             vec![Rc::clone(&group), Rc::clone(&space.vaspace)],
         )?;
         let mut channel_params = crate::abi::Channel {
-            fifo_address: queue_va.address(),
+            fifo_address: queue_va.address().get(),
             entries: const { const_u32_from_usize(ENTRIES) },
-            context_share: context.handle,
+            context_share: context.handle.get(),
             engine: NV2080_ENGINE_TYPE_NVDEC0,
             ..Default::default()
         };
-        channel_params.userd_memory[0] = queue_memory.handle;
+        channel_params.userd_memory[0] = queue_memory.handle.get();
         channel_params.userd_offsets[0] = u64_from_usize(ENTRIES * 8);
         let channel = Object::new(
             device,
             group.handle,
-            host_class,
+            ClassId::new(host_class),
             &mut channel_params,
             vec![Rc::clone(&group), Rc::clone(&context)],
         )?;
@@ -130,7 +130,7 @@ impl NvdecChannel {
         let decoder = Object::new(
             device,
             channel.handle,
-            decoder_class,
+            ClassId::new(decoder_class),
             &mut decoder_params,
             vec![Rc::clone(&channel)],
         )?;
@@ -148,7 +148,7 @@ impl NvdecChannel {
             host_class,
             ring,
             command,
-            command_va: command_va.address(),
+            command_va: command_va.address().get(),
             doorbell,
             bar1_doorbell: usermode >= 0xc661,
             token,

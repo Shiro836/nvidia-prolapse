@@ -8,7 +8,7 @@
 use crate::diag::diag;
 use crate::{
     gpu::{AddressSpace, GpuMapping},
-    rm::{Device, Error, Mapping, Result},
+    rm::{ClassId, Device, Error, Mapping, Result, RmHandle},
 };
 use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::{
@@ -239,8 +239,8 @@ pub(crate) struct NativeFenceSurface {
     #[cfg(test)]
     health: RefCell<Vec<OwnedFd>>,
     device: Rc<Device>,
-    handle: u32,
-    channel: Option<u32>,
+    handle: RmHandle,
+    channel: Option<RmHandle>,
     mapping: Mapping,
     gpu: GpuMapping,
     size: u64,
@@ -370,15 +370,17 @@ impl NativeFenceSurface {
         crate::platform::device_full_barrier();
         let gpu = space.map(&memory)?;
         let mut alloc = Allocate {
-            memory: memory.handle,
+            memory: memory.handle.get(),
             max_submitted_memory: if mode == PayloadMode::Native64 {
                 0
             } else {
-                memory.handle
+                memory.handle.get()
             },
             flags: 0,
         };
-        let handle = device.client.allocate(device.subdevice, 0xda, &mut alloc)?;
+        let handle = device
+            .client
+            .allocate(device.subdevice, ClassId::new(0xda), &mut alloc)?;
         // RM initializes the monitored threshold to UINT64_MAX. From this
         // point only RM owns that word; GPU writes payload + timestamp [0,16).
         Ok(Self {
@@ -395,7 +397,11 @@ impl NativeFenceSurface {
         })
     }
 
-    pub(crate) fn new(device: &Rc<Device>, space: &AddressSpace, channel: u32) -> Result<Self> {
+    pub(crate) fn new(
+        device: &Rc<Device>,
+        space: &AddressSpace,
+        channel: RmHandle,
+    ) -> Result<Self> {
         let mut surface = Self::allocate(device, space)?;
         // Old constructors register engine events themselves. Do not invoke
         // the known unsupported BIND stub or later UNBIND on that contract.
@@ -406,16 +412,16 @@ impl NativeFenceSurface {
         }
         Ok(surface)
     }
-    fn binding(channel: u32) -> Bind {
+    fn binding(channel: RmHandle) -> Bind {
         // cl2080_notification.h: GR0/GRAPHICS=12, FIFO_EVENT_MTHD=35.
         Bind {
-            channel,
+            channel: channel.get(),
             count: 2,
             indices: [12, 35, 0, 0, 0, 0, 0, 0],
         }
     }
     pub(crate) fn address(&self) -> u64 {
-        self.gpu.address()
+        self.gpu.address().get()
     }
     pub(crate) fn native64(&self) -> bool {
         self.mode == PayloadMode::Native64
@@ -478,8 +484,8 @@ impl NativeFenceSurface {
                 .try_clone_to_owned()
                 .map_err(|e| Error::Io("retain DRM semaphore context fd", e))?;
             let params = Import {
-                client: self.device.client.root,
-                surface: self.handle,
+                client: self.device.client.root.get(),
+                surface: self.handle.get(),
                 size: self.size,
             };
             let mut create = ContextCreate {

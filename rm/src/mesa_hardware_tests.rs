@@ -305,7 +305,7 @@ fn slot_lifetime_recycles_under_gpu_retirement() {
     let token = queue_ref(&bridge.lock().unwrap().0, ctx)
         .unwrap()
         .last_token();
-    assert_eq!(c::wait(&bridge, ctx, token, u64::MAX), 0);
+    assert_eq!(c::wait(&bridge, ctx, token.get(), u64::MAX), 0);
     let mut t = 0;
     assert_eq!(c::submit(&bridge, ctx, &[], &mut t), 0);
     assert_eq!(
@@ -389,7 +389,7 @@ fn ring_full_leaves_payloads_untouched() {
     let last = queue_ref(&bridge.lock().unwrap().0, ctx)
         .unwrap()
         .last_token();
-    assert_eq!(c::wait(&bridge, ctx, last, u64::MAX), 0);
+    assert_eq!(c::wait(&bridge, ctx, last.get(), u64::MAX), 0);
     let accepted_count = accepted.len();
     for id in accepted {
         let p = Point {

@@ -562,7 +562,7 @@ fn concurrent_alloc_free_gated_submit_stress() {
                 assert_eq!(c::sync_reset(&b, &fence), 0);
             }
             let last = queue_ref(&b.lock().unwrap().0, ctx).unwrap().last_token();
-            assert_eq!(c::wait(&b, ctx, last, deadline), 0);
+            assert_eq!(c::wait(&b, ctx, last.get(), deadline), 0);
             for id in [gate, fence] {
                 assert_eq!(c::sync_destroy(&b, id), 0);
             }
@@ -618,7 +618,7 @@ fn concurrent_alloc_free_gated_submit_stress() {
                 drop(fd);
             }
             let last = queue_ref(&p.lock().unwrap().0, pctx).unwrap().last_token();
-            assert_eq!(c::wait(&p, pctx, last, deadline), 0);
+            assert_eq!(c::wait(&p, pctx, last.get(), deadline), 0);
             for id in [gate, sem] {
                 assert_eq!(c::sync_destroy(&p, id), 0);
             }
@@ -964,13 +964,13 @@ fn startup_sync_churn_every_exported_fence_signals() {
                 if frames.is_multiple_of(200) {
                     // Context churn (activity restarts recreate queues).
                     let last = queue_ref(&b.lock().unwrap().0, ctx).unwrap().last_token();
-                    assert_eq!(c::wait(&b, ctx, last, 10_000_000_000), 0);
+                    assert_eq!(c::wait(&b, ctx, last.get(), 10_000_000_000), 0);
                     assert_eq!(c::context_destroy(&b, ctx), 0);
                     ctx = context(&b);
                 }
             }
             let last = queue_ref(&b.lock().unwrap().0, ctx).unwrap().last_token();
-            assert_eq!(c::wait(&b, ctx, last, 10_000_000_000), 0);
+            assert_eq!(c::wait(&b, ctx, last.get(), 10_000_000_000), 0);
             for f in fences {
                 assert_eq!(c::sync_destroy(&b, f), 0);
             }
@@ -1158,7 +1158,7 @@ fn every_submitted_batch_runs_without_a_later_doorbell() {
                 assert_eq!(c::sync_reset(&b, &fence), 0);
             }
             let last = queue_ref(&b.lock().unwrap().0, ctx).unwrap().last_token();
-            assert_eq!(c::wait(&b, ctx, last, 10_000_000_000), 0);
+            assert_eq!(c::wait(&b, ctx, last.get(), 10_000_000_000), 0);
             assert_eq!(c::sync_destroy(&b, fence), 0);
             assert_eq!(c::context_destroy(&b, ctx), 0);
             n
@@ -1281,7 +1281,7 @@ fn cpu_released_acquire_runs_without_a_doorbell_after_idle() {
                     }
                 }
                 let last = queue_ref(&b.lock().unwrap().0, ctx).unwrap().last_token();
-                assert_eq!(c::wait(&b, ctx, last, 10_000_000_000), 0);
+                assert_eq!(c::wait(&b, ctx, last.get(), 10_000_000_000), 0);
                 assert_eq!(c::sync_destroy(&b, gate), 0);
                 assert_eq!(c::context_destroy(&b, ctx), 0);
                 n

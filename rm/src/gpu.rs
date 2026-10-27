@@ -6,7 +6,10 @@
 use crate::diag::diag;
 use crate::{
     abi,
-    rm::{self, ChannelError, Device, Error, Memory, MemoryError, Result, WaitError},
+    rm::{
+        self, ByteSize, ChannelError, ClassId, Device, Error, FenceValue, GpuVa, Memory,
+        MemoryError, Result, RmHandle, WaitError,
+    },
     slots::{Slot, SlotPool},
 };
 use nv_rm_core::conv::{const_u32_from_usize, high_u32, low_u32, u64_from_usize, usize_from_u32};
@@ -24,15 +27,15 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 pub(crate) struct Object {
     device: Rc<Device>,
-    pub(crate) handle: u32,
-    parent: u32,
+    pub(crate) handle: RmHandle,
+    parent: RmHandle,
     _dependencies: Vec<Rc<Object>>,
 }
 impl Object {
     pub(crate) fn new<T: FromBytes + IntoBytes + Immutable>(
         device: &Rc<Device>,
-        parent: u32,
-        class: u32,
+        parent: RmHandle,
+        class: ClassId,
         parameters: &mut T,
         dependencies: Vec<Rc<Object>>,
     ) -> Result<Rc<Self>> {
@@ -53,10 +56,10 @@ impl Object {
     fn engine(
         device: &Rc<Device>,
         channel: &Rc<Object>,
-        channel_class: u32,
-        class: u32,
+        channel_class: ClassId,
+        class: ClassId,
     ) -> Result<Rc<Self>> {
-        if !crate::capabilities::COPY_CLASSES.contains(&class) {
+        if !crate::capabilities::COPY_CLASSES.contains(&class.get()) {
             return Self::new(
                 device,
                 channel.handle,
@@ -74,7 +77,7 @@ impl Object {
             .require_constant("NV2080_ENGINE_TYPE_GRAPHICS", 1)?;
         let mut partners = abi::EnginePartners {
             engine_type: 1,
-            partnership_class: channel_class,
+            partnership_class: channel_class.get(),
             runqueue: 0,
             ..Default::default()
         };
@@ -83,7 +86,7 @@ impl Object {
             .control(device.subdevice, 0x20800147, &mut partners)?;
         let mut params = crate::capabilities::copy_engine_parameters(
             device.client.compat,
-            class,
+            class.get(),
             &partners,
             |engine| {
                 let mut query = abi::EngineClassList {
@@ -110,7 +113,7 @@ impl Object {
                     }
                     .into());
                 }
-                Ok(classes[..usize_from_u32(query.count)].contains(&class))
+                Ok(classes[..usize_from_u32(query.count)].contains(&class.get()))
             },
         )?;
         Self::new(
@@ -298,8 +301,8 @@ fn mapping_plan_paged(
     {
         return Err(MemoryError::GpuMappingLimits {
             offset,
-            length,
-            allocation_size,
+            length: ByteSize::new(length),
+            allocation_size: ByteSize::new(allocation_size),
         }
         .into());
     }
@@ -390,15 +393,21 @@ impl AddressSpace {
             size: 1 << 40,
             ..Default::default()
         };
-        let vaspace = Object::new(device, device.handle, 0x90f1, &mut parameters, vec![])?;
+        let vaspace = Object::new(
+            device,
+            device.handle,
+            ClassId::new(0x90f1),
+            &mut parameters,
+            vec![],
+        )?;
         let mut params = abi::VirtualMemory {
-            vaspace: vaspace.handle,
+            vaspace: vaspace.handle.get(),
             ..Default::default()
         };
         let dma = Object::new(
             device,
             device.handle,
-            0x70,
+            ClassId::new(0x70),
             &mut params,
             vec![Rc::clone(&vaspace)],
         )?;
@@ -409,7 +418,13 @@ impl AddressSpace {
         })
     }
     pub fn map(&self, memory: &Rc<Memory>) -> Result<GpuMapping> {
-        self.map_internal(memory, 0, u64_from_usize(memory.size), None, None)
+        self.map_internal(
+            memory,
+            0,
+            ByteSize::new(u64_from_usize(memory.size)),
+            None,
+            None,
+        )
     }
     /// Map an allocation range at a caller-managed VA. NVOS46 fixed-offset and
     /// page-kind override are public RM contracts (nvos.h), not relocations.
@@ -417,8 +432,8 @@ impl AddressSpace {
         &self,
         memory: &Rc<Memory>,
         offset: u64,
-        length: u64,
-        address: Option<u64>,
+        length: ByteSize,
+        address: Option<GpuVa>,
         kind: u32,
     ) -> Result<GpuMapping> {
         // A pool block maps without a kind; nvkmd's kind 0 means "none".
@@ -433,8 +448,8 @@ impl AddressSpace {
         &self,
         memory: &Rc<Memory>,
         offset: u64,
-        length: u64,
-        address: Option<u64>,
+        length: ByteSize,
+        address: Option<GpuVa>,
         kind: Option<u32>,
     ) -> Result<GpuMapping> {
         let requested = kind;
@@ -459,9 +474,9 @@ impl AddressSpace {
         let plan = mapping_plan_paged(
             self.device.client.compat,
             offset,
-            length,
+            length.get(),
             u64_from_usize(memory.size),
-            address,
+            address.map(GpuVa::get),
             kind,
             memory.pages,
             generic_kind,
@@ -477,13 +492,13 @@ impl AddressSpace {
         // Public535 virtual_mem.c + dma.c: reservation belongs to NV50_MEMORY_VIRTUAL,
         // PAGE_KIND_VIRTUAL copies its kind into the mapped physical descriptor.
         let dma = if let Some(mut params) = plan.typed {
-            params.owner = self.device.client.root;
-            params.vaspace = self.vaspace.handle;
+            params.owner = self.device.client.root.get();
+            params.vaspace = self.vaspace.handle.get();
             let requested = params.format;
             let object = Object::new(
                 &self.device,
                 self.device.handle,
-                TYPED_VA_CLASS,
+                ClassId::new(TYPED_VA_CLASS),
                 &mut params,
                 vec![Rc::clone(&self.vaspace)],
             )?;
@@ -496,37 +511,34 @@ impl AddressSpace {
             Rc::clone(&self.dma)
         };
         let mut call = abi::MapDma {
-            client: self.device.client.root,
-            device: self.device.handle,
-            dma: dma.handle,
-            memory: memory.handle,
+            client: self.device.client.root.get(),
+            device: self.device.handle.get(),
+            dma: dma.handle.get(),
+            memory: memory.handle.get(),
             offset,
-            length,
-            address: address.unwrap_or(0),
+            length: length.get(),
+            address: address.map_or(0, GpuVa::get),
             kind: plan.wire_kind,
             flags: plan.flags,
             ..Default::default()
         };
         self.device.client.map_dma(&mut call)?;
+        let returned = GpuVa::new(call.address);
         let mapping = GpuMapping {
             memory: Rc::clone(memory),
             dma,
-            pub_address: call.address,
+            pub_address: returned,
             length,
             active: true,
         };
-        if !call.address.is_multiple_of(4096)
-            || call
-                .address
+        if !returned.is_aligned_to(ByteSize::new(4096))
+            || returned
                 .checked_add(length)
-                .is_none_or(|end| end > (1u64 << 40))
-            || address.is_some_and(|expected| expected != call.address)
+                .is_none_or(|end| end > GpuVa::new(1 << 40))
+            || address.is_some_and(|expected| expected != returned)
         {
             // Owned mapping rolls back before the reservation is freed.
-            return Err(MemoryError::GpuVa {
-                address: call.address,
-            }
-            .into());
+            return Err(MemoryError::GpuVa { address: returned }.into());
         }
         Ok(mapping)
     }
@@ -541,16 +553,16 @@ fn typed_kind_check(generic_kind: u32, requested: u32, chosen: u32) -> Result<()
 pub struct GpuMapping {
     memory: Rc<Memory>,
     dma: Rc<Object>,
-    pub_address: u64,
-    length: u64,
+    pub_address: GpuVa,
+    length: ByteSize,
     active: bool,
 }
 impl GpuMapping {
-    pub fn address(&self) -> u64 {
+    pub fn address(&self) -> GpuVa {
         self.pub_address
     }
     /// Mapped length in bytes (from the map request).
-    pub(crate) fn length(&self) -> u64 {
+    pub(crate) fn length(&self) -> ByteSize {
         self.length
     }
     /// Explicit unbind may release a VA reservation only after RM succeeds.
@@ -561,11 +573,11 @@ impl GpuMapping {
         }
         let device = &self.memory.device;
         let mut call = abi::UnmapDma {
-            client: device.client.root,
-            device: device.handle,
-            dma: self.dma.handle,
-            memory: self.memory.handle,
-            address: self.pub_address,
+            client: device.client.root.get(),
+            device: device.handle.get(),
+            dma: self.dma.handle.get(),
+            memory: self.memory.handle.get(),
+            address: self.pub_address.get(),
             size: 0, // full mapping, including old NVOS47 without size
             ..Default::default()
         };
@@ -615,7 +627,7 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
         if !classes.contains(&required) {
             return Err(ChannelError::MissingClass {
                 operation: "copy backend",
-                class: required,
+                class: ClassId::new(required),
             }
             .into());
         }
@@ -649,8 +661,8 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
         Some(crate::compute::ComputeJob::new(
             device,
             &space,
-            dst_va.address(),
-            completion_va.address(),
+            dst_va.address().get(),
+            completion_va.address().get(),
         )?)
     } else {
         None
@@ -659,45 +671,50 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
     // TSG channels must use a context-share object; an explicit channel hVASpace
     // is rejected in kernel_channel.c:436 even when the TSG has that same VA.
     let mut group_params = abi::ChannelGroup {
-        vaspace: space.vaspace.handle,
+        vaspace: space.vaspace.handle.get(),
         engine: 1, // NV2080_ENGINE_TYPE_GRAPHICS; zero is not a valid TSG engine.
         ..Default::default()
     };
     let group = Object::new(
         device,
         device.handle,
-        0xa06c,
+        ClassId::new(0xa06c),
         &mut group_params,
         vec![Rc::clone(&space.vaspace)],
     )?;
     let mut context_params = abi::ContextShare {
-        vaspace: space.vaspace.handle,
+        vaspace: space.vaspace.handle.get(),
         flags: 1,
         subcontext: 0,
     };
     let context = Object::new(
         device,
         group.handle,
-        0x9067,
+        ClassId::new(0x9067),
         &mut context_params,
         vec![Rc::clone(&group), Rc::clone(&space.vaspace)],
     )?;
     let mut channel_params = abi::Channel {
-        fifo_address: queue_va.address(),
+        fifo_address: queue_va.address().get(),
         entries: const { const_u32_from_usize(ENTRIES) },
-        context_share: context.handle,
+        context_share: context.handle.get(),
         ..Default::default()
     };
-    channel_params.userd_memory[0] = queue_memory.handle;
+    channel_params.userd_memory[0] = queue_memory.handle.get();
     channel_params.userd_offsets[0] = u64_from_usize(ENTRIES * 8);
     let channel = Object::new(
         device,
         group.handle,
-        0xc96f,
+        ClassId::new(0xc96f),
         &mut channel_params,
         vec![Rc::clone(&group), Rc::clone(&context)],
     )?;
-    let engine = Object::engine(device, &channel, 0xc96f, engine_class)?;
+    let engine = Object::engine(
+        device,
+        &channel,
+        ClassId::new(0xc96f),
+        ClassId::new(engine_class),
+    )?;
     let mut token = 0u32;
     device
         .client
@@ -715,8 +732,8 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
         method(&mut words, 1, 0x2c0, &[9]); // PREFETCH_SCHEDULE
     } else {
         method(&mut words, 4, 0, &[0xcab5]); // SET_OBJECT (class binding)
-        let source_addr = hi_lo(src_va.address());
-        let destination_addr = hi_lo(dst_va.address());
+        let source_addr = hi_lo(src_va.address().get());
+        let destination_addr = hi_lo(dst_va.address().get());
         method(
             &mut words,
             4,
@@ -730,7 +747,7 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
         );
         method(&mut words, 4, 0x418, &[check_word(count * 4)]);
         method(&mut words, 4, 0x300, &[2 | (1 << 7) | (1 << 8)]); // non-pipelined, pitch layouts
-        let completion_addr = hi_lo(completion_va.address());
+        let completion_addr = hi_lo(completion_va.address().get());
         method(
             &mut words,
             4,
@@ -742,7 +759,7 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
     for (i, word) in words.iter().enumerate() {
         command.write_u32(i * 4, *word)?;
     }
-    let entry = command_va.address() | (u64_from_usize(words.len()) << 42) | (1 << 41);
+    let entry = command_va.address().get() | (u64_from_usize(words.len()) << 42) | (1 << 41);
     ring.write_u32(0, low_u32(entry))?;
     ring.write_u32(4, high_u32(entry))?;
     crate::platform::device_full_barrier();
@@ -806,7 +823,10 @@ pub(crate) fn modern_host(channel: u32) -> Result<bool> {
     match channel {
         0xc36f | 0xc46f | 0xc56f | 0xc76f | 0xc86f | 0xc96f | 0xca6f => Ok(true),
         0xa06f | 0xa16f | 0xb06f | 0xc06f => Ok(false),
-        _ => Err(ChannelError::HostClass { class: channel }.into()),
+        _ => Err(ChannelError::HostClass {
+            class: ClassId::new(channel),
+        }
+        .into()),
     }
 }
 fn host_visibility(words: &mut Vec<u32>, channel: u32) -> Result<()> {
@@ -1060,22 +1080,23 @@ pub(crate) struct QueueShared {
 impl QueueShared {
     /// Completed private retirement value (sem32 reconstructed against the
     /// maximum issued sequence, published before every doorbell).
-    pub(crate) fn completed(&self) -> Result<u64> {
+    pub(crate) fn completed(&self) -> Result<FenceValue> {
         let sequence = self.sequence.load(Ordering::Acquire);
         if self.native64 {
-            self.pool.read64_raw(self.retire)
+            self.pool.read64_raw(self.retire).map(FenceValue::new)
         } else {
             crate::fences::extend_payload(self.pool.read32(self.retire)?, sequence)
+                .map(FenceValue::new)
         }
     }
-    pub(crate) fn retired(&self, token: u64) -> Result<bool> {
+    pub(crate) fn retired(&self, token: FenceValue) -> Result<bool> {
         if self.lost.load(Ordering::Acquire) {
             return Err(ChannelError::Lost {
                 operation: "query retirement",
             }
             .into());
         }
-        let issued = self.sequence.load(Ordering::Acquire);
+        let issued = FenceValue::new(self.sequence.load(Ordering::Acquire));
         if token > issued {
             return Err(ChannelError::Token {
                 operation: "query retirement",
@@ -1084,7 +1105,7 @@ impl QueueShared {
             }
             .into());
         }
-        Ok(token == 0 || self.completed()? >= token)
+        Ok(token == FenceValue::default() || self.completed()? >= token)
     }
 }
 impl Drop for QueueShared {
@@ -1334,8 +1355,8 @@ impl SubmissionLedger {
             }
             if too_far {
                 return Err(ChannelError::Sem32Range {
-                    token,
-                    retired: self.retired,
+                    token: FenceValue::new(token),
+                    retired: FenceValue::new(self.retired),
                 }
                 .into());
             }
@@ -1379,8 +1400,8 @@ impl SubmissionLedger {
 }
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SubmitStatus {
-    Submitted(u64),
-    Full(u64),
+    Submitted(FenceValue),
+    Full(FenceValue),
 }
 /// NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_ZCULL.
 pub(crate) const ENGINE_GRAPHICS_ZCULL: u32 = 8;
@@ -1421,7 +1442,7 @@ fn bind_zcull(device: &Rc<Device>, space: &AddressSpace, channel: u32) -> Result
     if mapping
         .address()
         .checked_add(mapping.length())
-        .is_none_or(|end| end >= 16 << 30)
+        .is_none_or(|end| end >= GpuVa::new(16 << 30))
     {
         return Err(ChannelError::VaHeapCollision {
             what: "internal GPU allocation",
@@ -1429,9 +1450,9 @@ fn bind_zcull(device: &Rc<Device>, space: &AddressSpace, channel: u32) -> Result
         .into());
     }
     let mut bind = abi::ZcullBind {
-        client: device.client.root,
+        client: device.client.root.get(),
         channel,
-        address: mapping.address(),
+        address: mapping.address().get(),
         mode: ZCULL_MODE_SEPARATE_BUFFER,
         padding: 0,
     };
@@ -1547,7 +1568,7 @@ impl Queue {
             if va
                 .address()
                 .checked_add(va.length)
-                .is_none_or(|end| end >= 16 << 30)
+                .is_none_or(|end| end >= GpuVa::new(16 << 30))
             {
                 return Err(ChannelError::VaHeapCollision {
                     what: "internal GPU allocation",
@@ -1559,14 +1580,14 @@ impl Queue {
             Some(share) => Rc::clone(&share.subcontext.tsg),
             None => {
                 let mut group_params = abi::ChannelGroup {
-                    vaspace: space.vaspace.handle,
+                    vaspace: space.vaspace.handle.get(),
                     engine: 1,
                     ..Default::default()
                 };
                 Tsg::new(Object::new(
                     device,
                     device.handle,
-                    0xa06c,
+                    ClassId::new(0xa06c),
                     &mut group_params,
                     vec![Rc::clone(&space.vaspace)],
                 )?)
@@ -1593,7 +1614,7 @@ impl Queue {
             // (nvos.h NV_CTXSHARE_ALLOCATION_FLAGS_SUBCONTEXT; stock 615
             // E 0x9e01c0..0x9e01fa: flags = (veid != 0) * 2).
             let mut parameters = abi::ContextShare {
-                vaspace: space.vaspace.handle,
+                vaspace: space.vaspace.handle.get(),
                 flags: if veid == 0 {
                     CTXSHARE_SYNC
                 } else {
@@ -1604,7 +1625,7 @@ impl Queue {
             Some(Object::new(
                 device,
                 group.handle,
-                0x9067,
+                ClassId::new(0x9067),
                 &mut parameters,
                 vec![Rc::clone(&group), Rc::clone(&space.vaspace)],
             )?)
@@ -1615,10 +1636,10 @@ impl Queue {
             subcontext.tsg.keep_veid0_share(Rc::clone(context))?;
         }
         let mut params = abi::Channel {
-            error: error_mem.handle,
-            fifo_address: ring_gpu.address(),
+            error: error_mem.handle.get(),
+            fifo_address: ring_gpu.address().get(),
             entries: const { const_u32_from_usize(QUEUE_ENTRIES) },
-            context_share: context.as_ref().map_or(0, |c| c.handle),
+            context_share: context.as_ref().map_or(0, |c| c.handle.get()),
             // Every channel here is parented under our explicit TSG. Public
             // 535 kernel_channel.c rejects hVASpace on that parent regardless
             // of GPU generation. With hContextShare=0, SetLegacyMode creates
@@ -1636,7 +1657,7 @@ impl Queue {
             ..Default::default()
         };
         if modern {
-            params.userd_memory[0] = ring_mem.handle;
+            params.userd_memory[0] = ring_mem.handle.get();
             params.userd_offsets[0] = 8192;
         }
         let mut dependencies = vec![Rc::clone(&group), Rc::clone(&space.vaspace)];
@@ -1646,7 +1667,7 @@ impl Queue {
         let channel = Object::new(
             device,
             group.handle,
-            caps.channel,
+            ClassId::new(caps.channel),
             &mut params,
             dependencies,
         )?;
@@ -1666,7 +1687,12 @@ impl Queue {
             (8, caps.m2mf),
         ] {
             if mask & bit != 0 {
-                engines.push(Object::engine(device, &channel, caps.channel, class)?);
+                engines.push(Object::engine(
+                    device,
+                    &channel,
+                    ClassId::new(caps.channel),
+                    ClassId::new(class),
+                )?);
             }
         }
         // Graphics contexts get their ZCULL context-switch buffer after the
@@ -1678,7 +1704,7 @@ impl Queue {
         // the TSG lives. It is therefore owned by the TSG and unmapped only
         // after RM freed the TSG.
         if mask & 4 != 0 {
-            let zcull = bind_zcull(device, space, channel.handle)?;
+            let zcull = bind_zcull(device, space, channel.handle.get())?;
             subcontext.tsg.keep_zcull(zcull)?;
         }
         let mut token = 0;
@@ -1767,7 +1793,10 @@ impl Queue {
     /// The channel's subcontext ID and its TSG's RM handle.
     #[cfg(test)]
     pub(crate) fn subcontext(&self) -> (u32, u32) {
-        (self.subcontext.veid, self.subcontext.tsg.object.handle)
+        (
+            self.subcontext.veid,
+            self.subcontext.tsg.object.handle.get(),
+        )
     }
     /// GPU VA range of the TSG's ZCULL buffer, if bound.
     #[cfg(test)]
@@ -1777,7 +1806,7 @@ impl Queue {
             .zcull
             .borrow()
             .as_ref()
-            .map(|m| (m.address(), m.length()))
+            .map(|m| (m.address().get(), m.length().get()))
     }
     pub(crate) fn channel_class(&self) -> u32 {
         self.channel_class
@@ -1820,8 +1849,8 @@ impl Queue {
             None => Ok(()),
         }
     }
-    pub(crate) fn last_token(&self) -> u64 {
-        self.ledger.sequence
+    pub(crate) fn last_token(&self) -> FenceValue {
+        FenceValue::new(self.ledger.sequence)
     }
     /// Read the authoritative RC notifier (VRAM). Called by the throttled loss
     /// scan (<= 1/s, or forced by RC readiness / failed submission), never per
@@ -1878,14 +1907,14 @@ impl Queue {
         let completed = self.shared.completed()?;
         // Check the public semaphore too, catching impossible notification vs
         // retirement ordering rather than silently accepting a corrupt value.
-        if completed > self.completion.read_completed()? {
+        if completed > FenceValue::new(self.completion.read_completed()?) {
             self.mark_lost();
             return Err(ChannelError::Timeline {
                 reason: "retirement preceded public completion",
             }
             .into());
         }
-        if let Err(e) = self.ledger.retire(completed) {
+        if let Err(e) = self.ledger.retire(completed.get()) {
             self.mark_lost();
             return Err(e);
         }
@@ -1914,8 +1943,8 @@ impl Queue {
         if token == 0 || token > self.ledger.sequence {
             return Err(ChannelError::Token {
                 operation: "export a context fence",
-                token,
-                issued: self.ledger.sequence,
+                token: FenceValue::new(token),
+                issued: FenceValue::new(self.ledger.sequence),
             }
             .into());
         }
@@ -1942,8 +1971,8 @@ impl Queue {
         }
         if gpu
             .address()
-            .checked_add(u64_from_usize(bytes))
-            .is_none_or(|end| end >= 1 << 34)
+            .checked_add(ByteSize::new(u64_from_usize(bytes)))
+            .is_none_or(|end| end >= GpuVa::new(1 << 34))
         {
             return Err(ChannelError::VaHeapCollision {
                 what: "GPU dependency commands",
@@ -2110,7 +2139,7 @@ impl Queue {
             + usize::from(!signals_inline);
         let (token, slot) = match self.ledger.prepare_for_mode(entries, 0, native64)? {
             Ok(next) => next,
-            Err(oldest) => return Ok(SubmitStatus::Full(oldest)),
+            Err(oldest) => return Ok(SubmitStatus::Full(FenceValue::new(oldest))),
         };
         let base = slot * TAIL_STRIDE;
         let prefix_segment = if !scratch.prefix.is_empty() && !prefix_inline {
@@ -2159,24 +2188,24 @@ impl Queue {
         if !scratch.prefix.is_empty() {
             let address = match &prefix_segment {
                 Some((_, gpu)) => gpu.address(),
-                None => self.tail_gpu.address() + u64_from_usize(base),
+                None => GpuVa::new(self.tail_gpu.address().get() + u64_from_usize(base)),
             };
-            self.write_entry(address, scratch.prefix.len() * 4, true)?;
+            self.write_entry(address.get(), scratch.prefix.len() * 4, true)?;
         }
         for p in pushes {
             self.write_entry(p.address, usize_from_u32(p.size), p.flags & 1 != 0)?;
         }
         if let Some((_, gpu)) = &signal_segment {
             let address = gpu.address();
-            self.write_entry(address, scratch.signals.len() * 4, true)?;
+            self.write_entry(address.get(), scratch.signals.len() * 4, true)?;
         }
-        let post = self.tail_gpu.address() + u64_from_usize(base + tail_offset);
+        let post = self.tail_gpu.address().get() + u64_from_usize(base + tail_offset);
         self.write_entry(post, scratch.tail.len() * 4 + TAIL_IRQ_BYTES, true)?;
         for (cpu, gpu) in [prefix_segment, signal_segment].into_iter().flatten() {
             self.ledger.overflow.push_back((token, cpu, gpu));
         }
         self.kick()?;
-        Ok(SubmitStatus::Submitted(token))
+        Ok(SubmitStatus::Submitted(FenceValue::new(token)))
     }
     /// Publish GP_PUT and ring the doorbell.
     ///
@@ -2582,8 +2611,8 @@ mod compression_tests {
                 for packing in 0..8u32 {
                     for depth in [1u32, 2, 3, 4, 5] {
                         let mut params = abi::MemoryAlloc {
-                            owner: client.root,
-                            vaspace: space.vaspace.handle,
+                            owner: client.root.get(),
+                            vaspace: space.vaspace.handle.get(),
                             flags: 0x80000 | 0x100,
                             memory_type: ty,
                             attr: ATTR_PAGE_4KB
@@ -2600,7 +2629,7 @@ mod compression_tests {
                         let r = Object::new(
                             &device,
                             device.handle,
-                            TYPED_VA_CLASS,
+                            ClassId::new(TYPED_VA_CLASS),
                             &mut params,
                             vec![Rc::clone(&space.vaspace)],
                         );
@@ -2630,7 +2659,7 @@ mod compression_tests {
             KIND_ZF32_X24S8,
             KIND_S8,
         ] {
-            let r = space.map_range(&memory, 0, 1 << 16, None, kind);
+            let r = space.map_range(&memory, 0, ByteSize::new(1 << 16), None, kind);
             let ok = r.is_ok();
             println!(
                 "{{\"map\":1,\"kind\":{kind},\"ok\":{ok},\"error\":\"{}\"}}",

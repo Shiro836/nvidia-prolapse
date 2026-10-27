@@ -12,7 +12,7 @@
 use crate::diag::diag;
 use crate::{
     platform,
-    rm::{Device, Error, Memory, Result},
+    rm::{Device, Error, Memory, Result, RmHandle},
 };
 use nv_rm_core::conv::u64_from_usize;
 use std::{
@@ -202,9 +202,9 @@ pub(crate) fn export(memory: &Rc<Memory>, drm_fd: BorrowedFd<'_>) -> Result<Owne
     let mut rm_export = ExportObject {
         object: RmObject {
             kind: 1,
-            device: device.handle,
-            parent: device.handle,
-            object: memory.handle,
+            device: device.handle.get(),
+            parent: device.handle.get(),
+            object: memory.handle.get(),
         },
         fd: opaque.as_raw_fd(),
         flags: 0,
@@ -319,8 +319,8 @@ pub(crate) fn import(
         fd: opaque.as_raw_fd(),
         object: RmObject {
             kind: 1,
-            device: device.handle,
-            parent: device.handle,
+            device: device.handle.get(),
+            parent: device.handle.get(),
             object: 0,
         },
     };
@@ -333,7 +333,7 @@ pub(crate) fn import(
     let system = match query {
         Ok(()) if address_space[2] == 1 || address_space[2] == 2 => address_space[2] == 1,
         other => {
-            if let Err(cleanup) = client.free(device.handle, handle) {
+            if let Err(cleanup) = client.free(device.handle, RmHandle::new(handle)) {
                 diag!("external RM import cleanup: {cleanup}");
             }
             other?;
@@ -345,7 +345,7 @@ pub(crate) fn import(
     };
     Ok(Memory::from_imported(
         Rc::clone(device),
-        handle,
+        RmHandle::new(handle),
         size,
         system,
     ))
@@ -398,9 +398,9 @@ mod tests {
             let mut export = ExportObject {
                 object: RmObject {
                     kind: 1,
-                    device: source_device.handle,
-                    parent: source_device.handle,
-                    object: memory.handle,
+                    device: source_device.handle.get(),
+                    parent: source_device.handle.get(),
+                    object: memory.handle.get(),
                 },
                 fd: opaque.as_raw_fd(),
                 flags: 0,
@@ -422,15 +422,19 @@ mod tests {
                 fd: opaque.as_raw_fd(),
                 object: RmObject {
                     kind: 1,
-                    device: target_device.handle,
-                    parent: target_device.handle,
+                    device: target_device.handle.get(),
+                    parent: target_device.handle.get(),
                     object: 0,
                 },
             };
             target.control(target.root, 0x3d06, &mut import).unwrap();
-            let imported =
-                Memory::from_imported(Rc::clone(&target_device), import.object.object, size, true);
-            let mut address_space = [imported.handle, 0, 0];
+            let imported = Memory::from_imported(
+                Rc::clone(&target_device),
+                RmHandle::new(import.object.object),
+                size,
+                true,
+            );
+            let mut address_space = [imported.handle.get(), 0, 0];
             target
                 .control(target.root, 0xd01, &mut address_space)
                 .unwrap();

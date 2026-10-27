@@ -524,7 +524,7 @@ pub(crate) struct TimingRing {
 }
 impl TimingRing {
     pub(crate) fn entry_address(&self, seq: u32) -> u64 {
-        self.gpu.address() + u64_from_usize(usize_from_u32(seq) % TS_ENTRIES * 32)
+        self.gpu.address().get() + u64_from_usize(usize_from_u32(seq) % TS_ENTRIES * 32)
     }
     /// Pops completed entries: (token, start_ns, end_ns).
     pub(crate) fn drain(&mut self, out: &mut Vec<(u64, u64, u64)>) -> crate::rm::Result<()> {

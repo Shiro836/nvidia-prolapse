@@ -95,12 +95,12 @@ impl ComputeJob {
             code_cpu.write_u32(i * 4, u32::from_le_bytes(*chunk))?;
         }
         let address = descriptor_va.address();
-        if address & 255 != 0 || address >> 40 != 0 {
+        if address.get() & 255 != 0 || address.get() >> 40 != 0 {
             return Err(Error::Contract(
                 "QMD launch address must be 256-byte aligned and below 1 TiB".into(),
             ));
         }
-        let cbuf = address + 512;
+        let cbuf = address.get() + 512;
         let mut qmd = Qmd([0; 96]);
         let code_blocks = u64_from_usize((program.code.len() >> 8).min(0x1ff));
         let shared_units = u64::from(program.shared_size.next_multiple_of(128)) >> 7;
@@ -125,8 +125,8 @@ impl ComputeJob {
             (536, 512, completion >> 32),
             (575, 544, 1), // 64-bit completion payload, upper already zero
             (625, 624, 1), // CWD L1_SYSMEMBAR
-            (1055, 1024, (code_va.address() >> 4) & 0xffffffff),
-            (1076, 1056, code_va.address() >> 36),
+            (1055, 1024, (code_va.address().get() >> 4) & 0xffffffff),
+            (1076, 1056, code_va.address().get() >> 36),
             (1085, 1077, code_blocks),
             (1103, 1088, u64::from(program.workgroup[0])),
             (1119, 1104, u64::from(program.workgroup[1])),
@@ -145,8 +145,8 @@ impl ComputeJob {
             (1407, 1395, constant_units), // bytes rounded to 16-byte QMD size units
             (1856, 1856, 1),
             (1859, 1859, 1),
-            (1919, 1888, (code_va.address() >> 8) & 0xffffffff),
-            (1936, 1920, code_va.address() >> 40),
+            (1919, 1888, (code_va.address().get() >> 8) & 0xffffffff),
+            (1936, 1920, code_va.address().get() >> 40),
         ] {
             qmd.set(high, low, value)?;
         }
@@ -159,7 +159,7 @@ impl ComputeJob {
             descriptor_cpu.write_u32(512 + i * 4, u32::from_le_bytes(bytes))?;
         }
         Ok(Self {
-            address,
+            address: address.get(),
             _code_va: code_va,
             _descriptor_va: descriptor_va,
             _code_cpu: code_cpu,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Error type of the RM backend: the failure of an ioctl, an RM status, a broken contract,
 //! a lost device or a bounded wait that ran out, with the operation that failed.
+use crate::units::{ByteSize, ClassId, FenceValue, GpuVa};
 use std::{io, time::Duration};
 
 /// Why an RM backend operation failed.
@@ -115,7 +116,7 @@ pub enum ChannelError {
     #[error("allocate RM class {class:#x}: {source}")]
     Allocate {
         /// The RM class.
-        class: u32,
+        class: ClassId,
         /// The failed allocation.
         #[source]
         source: Box<Error>,
@@ -133,14 +134,14 @@ pub enum ChannelError {
         /// The operation.
         operation: &'static str,
         /// The missing class.
-        class: u32,
+        class: ClassId,
     },
     /// The channel's host class has no method family this backend encodes (published
     /// `cl{a06f,a16f,b06f,c06f,c36f}.h` and later).
     #[error("unimplemented host method class {class:#x}")]
     HostClass {
         /// The host (GPFIFO) class.
-        class: u32,
+        class: ClassId,
     },
     /// The GPU generation or its host class lacks a feature the operation needs.
     #[error("{operation}: {reason}")]
@@ -223,9 +224,9 @@ pub enum ChannelError {
     #[error("sem32 submission exceeds half range (next {token}, retired {retired})")]
     Sem32Range {
         /// The value the submission would signal.
-        token: u64,
+        token: FenceValue,
         /// The newest retired value.
-        retired: u64,
+        retired: FenceValue,
     },
     /// Submissions on this channel were stopped (device loss).
     #[error("cannot submit to a stopped RM channel")]
@@ -274,9 +275,9 @@ pub enum ChannelError {
         /// The operation.
         operation: &'static str,
         /// The token.
-        token: u64,
+        token: FenceValue,
         /// The newest issued token.
-        issued: u64,
+        issued: FenceValue,
     },
     /// The channel's completion values contradict its issued timeline.
     #[error("{reason}")]
@@ -480,15 +481,15 @@ pub enum MemoryError {
         /// Offset into the memory.
         offset: u64,
         /// Mapped length.
-        length: u64,
+        length: ByteSize,
         /// The memory's size.
-        allocation_size: u64,
+        allocation_size: ByteSize,
     },
     /// RM returned a GPU VA that is unaligned, beyond 2^40 or not the requested one.
     #[error("RM returned invalid or displaced GPU VA {address:#x}")]
     GpuVa {
         /// The returned address.
-        address: u64,
+        address: GpuVa,
     },
     /// Before Turing RM chose a PTE kind for a typed VA other than the requested one.
     #[error(

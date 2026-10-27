@@ -33,7 +33,7 @@
 //!   nv-nvdec-probe fixture/ out/ N ref.nv12
 use crate::{
     gpu::{AddressSpace, Object, hi_lo, method},
-    rm::{Device, Error, Result, WaitError},
+    rm::{ClassId, Device, Error, Result, WaitError},
 };
 use nv_rm_core::conv::{
     const_u32_from_usize, high_u32, low_u8, low_u16, low_u32, u64_from_usize, usize_from_u32,
@@ -76,7 +76,7 @@ fn alloc_zeroed(
 ) -> Result<(Rc<crate::rm::Memory>, crate::gpu::GpuMapping)> {
     let memory = device.allocate_vram(size)?;
     let va = space.map(&memory)?;
-    if va.address() & 0xff != 0 || va.address() >> 40 != 0 {
+    if va.address().get() & 0xff != 0 || va.address().get() >> 40 != 0 {
         return Err(Error::Contract(
             "NVDEC buffers need 256-byte aligned 40-bit VAs".into(),
         ));
@@ -148,44 +148,44 @@ impl VideoChannel {
         // TSG on the NVDEC0 runlist; kernel_channel.c requires channel engine ==
         // TSG engine and takes the VA space from the context share.
         let mut group_params = crate::abi::ChannelGroup {
-            vaspace: space.vaspace.handle,
+            vaspace: space.vaspace.handle.get(),
             engine: NV2080_ENGINE_TYPE_NVDEC0,
             ..Default::default()
         };
         let group = Object::new(
             device,
             device.handle,
-            0xa06c,
+            ClassId::new(0xa06c),
             &mut group_params,
             vec![Rc::clone(&space.vaspace)],
         )?;
         // SYNC subcontext (flags 0): kernel_fifo_gp102.c:144-160 allows ASYNC
         // only on GR/GR-CE; the NVDEC object alloc fails with 0x1f otherwise.
         let mut context_params = crate::abi::ContextShare {
-            vaspace: space.vaspace.handle,
+            vaspace: space.vaspace.handle.get(),
             flags: 0,
             subcontext: 0,
         };
         let context = Object::new(
             device,
             group.handle,
-            0x9067,
+            ClassId::new(0x9067),
             &mut context_params,
             vec![Rc::clone(&group), Rc::clone(&space.vaspace)],
         )?;
         let mut channel_params = crate::abi::Channel {
-            fifo_address: queue_va.address(),
+            fifo_address: queue_va.address().get(),
             entries: const { const_u32_from_usize(ENTRIES) },
-            context_share: context.handle,
+            context_share: context.handle.get(),
             engine: NV2080_ENGINE_TYPE_NVDEC0,
             ..Default::default()
         };
-        channel_params.userd_memory[0] = queue_memory.handle;
+        channel_params.userd_memory[0] = queue_memory.handle.get();
         channel_params.userd_offsets[0] = u64_from_usize(ENTRIES * 8);
         let channel = Object::new(
             device,
             group.handle,
-            0xc96f,
+            ClassId::new(0xc96f),
             &mut channel_params,
             vec![Rc::clone(&group), Rc::clone(&context)],
         )?;
@@ -200,7 +200,7 @@ impl VideoChannel {
         let decoder = Object::new(
             device,
             channel.handle,
-            decoder_class,
+            ClassId::new(decoder_class),
             &mut decoder_params,
             vec![Rc::clone(&channel)],
         )?;
@@ -217,10 +217,10 @@ impl VideoChannel {
             decoder_class,
             ring,
             command,
-            command_va: command_va.address(),
+            command_va: command_va.address().get(),
             doorbell,
             sem_cpu,
-            sem_va: sem.address(),
+            sem_va: sem.address().get(),
             token,
             put: 0,
             cmd_off: 0,
@@ -381,12 +381,12 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
         bits_cpu.write_bytes(data.len(), &[0u8; 256])?;
         let out_va = surfaces[i].1.address();
         let mut words = Vec::new();
-        let d = low_u32((desc.address() + u64_from_usize(desc_off)) >> 8);
+        let d = low_u32((desc.address().get() + u64_from_usize(desc_off)) >> 8);
         let chroma = u64_from_usize(chroma_offset);
         // Buffer offsets in 256-byte units, added to the 32-bit FILTER_BUFFER field.
         let intra_top = low_u32(u64_from_usize(intra_top_off >> 8));
         let intra_unk = low_u32(u64_from_usize(intra_unk_off >> 8));
-        let f = low_u32(filter.address() >> 8);
+        let f = low_u32(filter.address().get() >> 8);
         method(&mut words, 4, 0x200, &[7]); // SET_APPLICATION_ID HEVC
         // SET_CONTROL_PARAMS: codec HEVC, gptimer, err_conceal, mbtimer,
         // event_trace_logging, testrun_env PROD_RUN.
@@ -396,8 +396,13 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
             0x400,
             &[7 | 1 << 4 | 1 << 6 | 1 << 13 | 1 << 16 | 1 << 18],
         );
-        method(&mut words, 4, 0x404, &[d, low_u32(bits.address() >> 8)]); // DRV_PIC_SETUP, IN_BUF_BASE
-        slots[usize_from_u32(frame.pos)] = Some(out_va);
+        method(
+            &mut words,
+            4,
+            0x404,
+            &[d, low_u32(bits.address().get() >> 8)],
+        ); // DRV_PIC_SETUP, IN_BUF_BASE
+        slots[usize_from_u32(frame.pos)] = Some(out_va.get());
         for (slot, va) in slots.iter().enumerate() {
             if let Some(va) = va {
                 let slot = slot_u32(slot) * 4;
@@ -405,8 +410,13 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
                 method(&mut words, 4, 0x474 + slot, &[low_u32((va + chroma) >> 8)]);
             }
         }
-        method(&mut words, 4, 0x414, &[low_u32(coloc.address() >> 8)]); // COLOC_DATA
-        method(&mut words, 4, 0x424, &[low_u32(status.address() >> 8)]); // NVDEC_STATUS
+        method(&mut words, 4, 0x414, &[low_u32(coloc.address().get() >> 8)]); // COLOC_DATA
+        method(
+            &mut words,
+            4,
+            0x424,
+            &[low_u32(status.address().get() >> 8)],
+        ); // NVDEC_STATUS
         method(&mut words, 4, 0x584, &[d + 2, f]); // HEVC TILE_SIZES, FILTER_BUFFER
         method(&mut words, 4, 0x4c8, &[f + intra_top]); // INTRA_TOP_BUF
         if blackwell {
@@ -695,8 +705,8 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             bits_cpu.write_bytes(tiles.len(), &[0u8; 256])?;
 
             let da = desc.address();
-            let a = |off: usize| low_u32((da + u64_from_usize(off)) >> 8);
-            let fa = |off: usize| low_u32((filter.address() + u64_from_usize(off)) >> 8);
+            let a = |off: usize| low_u32((da.get() + u64_from_usize(off)) >> 8);
+            let fa = |off: usize| low_u32((filter.address().get() + u64_from_usize(off)) >> 8);
             let sva = |i: usize| surfaces[i].1.address();
             let mut words = Vec::new();
             // Stock writes every buffer-offset method as NONINC (offset>>8, 0).
@@ -707,19 +717,23 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             method(&mut words, 4, 0x200, &[9]); // SET_APPLICATION_ID VP9
             method(&mut words, 4, 0x400, &[0x52059]); // CONTROL_PARAMS as stock
             addr(&mut words, 0x404, &[a(0)]);
-            addr(&mut words, 0x408, &[low_u32(bits.address() >> 8)]);
+            addr(&mut words, 0x408, &[low_u32(bits.address().get() >> 8)]);
             for i in 0..3 {
                 let s = if h.is_intra() {
                     cur
                 } else {
                     st.slot_surface(h.ref_frame_idx[i]).unwrap_or(cur)
                 };
-                addr(&mut words, 0x430 + 4 * slot_u32(i), &[low_u32(sva(s) >> 8)]);
+                addr(
+                    &mut words,
+                    0x430 + 4 * slot_u32(i),
+                    &[low_u32(sva(s).get() >> 8)],
+                );
                 method(
                     &mut words,
                     4,
                     0x474 + 4 * slot_u32(i),
-                    &[low_u32((sva(s) + u64_from_usize(chroma)) >> 8)],
+                    &[low_u32((sva(s).get() + u64_from_usize(chroma)) >> 8)],
                 );
             }
             addr(&mut words, 0x424, &[a(VP9_STATUS)]);
@@ -732,9 +746,11 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             addr(&mut words, 0x5d0, &[a(VP9_TILES)]);
             addr(&mut words, 0x5c0, &[a(VP9_PROBS)]);
             addr(&mut words, 0x5c4, &[a(VP9_COUNTS)]);
-            let sega = |k: usize| low_u32((seg.address() + u64_from_usize(k * VP9_SEG_SIZE)) >> 8);
-            let mva =
-                |k: usize| low_u32((colmv.address() + u64_from_usize(k * VP9_COLMV_SIZE)) >> 8);
+            let sega =
+                |k: usize| low_u32((seg.address().get() + u64_from_usize(k * VP9_SEG_SIZE)) >> 8);
+            let mva = |k: usize| {
+                low_u32((colmv.address().get() + u64_from_usize(k * VP9_COLMV_SIZE)) >> 8)
+            };
             addr(&mut words, 0x5c8, &[sega(seg_flip)]);
             addr(&mut words, 0x5cc, &[sega(1 - seg_flip)]);
             addr(&mut words, 0x5d8, &[mva(mv_flip)]);
@@ -742,12 +758,12 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             addr(&mut words, 0x5dc, &[fa(VP9_FILTER_OFF)]);
             addr(&mut words, 0x4c8, &[fa(0)]);
             addr(&mut words, 0x4dc, &[fa(VP9_4DC_OFF)]);
-            addr(&mut words, 0x43c, &[low_u32(sva(cur) >> 8)]);
+            addr(&mut words, 0x43c, &[low_u32(sva(cur).get() >> 8)]);
             method(
                 &mut words,
                 4,
                 0x480,
-                &[low_u32((sva(cur) + u64_from_usize(chroma)) >> 8)],
+                &[low_u32((sva(cur).get() + u64_from_usize(chroma)) >> 8)],
             );
             method(&mut words, 4, 0x300, &[0]); // EXECUTE
             report.frame_times.push(ch.run(words)?);

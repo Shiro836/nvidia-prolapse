@@ -25,7 +25,7 @@ use crate::{
     events::{HostListener, RmEvents, TriggerPort},
     gpu::{AddressSpace, GpuMapping, Push, Queue, QueueShared, SemaphoreOp, SubmitStatus},
     reclaim::Reclaim,
-    rm::{Client, Device, Error, Mapping, Memory, Result, WaitError},
+    rm::{ByteSize, Client, Device, Error, FenceValue, GpuVa, Mapping, Memory, Result, WaitError},
     slots::{PAGE_BYTES, Slot, SlotPool, TimelineView},
     syncobj::{Foreign, Shared, SignalPlan, SyncObj, WaitPlan},
     waiters::Waiters,
@@ -443,8 +443,8 @@ impl Bridge {
         let gpu = inner.space.map(&memory)?;
         if gpu
             .address()
-            .checked_add(u64_from_usize(memory.size))
-            .is_none_or(|end| end >= 1 << 34)
+            .checked_add(ByteSize::new(u64_from_usize(memory.size)))
+            .is_none_or(|end| end >= GpuVa::new(1 << 34))
         {
             return Err(Error::Contract(
                 "GPU semaphore pool collides with Mesa VA heap".into(),
@@ -457,7 +457,7 @@ impl Bridge {
         unsafe {
             self.core
                 .pool
-                .install_page(cpu.cpu_address(), gpu.address())
+                .install_page(cpu.cpu_address(), gpu.address().get())
         }?;
         inner.pages.push(PoolPage {
             _gpu: gpu,
@@ -568,13 +568,15 @@ impl Bridge {
         let start = Instant::now();
         let shared = self.queue_shared(context)?;
         self.check()?;
-        if shared.retired(token)? {
+        if shared.retired(FenceValue::new(token))? {
             return Ok(true);
         }
         if timeout_ns == 0 {
             return Ok(false);
         }
-        self.wait_until(deadline(start, timeout_ns), || shared.retired(token))
+        self.wait_until(deadline(start, timeout_ns), || {
+            shared.retired(FenceValue::new(token))
+        })
     }
     fn drain_timeout(&self, timeout_ns: u64) -> Result<()> {
         let start = Instant::now();
@@ -586,7 +588,10 @@ impl Bridge {
                 .queues
                 .iter()
                 .enumerate()
-                .filter_map(|(i, q)| q.as_ref().map(|q| (u64_from_usize(i) + 1, q.last_token())))
+                .filter_map(|(i, q)| {
+                    q.as_ref()
+                        .map(|q| (u64_from_usize(i) + 1, q.last_token().get()))
+                })
                 .collect()
         };
         for (context, token) in pending {
@@ -629,10 +634,10 @@ impl Bridge {
         // Unreadable completion (the device is lost) releases every entry:
         // releasing an acquire the GPU already passed is harmless, keeping
         // one it is blocked on frees a blocked channel.
-        let completed = shared.completed().unwrap_or(0);
+        let completed = shared.completed().unwrap_or(FenceValue::new(0));
         let pool = &self.core.pool;
         for &(batch, acquire) in &inner.acquires[index] {
-            if batch <= completed {
+            if batch <= completed.get() {
                 continue;
             }
             let result = match acquire {
@@ -644,7 +649,7 @@ impl Bridge {
             }
         }
         inner.acquires[index].clear();
-        Some((token, shared))
+        Some((token.get(), shared))
     }
     /// Bounded wait, ignoring the device loss flag, until every listed channel
     /// retired its last token or reported a channel error (an RC'd channel
@@ -658,7 +663,7 @@ impl Bridge {
             Some(core.devices),
             || {
                 for (token, shared) in pending {
-                    match shared.retired(*token) {
+                    match shared.retired(FenceValue::new(*token)) {
                         Ok(true) => {}
                         Err(error) if error.is_device_lost() => {}
                         Ok(false) => return Ok(false),
@@ -724,10 +729,11 @@ impl Bridge {
         reclaim.begin(queues.iter().enumerate().filter_map(|(index, queue)| {
             let queue = queue.as_ref()?;
             let token = queue.last_token();
-            (token != 0 && !matches!(queue.shared().retired(token), Ok(true))).then_some((
-                u32::try_from(index).expect("context ids stay far below u32::MAX"),
-                token,
-            ))
+            (token != FenceValue::new(0) && !matches!(queue.shared().retired(token), Ok(true)))
+                .then_some((
+                    u32::try_from(index).expect("context ids stay far below u32::MAX"),
+                    token.get(),
+                ))
         }))
     }
     /// Defer `items` behind the current GPU work, or reclaim them now when
@@ -788,7 +794,7 @@ impl Bridge {
                 // Destroyed context: its teardown waited (bounded) or lost,
                 // then RM freed its channel (RM preempts/unbinds on free).
                 None => true,
-                Some(queue) => matches!(queue.shared().retired(token), Ok(true)),
+                Some(queue) => matches!(queue.shared().retired(FenceValue::new(token)), Ok(true)),
             };
             if !reclaim.pop_retired(force, retired, &mut out) {
                 break;
@@ -1004,10 +1010,10 @@ impl Bridge {
                             c_count(foreign.len()),
                             c_count(signals.len()),
                         ],
-                        token,
+                        token.get(),
                     );
                 }
-                record_acquires(inner, context, token, scratch.acquires.drain(..));
+                record_acquires(inner, context, token.get(), scratch.acquires.drain(..));
                 let mut notify = !scratch.signals.is_empty();
                 for action in scratch.actions.drain(..) {
                     match action {
@@ -1034,7 +1040,7 @@ impl Bridge {
                             let sync = unsafe { &*sync };
                             let mut state = sync.lock()?;
                             check_planned(&state, planned, "signal");
-                            sync.commit_signal(&mut state, context, token, value);
+                            sync.commit_signal(&mut state, context, token.get(), value);
                         }
                         Action::ForeignGate(foreign, gate) => {
                             if let Err(error) = self.core.watcher.gate(&self.core, foreign, gate) {
@@ -1384,10 +1390,10 @@ impl Bridge {
                     }
                     Err(error) => return Err(error),
                 };
-                record_acquires(inner, context, token, [Acquire::Binary(slot)]);
+                record_acquires(inner, context, token.get(), [Acquire::Binary(slot)]);
                 let queue = queue_ref(inner, context)?;
                 // SAFETY: `drm_fd` is this function's, under its contract.
-                unsafe { queue.context_fence(drm_fd, token) }.map(Some)
+                unsafe { queue.context_fence(drm_fd, token.get()) }.map(Some)
             }
             Next::Gate(shared, target) => {
                 // Imported shared payloads have no process-local producer
@@ -1409,7 +1415,7 @@ impl Bridge {
                 let status = queue.submit(&[], space, &waits, &[], &[gate], |_| Ok(()));
                 let token = match status {
                     Ok(SubmitStatus::Submitted(token)) => {
-                        record_acquires(inner, context, token, [Acquire::Binary(gate)]);
+                        record_acquires(inner, context, token.get(), [Acquire::Binary(gate)]);
                         token
                     }
                     other => {
@@ -1443,7 +1449,7 @@ impl Bridge {
                 }
                 let queue = queue_ref(inner, context)?;
                 // SAFETY: `drm_fd` is this function's, under its contract.
-                unsafe { queue.context_fence(drm_fd, token) }.map(Some)
+                unsafe { queue.context_fence(drm_fd, token.get()) }.map(Some)
             }
         }
     }
@@ -1686,7 +1692,7 @@ fn record_acquires(
     if list.front().is_some()
         && let Some(Ok(completed)) = inner.queues[index].as_ref().map(|q| q.shared().completed())
     {
-        while list.front().is_some_and(|(t, _)| *t <= completed) {
+        while list.front().is_some_and(|(t, _)| *t <= completed.get()) {
             list.pop_front();
         }
     }
@@ -2053,7 +2059,7 @@ fn status_of(result: Result<SubmitStatus>, out: *mut u64) -> i32 {
             }
         };
         // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-        unsafe { output(out, token) }
+        unsafe { output(out, token.get()) }
     })());
     if code == 0 { status } else { code }
 }
@@ -2389,10 +2395,14 @@ pub(crate) unsafe extern "C" fn nv_rm_bind(
                 .buffers
                 .get(&memory)
                 .ok_or_else(|| Error::Contract("bind unknown RM memory".into()))?;
-            let map = s
-                .space
-                .map_range(&buffer.memory, offset, size, Some(address), kind)?;
-            if map.address() != address {
+            let map = s.space.map_range(
+                &buffer.memory,
+                offset,
+                ByteSize::new(size),
+                Some(GpuVa::new(address)),
+                kind,
+            )?;
+            if map.address() != GpuVa::new(address) {
                 return Err(Error::Contract(
                     "RM did not honor fixed mapping address".into(),
                 ));
@@ -2507,8 +2517,8 @@ pub(crate) unsafe extern "C" fn nv_rm_va_free(
                     .maps
                     .get(id)
                     .ok_or_else(|| Error::Contract("VA free of unknown GPU mapping".into()))?;
-                if map.address() < address
-                    || map.address().saturating_add(map.length()) > end
+                if map.address().get() < address
+                    || map.address().get().saturating_add(map.length().get()) > end
                     || ids[..i].contains(id)
                 {
                     return Err(Error::Contract(
@@ -2634,7 +2644,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -
             // first, as stock) before memory is released.
             // A wait that fails (device lost) is handled like one that ran out.
             let drained = b
-                .wait_token(id, token, 5_000_000_000)
+                .wait_token(id, token.get(), 5_000_000_000)
                 .unwrap_or_else(|error| {
                     diag!("nvk Rust RM context {id} destroy drain: {error}");
                     false
@@ -3586,7 +3596,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rm::{ChannelError, MemoryError, SyncError};
+    use crate::rm::{ChannelError, ClassId, MemoryError, SyncError};
     use std::mem::{offset_of, size_of};
     #[test]
     fn status_codes_match_the_c_abi() {
@@ -3646,13 +3656,13 @@ mod tests {
                 timestamp: 0,
             },
             ChannelError::Allocate {
-                class: 0xc96f,
+                class: ClassId::new(0xc96f),
                 source: Box::new(Error::DeviceLost("x".into())),
             },
             ChannelError::Token {
                 operation: "x",
-                token: 2,
-                issued: 1,
+                token: FenceValue::new(2),
+                issued: FenceValue::new(1),
             },
             ChannelError::Timeline { reason: "x" },
             ChannelError::SequenceExhausted,
@@ -3691,7 +3701,12 @@ mod tests {
                 },
                 -3,
             ),
-            (MemoryError::GpuVa { address: 1 }, -3),
+            (
+                MemoryError::GpuVa {
+                    address: GpuVa::new(1),
+                },
+                -3,
+            ),
         ] {
             assert_eq!(vk_status(&error.into()), status);
         }
