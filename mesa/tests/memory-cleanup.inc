@@ -112,7 +112,9 @@ test_memory_cleanup(void)
          VkResult result = imported ? rm_mem_import(base, &vk.base, 22, &out) :
             rm_mem_alloc(base, &vk.base, 4096, 4096, NVKMD_MEM_CAN_MAP, &out);
          fake.calloc_fail = 0;
-         assert(result == (cleanup_failed ? VK_ERROR_DEVICE_LOST : VK_ERROR_OUT_OF_HOST_MEMORY));
+         /* vkAllocateMemory has no VK_ERROR_DEVICE_LOST: a failed rollback
+          * publishes the loss and keeps the allocation's own failure. */
+         assert(result == VK_ERROR_OUT_OF_HOST_MEMORY);
          assert(out == NULL && memory_api.frees == 1);
          if (cleanup_failed)
             memory_expect_lost(&vk, imported ? "import rollback free" : "allocation rollback free");

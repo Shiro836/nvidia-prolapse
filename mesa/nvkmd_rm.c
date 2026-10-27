@@ -849,9 +849,11 @@ rm_mem_alloc_kind(struct nvkmd_dev* base,
    return VK_SUCCESS;
 fail_mem:
    {
+      /* vkAllocateMemory has no VK_ERROR_DEVICE_LOST: a failed rollback
+       * publishes the loss and the allocation keeps its own failure. */
       int32_t status = nv_rm_free(dev->rm, mem->allocation.id);
       if (status != VK_SUCCESS)
-         result = rm_mem_lost(dev, "allocation rollback free", status);
+         rm_mem_lost(dev, "allocation rollback free", status);
    }
    simple_mtx_destroy(&mem->base.map_mutex);
    free(mem);
@@ -938,9 +940,10 @@ rm_mem_import(struct nvkmd_dev* base,
    return VK_SUCCESS;
 fail_mem:
    {
+      /* As for allocation rollback: publish the loss, keep the failure. */
       int32_t status = nv_rm_free(dev->rm, mem->allocation.id);
       if (status != VK_SUCCESS)
-         result = rm_mem_lost(dev, "import rollback free", status);
+         rm_mem_lost(dev, "import rollback free", status);
    }
    simple_mtx_destroy(&mem->base.map_mutex);
    free(mem);
