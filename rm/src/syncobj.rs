@@ -34,7 +34,7 @@
 //! (sync_memory.rs, unchanged ABI): CPU atomics shared across processes, with
 //! local GPU signal points published into it by caller paths and the watcher.
 use crate::{
-    rm::{Error, Result},
+    rm::{Error, Result, SyncError},
     slots::{Slot, SlotPool},
     sync_memory::SyncMemory,
 };
@@ -97,9 +97,7 @@ impl Foreign {
     pub(crate) fn ready(&self, pending: bool) -> Result<bool> {
         let status = self.status()?;
         if status < 0 {
-            return Err(Error::DeviceLost(format!(
-                "imported sync_file producer error {status}"
-            )));
+            return Err(SyncError::ProducerError { status }.into());
         }
         Ok(pending || status > 0)
     }
@@ -173,19 +171,22 @@ impl Shared {
             local: Mutex::new(SharedLocal::default()),
         };
         if shared.load(HEADER) != SHARED_MAGIC || shared.load(KIND) != u64::from(timeline) {
-            return Err(Error::Contract(
-                "opaque synchronization payload format/type mismatch".into(),
-            ));
+            return Err(SyncError::Invalid {
+                operation: "open shared synchronization payload",
+                reason: "format or type mismatch",
+            }
+            .into());
         }
         Ok(shared)
     }
     /// Local GPU points. A poisoned lock (a thread panicked inside it; the FFI
     /// guard has marked the device lost) is fatal for the payload (RUST.md §8).
     fn local(&self) -> Result<MutexGuard<'_, SharedLocal>> {
-        self.local.lock().map_err(|error| {
-            Error::DeviceLost(format!(
-                "shared synchronization payload lock: {error} (a thread panicked while holding it)"
-            ))
+        self.local.lock().map_err(|_poisoned| {
+            SyncError::Poisoned {
+                object: "shared synchronization payload",
+            }
+            .into()
         })
     }
     /// Publish completed local GPU points. Returns whether the shared word
@@ -259,9 +260,7 @@ impl Shared {
             return Ok(true);
         }
         if self.failed() {
-            return Err(Error::DeviceLost(
-                "shared synchronization producer failed".into(),
-            ));
+            return Err(SyncError::SharedProducerFailed.into());
         }
         Ok(pending && self.load(PENDING) >= target)
     }
@@ -361,10 +360,11 @@ impl SyncObj {
     /// FFI guard has marked the device lost) is fatal for the object
     /// (RUST.md §8).
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, SyncState>> {
-        self.state.lock().map_err(|error| {
-            Error::DeviceLost(format!(
-                "synchronization object lock: {error} (a thread panicked while holding it)"
-            ))
+        self.state.lock().map_err(|_poisoned| {
+            SyncError::Poisoned {
+                object: "synchronization object",
+            }
+            .into()
         })
     }
 
@@ -436,7 +436,11 @@ impl SyncObj {
                 let changed = shared.refresh()?;
                 Ok((shared.completed(), changed))
             }
-            Payload::Foreign(_) => Err(Error::Contract("sync_file is not a timeline".into())),
+            Payload::Foreign(_) => Err(SyncError::Invalid {
+                operation: "timeline value",
+                reason: "an imported sync_file is not a timeline",
+            }
+            .into()),
         }
     }
 
@@ -446,7 +450,11 @@ impl SyncObj {
     /// shared broadcast owed).
     pub(crate) fn reset(&self, fresh: Option<Slot>) -> Result<(Option<Slot>, bool)> {
         if self.timeline {
-            return Err(Error::Contract("reset of timeline payload".into()));
+            return Err(SyncError::Invalid {
+                operation: "reset",
+                reason: "timeline payloads cannot be reset",
+            }
+            .into());
         }
         let mut state = self.lock()?;
         match &state.payload {
@@ -457,19 +465,22 @@ impl SyncObj {
                 Ok((fresh, false))
             }
             Payload::Shared(shared) => {
-                let target = shared
-                    .load(TARGET)
-                    .checked_add(1)
-                    .ok_or_else(|| Error::Contract("binary payload generation exhausted".into()))?;
+                let target = shared.load(TARGET).checked_add(1).ok_or_else(|| {
+                    Error::from(SyncError::GenerationExhausted {
+                        operation: "binary payload generation",
+                    })
+                })?;
                 let changed = shared.store(TARGET, target);
                 state.snapshot = None;
                 Ok((fresh, changed))
             }
             _ => {
                 let Some(fresh) = fresh else {
-                    return Err(Error::Contract(
-                        "binary reset needs a replacement slot".into(),
-                    ));
+                    return Err(SyncError::Invalid {
+                        operation: "binary reset",
+                        reason: "needs a replacement slot",
+                    }
+                    .into());
                 };
                 self.replace(&mut state, Payload::Native(fresh));
                 Ok((None, false))
@@ -513,14 +524,18 @@ impl SyncObj {
                 // vk_sync_import_sync_file(-1) signals; a captured slot or a
                 // foreign payload is replaced, never written.
                 let Some(fresh) = fresh else {
-                    return Err(Error::Contract(
-                        "binary signal needs a replacement slot".into(),
-                    ));
+                    return Err(SyncError::Invalid {
+                        operation: "binary signal",
+                        reason: "needs a replacement slot",
+                    }
+                    .into());
                 };
                 if self.timeline {
-                    return Err(Error::Contract(
-                        "cannot CPU-signal imported sync_file".into(),
-                    ));
+                    return Err(SyncError::Invalid {
+                        operation: "CPU signal",
+                        reason: "an imported sync_file cannot be signalled",
+                    }
+                    .into());
                 }
                 self.pool.store32(fresh, 1)?;
                 self.replace(&mut state, Payload::Native(fresh));
@@ -589,7 +604,9 @@ impl SyncObj {
                     let target = shared.load(TARGET);
                     if shared.load(PENDING) >= target {
                         target.checked_add(1).ok_or_else(|| {
-                            Error::Contract("binary payload generation exhausted".into())
+                            Error::from(SyncError::GenerationExhausted {
+                                operation: "binary payload generation",
+                            })
                         })?
                     } else {
                         target
@@ -630,7 +647,11 @@ impl SyncObj {
     /// shared broadcast owed).
     pub(crate) fn reserve_into(&self, dst: &SyncObj) -> Result<(bool, bool)> {
         if self.timeline || dst.timeline || std::ptr::eq(self, dst) {
-            return Err(Error::Contract("invalid binary signal reservation".into()));
+            return Err(SyncError::Invalid {
+                operation: "binary signal reservation",
+                reason: "needs two distinct binary payloads",
+            }
+            .into());
         }
         let mut state = self.lock()?;
         let slot = match &state.payload {
@@ -642,7 +663,9 @@ impl SyncObj {
                 let mut target = shared.load(TARGET);
                 if shared.load(PENDING) >= target {
                     target = target.checked_add(1).ok_or_else(|| {
-                        Error::Contract("binary payload generation exhausted".into())
+                        Error::from(SyncError::GenerationExhausted {
+                            operation: "binary payload generation",
+                        })
                     })?;
                 }
                 let mut changed = shared.maximum(TARGET, target);
@@ -676,9 +699,11 @@ impl SyncObj {
         let slot = match &state.payload {
             Payload::Shared(shared) => return Ok(Arc::clone(shared)),
             Payload::Foreign(_) => {
-                return Err(Error::Contract(
-                    "sync_file payload cannot be exported as opaque payload".into(),
-                ));
+                return Err(SyncError::Invalid {
+                    operation: "opaque export",
+                    reason: "an imported sync_file cannot be shared",
+                }
+                .into());
             }
             Payload::Native(slot) => *slot,
         };
@@ -723,7 +748,11 @@ impl SyncObj {
     }
     pub(crate) fn import_sync_file(&self, fd: BorrowedFd<'_>) -> Result<()> {
         if self.timeline {
-            return Err(Error::Contract("SYNC_FD timeline import is invalid".into()));
+            return Err(SyncError::Invalid {
+                operation: "SYNC_FD import",
+                reason: "a timeline cannot import a sync_file",
+            }
+            .into());
         }
         let status = crate::fences::sync_status(fd.as_raw_fd())?;
         let owned = fd
@@ -739,16 +768,21 @@ impl SyncObj {
     /// shared memory with dst retaining the old generation (src advances).
     pub(crate) fn take_for_move(&self, fresh: Slot) -> Result<(SyncState, bool)> {
         if self.timeline {
-            return Err(Error::Contract("invalid timeline sync move".into()));
+            return Err(SyncError::Invalid {
+                operation: "payload move",
+                reason: "timeline payloads move by value, not by payload",
+            }
+            .into());
         }
         let mut state = self.lock()?;
         if let Payload::Shared(shared) = &state.payload {
             let shared = Arc::clone(shared);
             let generation = state.snapshot.unwrap_or_else(|| shared.load(TARGET));
-            let next = shared
-                .load(TARGET)
-                .checked_add(1)
-                .ok_or_else(|| Error::Contract("binary payload generation exhausted".into()))?;
+            let next = shared.load(TARGET).checked_add(1).ok_or_else(|| {
+                Error::from(SyncError::GenerationExhausted {
+                    operation: "binary payload generation",
+                })
+            })?;
             let changed = shared.store(TARGET, next);
             state.snapshot = None;
             self.pool.release(fresh);
@@ -858,9 +892,12 @@ mod tests {
             });
             assert!(holder.join().is_err());
         });
-        assert!(matches!(sync.lock(), Err(Error::DeviceLost(_))));
-        assert!(matches!(sync.foreign(), Err(Error::DeviceLost(_))));
-        assert!(matches!(sync.needs_fresh_slot(), Err(Error::DeviceLost(_))));
+        assert!(sync.lock().is_err_and(|error| error.is_device_lost()));
+        assert!(sync.foreign().is_err_and(|error| error.is_device_lost()));
+        assert!(
+            sync.needs_fresh_slot()
+                .is_err_and(|error| error.is_device_lost())
+        );
         drop(sync);
         assert_eq!(pool.refs(slot), 1);
     }
@@ -1054,7 +1091,7 @@ mod tests {
         let foreign = Foreign::new(fd, -110);
         for pending in [false, true] {
             let error = foreign.ready(pending).unwrap_err();
-            assert!(matches!(&error, Error::DeviceLost(_)));
+            assert!(error.is_device_lost());
             assert!(error.to_string().contains("-110"));
         }
         let ok = Foreign::new(crate::platform::create_sealable_memfd().unwrap(), 1);
@@ -1103,10 +1140,11 @@ mod tests {
         sh.add_point(target, point).unwrap();
         assert!(!consumer.ready(0, false).unwrap().0);
         assert!(sh.fail());
-        assert!(matches!(
-            consumer.ready(0, false),
-            Err(Error::DeviceLost(_))
-        ));
+        assert!(
+            consumer
+                .ready(0, false)
+                .is_err_and(|error| error.is_device_lost())
+        );
         assert!(!sh.fail(), "repeated failure is quiet");
         drop(sh);
         drop(producer);

@@ -555,7 +555,7 @@ impl Bridge {
                 self.scan_locked(&mut guard.0)
             },
         );
-        if let Err(Error::DeviceLost(_)) = &result {
+        if result.as_ref().is_err_and(Error::is_device_lost) {
             core.mark_lost();
         }
         result
@@ -659,7 +659,8 @@ impl Bridge {
             || {
                 for (token, shared) in pending {
                     match shared.retired(*token) {
-                        Ok(true) | Err(Error::DeviceLost(_)) => {}
+                        Ok(true) => {}
+                        Err(error) if error.is_device_lost() => {}
                         Ok(false) => return Ok(false),
                         Err(error) => return Err(error),
                     }
@@ -699,8 +700,7 @@ impl Bridge {
         let token = queue.last_token();
         let blocked = match queue.shared().retired(token) {
             Ok(retired) => !retired,
-            Err(Error::DeviceLost(_)) => false,
-            Err(_) => true,
+            Err(error) => !error.is_device_lost(),
         };
         if blocked {
             diag!(
@@ -1987,6 +1987,13 @@ fn present(bridge: Option<&Bridge>) -> Result<&Bridge> {
 fn vk_status(error: &Error) -> i32 {
     match error {
         Error::DeviceLost(_) => -4,
+        Error::Sync(sync) => {
+            if sync.is_device_lost() {
+                -4
+            } else {
+                -3
+            }
+        }
         Error::Io(_, error) if error.raw_os_error() == Some(12) => -1,
         Error::Io(..)
         | Error::Rm { .. }
@@ -3577,6 +3584,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rm::SyncError;
     use std::mem::{offset_of, size_of};
     #[test]
     fn status_codes_match_the_c_abi() {
@@ -3600,6 +3608,24 @@ mod tests {
             elapsed: Duration::ZERO,
         };
         assert_eq!(vk_status(&wait.into()), -3);
+        // Synchronization failures keep the status their old DeviceLost or
+        // Contract form had.
+        for (error, status) in [
+            (SyncError::Poisoned { object: "x" }, -4),
+            (SyncError::Closed("x"), -4),
+            (SyncError::ProducerError { status: -110 }, -4),
+            (SyncError::SharedProducerFailed, -4),
+            (
+                SyncError::Invalid {
+                    operation: "x",
+                    reason: "y",
+                },
+                -3,
+            ),
+            (SyncError::GenerationExhausted { operation: "x" }, -3),
+        ] {
+            assert_eq!(vk_status(&error.into()), status);
+        }
         let bar = Error::BarPressure {
             used: 1,
             requested: 2,

@@ -26,6 +26,10 @@ pub enum Error {
     /// A bounded wait on the GPU, the kernel or another process ran out.
     #[error(transparent)]
     Wait(#[from] WaitError),
+    /// A synchronization operation failed (payloads, the semaphore slot pool, the foreign
+    /// watcher, CPU waiters).
+    #[error(transparent)]
+    Sync(#[from] SyncError),
     /// A CPU mapping would exceed the BAR aperture measured at device open.
     #[error(
         "BAR mapping budget exhausted: {used}+{requested} exceeds measured aperture {limit}; reduce live CPU maps or enable a larger BAR"
@@ -38,6 +42,76 @@ pub enum Error {
         /// The measured aperture.
         limit: u64,
     },
+}
+
+impl Error {
+    /// The device or channel is unusable and the object must be destroyed: what the C ABI
+    /// reports as `VK_ERROR_DEVICE_LOST`.
+    pub fn is_device_lost(&self) -> bool {
+        match self {
+            Self::DeviceLost(_) => true,
+            Self::Sync(error) => error.is_device_lost(),
+            Self::Io(..)
+            | Self::Rm { .. }
+            | Self::Contract(_)
+            | Self::Wait(_)
+            | Self::BarPressure { .. } => false,
+        }
+    }
+}
+
+/// Why a synchronization operation failed: the subsystem of payloads (binary, timeline,
+/// imported `sync_file`, cross-process shared), their semaphore slot pool, the foreign
+/// watcher thread and the CPU waiters.
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    /// A thread panicked while holding the named object's lock (the FFI guard marked the
+    /// device lost); state behind a poisoned lock is never used again (RUST.md §8).
+    #[error("{object} lock poisoned: a thread panicked while holding it")]
+    Poisoned {
+        /// The object whose lock is poisoned.
+        object: &'static str,
+    },
+    /// The payload or watcher belongs to a device that was closed or lost.
+    #[error("{0}: the device was closed or lost")]
+    Closed(&'static str),
+    /// An imported `sync_file` reported a producer error (a negative status, linux
+    /// `sync_file.h` `sync_file_info.status`).
+    #[error("imported sync_file producer error {status}")]
+    ProducerError {
+        /// The status the kernel reported.
+        status: i32,
+    },
+    /// The producer of a cross-process shared payload marked it failed.
+    #[error("shared synchronization producer failed")]
+    SharedProducerFailed,
+    /// The operation does not apply to this payload.
+    #[error("{operation}: {reason}")]
+    Invalid {
+        /// The operation.
+        operation: &'static str,
+        /// Why it does not apply.
+        reason: &'static str,
+    },
+    /// A binary payload's generation counter reached its limit.
+    #[error("{operation}: binary payload generation exhausted")]
+    GenerationExhausted {
+        /// The operation that needed a new generation.
+        operation: &'static str,
+    },
+}
+
+impl SyncError {
+    /// Whether this failure makes the device unusable (`Error::is_device_lost`).
+    pub fn is_device_lost(&self) -> bool {
+        match self {
+            Self::Poisoned { .. }
+            | Self::Closed(_)
+            | Self::ProducerError { .. }
+            | Self::SharedProducerFailed => true,
+            Self::Invalid { .. } | Self::GenerationExhausted { .. } => false,
+        }
+    }
 }
 
 /// A wait that RUST.md §7 bounds, and why it ended without the awaited state.

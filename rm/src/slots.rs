@@ -21,7 +21,7 @@
 //! captured by in-flight GPU work can never be recycled or re-initialized.
 //! Allocation zeroes all 16 bytes before the slot is handed out.
 use crate::diag::diag;
-use crate::rm::{Error, Result};
+use crate::rm::{Error, Result, SyncError};
 use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::sync::{
     Mutex, MutexGuard, OnceLock,
@@ -143,10 +143,11 @@ impl SlotPool {
     /// The free list. A poisoned lock (a thread panicked inside it; the FFI
     /// guard has marked the device lost) is fatal for the pool (RUST.md §8).
     fn free_list(&self) -> Result<MutexGuard<'_, FreeList>> {
-        self.free.lock().map_err(|error| {
-            Error::DeviceLost(format!(
-                "semaphore pool free list lock: {error} (a thread panicked while holding it)"
-            ))
+        self.free.lock().map_err(|_poisoned| {
+            SyncError::Poisoned {
+                object: "semaphore pool free list",
+            }
+            .into()
         })
     }
 
@@ -274,9 +275,7 @@ impl SlotPool {
     #[inline]
     fn live(&self) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
-            Err(Error::DeviceLost(
-                "synchronization payload used after device close".into(),
-            ))
+            Err(SyncError::Closed("synchronization payload").into())
         } else {
             Ok(())
         }
@@ -466,9 +465,12 @@ pub(crate) mod tests {
             });
             assert!(holder.join().is_err());
         });
-        assert!(matches!(pool.try_allocate(), Err(Error::DeviceLost(_))));
-        assert!(matches!(pool.has_free(), Err(Error::DeviceLost(_))));
-        assert!(matches!(pool.next_page(), Err(Error::DeviceLost(_))));
+        assert!(
+            pool.try_allocate()
+                .is_err_and(|error| error.is_device_lost())
+        );
+        assert!(pool.has_free().is_err_and(|error| error.is_device_lost()));
+        assert!(pool.next_page().is_err_and(|error| error.is_device_lost()));
         pool.release(slot);
         assert_eq!(pool.refs(slot), 0);
     }
@@ -515,7 +517,10 @@ pub(crate) mod tests {
         pool.release(all[7]);
         assert_eq!(pool.try_allocate().unwrap(), Some(all[7]));
         pool.close();
-        assert!(matches!(pool.read32(all[0]), Err(Error::DeviceLost(_))));
+        assert!(
+            pool.read32(all[0])
+                .is_err_and(|error| error.is_device_lost())
+        );
         assert!(pool.store32(all[0], 1).is_err());
         assert!(pool.timeline_value(all[0]).is_err());
     }

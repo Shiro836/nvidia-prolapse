@@ -36,7 +36,7 @@ use crate::diag::diag;
 use crate::{
     mesa::Core,
     reactor::{Readiness, WakeFd},
-    rm::{Error, Result},
+    rm::{Error, Result, SyncError},
     slots::Slot,
     syncobj::{Foreign, Shared},
 };
@@ -47,10 +47,8 @@ use std::{
 };
 
 /// The error a poisoned watcher lock turns into (module doc: locking).
-fn poisoned<T>(lock: &'static str, error: &PoisonError<T>) -> Error {
-    Error::DeviceLost(format!(
-        "{lock} lock: {error} (a thread panicked while holding it)"
-    ))
+fn poisoned<T>(object: &'static str, _poisoned: &PoisonError<T>) -> Error {
+    SyncError::Poisoned { object }.into()
 }
 
 #[derive(Default)]
@@ -120,7 +118,7 @@ impl Watcher {
             .map_err(|error| poisoned("RM foreign watcher thread handle", &error))?;
         if thread.is_none() {
             if self.lock()?.stop {
-                return Err(Error::DeviceLost("RM foreign watcher stopped".into()));
+                return Err(SyncError::Closed("RM foreign watcher").into());
             }
             let owner = Arc::clone(core);
             *thread = Some(
@@ -732,8 +730,15 @@ mod tests {
         });
         let (foreign, _peer) = stand_in();
         let result = core.watcher.watch_cpu(&core, foreign).map(|_| ());
-        assert!(matches!(result, Err(Error::DeviceLost(_))), "{result:?}");
-        assert!(matches!(core.watcher.has_host(), Err(Error::DeviceLost(_))));
+        assert!(
+            result.as_ref().is_err_and(Error::is_device_lost),
+            "{result:?}"
+        );
+        assert!(
+            core.watcher
+                .has_host()
+                .is_err_and(|error| error.is_device_lost())
+        );
         core.watcher.stop(&core);
     }
 }

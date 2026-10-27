@@ -30,7 +30,7 @@
 use crate::diag::diag;
 use crate::{
     reactor::{Readiness, WakeFd},
-    rm::{Error, Result},
+    rm::{Error, Result, SyncError},
 };
 use std::{
     os::fd::{AsRawFd, RawFd},
@@ -62,10 +62,11 @@ pub(crate) enum DeviceEvent {
 }
 
 /// The error a poisoned `lock` turns into (module doc).
-fn poisoned<T>(error: &PoisonError<T>) -> Error {
-    Error::DeviceLost(format!(
-        "RM waiter lock: {error} (a thread panicked while holding it)"
-    ))
+fn poisoned<T>(_poisoned: &PoisonError<T>) -> Error {
+    SyncError::Poisoned {
+        object: "RM waiter",
+    }
+    .into()
 }
 
 struct Registration<'a>(&'a Waiters);
@@ -566,7 +567,10 @@ mod tests {
         // Another waiter leads, so this one takes the follower path.
         waiters.leader.store(true, Ordering::SeqCst);
         let result = waiters.wait(None, None, || Ok(false), |_| Ok(()));
-        assert!(matches!(result, Err(Error::DeviceLost(_))), "{result:?}");
+        assert!(
+            result.as_ref().is_err_and(Error::is_device_lost),
+            "{result:?}"
+        );
         assert_eq!(waiters.followers.load(Ordering::SeqCst), 0);
         waiters.followers.store(1, Ordering::SeqCst);
         waiters.bump();

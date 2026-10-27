@@ -17,7 +17,7 @@ use std::{
 };
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-pub use nv_rm_core::error::{Error, Result, WaitError};
+pub use nv_rm_core::error::{Error, Result, SyncError, WaitError};
 pub(crate) fn status(operation: &'static str, value: u32) -> Result<()> {
     if value == 0 {
         Ok(())
