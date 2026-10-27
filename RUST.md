@@ -295,7 +295,10 @@ buffers; tests that need a real device are `#[cfg_attr(miri, ignore = "…")]`).
 crate cannot cause UB itself, so its full Miri run (all tests, incl. whole-stream decodes) is part of the
 weekly and pre-release checks and of any change that adds or bumps a dependency containing `unsafe`, not
 of every change. Miri runs through `cargo +nightly-… miri nextest run -j <cores>`: one interpreter per test
-instead of one for the whole suite. An empty per-change Miri line is correct only when the change touches no module with
+instead of one for the whole suite, so the slowest single test sets the wall time. Budget: one test ≤ 1 min
+and one Miri run ≤ 2 min wall. A test over it gets a smaller input under `cfg(miri)`; in a `forbid(unsafe_code)`
+crate a whole-session or whole-stream test may instead be `#[cfg_attr(miri, ignore = "…")]`, since its short
+tests already reach the same dependency code. An empty per-change Miri line is correct only when the change touches no module with
 `unsafe`.
 
 ## Existing code

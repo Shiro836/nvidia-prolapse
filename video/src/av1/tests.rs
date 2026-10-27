@@ -289,6 +289,7 @@ fn hidden_frame_units_never_refused_when_caller_holds_nothing() {
 /// the grain-applied picture in a session surface (stock: 0x428/0x42c on every grain frame) and
 /// show_existing_frame outputs that surface.
 #[test]
+#[cfg_attr(miri, ignore = "40-frame session: 1600 s under Miri")]
 fn film_grain_hidden_frames_and_show_existing() {
     let r = simulate_session(SVT_GRAIN, 0);
     assert_eq!(r.shown + r.show_existing, 40, "{r:?}");
