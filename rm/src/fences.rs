@@ -899,7 +899,7 @@ mod tests {
     }
     #[test]
     fn live_fence_contracts_pack_offline() {
-        for c in crate::compat::measured_versions() {
+        for c in crate::compat::releases_under_test() {
             if validate_compat(c).is_err() {
                 continue;
             }

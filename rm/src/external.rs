@@ -667,7 +667,7 @@ mod tests {
     }
     #[test]
     fn live_external_contracts_pack_offline() {
-        for c in crate::compat::measured_versions() {
+        for c in crate::compat::releases_under_test() {
             if c.require_client_abi().is_err() {
                 continue;
             }

@@ -482,26 +482,30 @@ pub(crate) fn measured_versions() -> impl Iterator<Item = Compat> {
         .iter()
         .map(|&(version, profile)| Compat { version, profile })
 }
+/// The measured releases a test walks. Natively all of them; under Miri
+/// (RUST.md Gate: one test at most 1 min) the first release of each distinct
+/// profile, since packing and decoding depend only on the profile.
+#[cfg(test)]
+pub(crate) fn releases_under_test() -> impl Iterator<Item = Compat> {
+    data::VERSIONS
+        .iter()
+        .enumerate()
+        .filter(|&(index, (_, profile))| {
+            !cfg!(miri)
+                || !data::VERSIONS[..index]
+                    .iter()
+                    .any(|(_, earlier)| std::ptr::eq(*earlier, *profile))
+        })
+        .map(|(_, &(version, profile))| Compat { version, profile })
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::abi;
-    /// The measured releases a test walks. Natively all of them; under Miri
-    /// (RUST.md Gate: one test at most 1 min) the first release of each
-    /// distinct profile, since packing and decoding depend only on the
-    /// profile.
+    /// The version strings of `releases_under_test`.
     fn releases() -> impl Iterator<Item = &'static str> {
-        data::VERSIONS
-            .iter()
-            .enumerate()
-            .filter(|&(index, (_, profile))| {
-                !cfg!(miri)
-                    || !data::VERSIONS[..index]
-                        .iter()
-                        .any(|(_, earlier)| std::ptr::eq(*earlier, *profile))
-            })
-            .map(|(_, &(version, _))| version)
+        releases_under_test().map(|c| c.version)
     }
     #[test]
     fn optional_static_bar1_exact_layouts_and_missing_outputs() {
