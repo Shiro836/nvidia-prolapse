@@ -179,15 +179,19 @@ impl Shared {
         }
         Ok(shared)
     }
-    fn local(&self) -> MutexGuard<'_, SharedLocal> {
-        self.local
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// Local GPU points. A poisoned lock (a thread panicked inside it; the FFI
+    /// guard has marked the device lost) is fatal for the payload (RUST.md §8).
+    fn local(&self) -> Result<MutexGuard<'_, SharedLocal>> {
+        self.local.lock().map_err(|error| {
+            Error::DeviceLost(format!(
+                "shared synchronization payload lock: {error} (a thread panicked while holding it)"
+            ))
+        })
     }
     /// Publish completed local GPU points. Returns whether the shared word
     /// changed (the caller then broadcasts HOST once).
     pub(crate) fn refresh(&self) -> Result<bool> {
-        let mut local = self.local();
+        let mut local = self.local()?;
         let mut completed = self.load(COMPLETED);
         for (&target, &slot) in &local.points {
             if self.pool.read32(slot)? == 1 {
@@ -216,9 +220,17 @@ impl Shared {
         });
         Ok(changed)
     }
+    /// Whether local GPU points are still unpublished. A poisoned payload
+    /// answers yes: work in an unknown state is never reported as done, so
+    /// callers keep refreshing it (which fails) or fail it.
     pub(crate) fn has_local_work(&self) -> bool {
-        let local = self.local();
-        !local.points.is_empty() || !local.sources.is_empty()
+        match self.local() {
+            Ok(local) => !local.points.is_empty() || !local.sources.is_empty(),
+            Err(error) => {
+                crate::diag::diag!("RM sync payload: {error}");
+                true
+            }
+        }
     }
     pub(crate) fn completed(&self) -> u64 {
         self.load(COMPLETED)
@@ -256,7 +268,12 @@ impl Shared {
 }
 impl Drop for Shared {
     fn drop(&mut self) {
-        let local = std::mem::take(self.local.get_mut().unwrap_or_else(|p| p.into_inner()));
+        let Ok(local) = self.local.get_mut() else {
+            // A poisoned payload's slots stay out of circulation.
+            crate::diag::diag!("RM sync payload dropped with a poisoned lock; its slots are kept");
+            return;
+        };
+        let local = std::mem::take(local);
         for (_, slot) in local.points {
             self.pool.release(slot);
         }
@@ -340,10 +357,15 @@ impl SyncObj {
     pub(crate) fn valid(&self) -> bool {
         self.magic == MAGIC
     }
-    pub(crate) fn lock(&self) -> MutexGuard<'_, SyncState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// The object's state. A poisoned lock (a thread panicked inside it; the
+    /// FFI guard has marked the device lost) is fatal for the object
+    /// (RUST.md §8).
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, SyncState>> {
+        self.state.lock().map_err(|error| {
+            Error::DeviceLost(format!(
+                "synchronization object lock: {error} (a thread panicked while holding it)"
+            ))
+        })
     }
 
     /// Replace the payload, releasing the old native slot reference.
@@ -368,7 +390,7 @@ impl SyncObj {
     /// payloads the local points are published first; the returned flag says
     /// whether a cross-process broadcast is owed.
     pub(crate) fn ready(&self, value: u64, pending: bool) -> Result<(bool, bool)> {
-        let state = self.lock();
+        let state = self.lock()?;
         match &state.payload {
             Payload::Native(slot) => {
                 let ready = if self.timeline {
@@ -394,16 +416,16 @@ impl SyncObj {
     }
 
     /// Pending foreign descriptor a blocked CPU waiter must watch, if any.
-    pub(crate) fn foreign(&self) -> Option<Arc<Foreign>> {
-        match &self.lock().payload {
+    pub(crate) fn foreign(&self) -> Result<Option<Arc<Foreign>>> {
+        Ok(match &self.lock()?.payload {
             Payload::Foreign(f) if f.cached() == 0 => Some(Arc::clone(f)),
             _ => None,
-        }
+        })
     }
 
     /// Timeline value (vkGetSemaphoreCounterValue).
     pub(crate) fn value(&self) -> Result<(u64, bool)> {
-        let state = self.lock();
+        let state = self.lock()?;
         match &state.payload {
             Payload::Native(slot) => Ok((self.pool.timeline_value(*slot)?, false)),
             Payload::Shared(shared) => {
@@ -426,7 +448,7 @@ impl SyncObj {
         if self.timeline {
             return Err(Error::Contract("reset of timeline payload".into()));
         }
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         match &state.payload {
             Payload::Native(slot) if self.pool.refs(*slot) == 1 => {
                 // Sole owner: no GPU acquire/release of this slot is pending.
@@ -456,19 +478,19 @@ impl SyncObj {
     }
     /// Whether reset()/signal() may need a replacement slot (racy hint used to
     /// pre-allocate outside the payload lock; reset() re-checks under it).
-    pub(crate) fn needs_fresh_slot(&self) -> bool {
-        match &self.lock().payload {
+    pub(crate) fn needs_fresh_slot(&self) -> Result<bool> {
+        Ok(match &self.lock()?.payload {
             Payload::Native(slot) => self.pool.refs(*slot) != 1,
             Payload::Foreign(_) => true,
             Payload::Shared(_) => false,
-        }
+        })
     }
 
     /// CPU signal. Binary: set 1 (fresh slot if captured / foreign). Timeline:
     /// monotonic host signal. Returns (unused fresh, shared broadcast owed);
     /// the caller notifies local waiters afterwards.
     pub(crate) fn signal(&self, value: u64, fresh: Option<Slot>) -> Result<(Option<Slot>, bool)> {
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         match &state.payload {
             Payload::Native(slot) if self.timeline => {
                 self.pool.host_signal(*slot, value)?;
@@ -610,7 +632,7 @@ impl SyncObj {
         if self.timeline || dst.timeline || std::ptr::eq(self, dst) {
             return Err(Error::Contract("invalid binary signal reservation".into()));
         }
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         let slot = match &state.payload {
             Payload::Native(slot) => *slot,
             Payload::Shared(shared) => {
@@ -625,7 +647,7 @@ impl SyncObj {
                 }
                 let mut changed = shared.maximum(TARGET, target);
                 changed |= shared.maximum(PENDING, target);
-                let mut reserved = dst.lock();
+                let mut reserved = dst.lock()?;
                 dst.replace(&mut reserved, Payload::Shared(shared));
                 reserved.snapshot = Some(target);
                 return Ok((true, changed));
@@ -638,7 +660,7 @@ impl SyncObj {
         self.pool.retain(slot);
         state.pending = Some(RESERVED);
         drop(state);
-        let mut target = dst.lock();
+        let mut target = dst.lock()?;
         dst.replace(&mut target, Payload::Native(slot));
         Ok((true, false))
     }
@@ -650,7 +672,7 @@ impl SyncObj {
     /// transferring the local slot (and any pending GPU release into it) to
     /// the shared payload's publication sources. Returns the payload.
     pub(crate) fn share(&self) -> Result<Arc<Shared>> {
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         let slot = match &state.payload {
             Payload::Shared(shared) => return Ok(Arc::clone(shared)),
             Payload::Foreign(_) => {
@@ -665,7 +687,7 @@ impl SyncObj {
             let pending = state.pending_max.max(completed);
             let shared = Shared::create(&self.pool, true, [completed, pending, 1, 0])?;
             if pending > completed {
-                shared.local().sources.push((slot, pending));
+                shared.local()?.sources.push((slot, pending));
             } else {
                 self.pool.release(slot);
             }
@@ -679,7 +701,7 @@ impl SyncObj {
                 [u64::from(signaled), u64::from(signaled || pending), 1, 0],
             )?;
             if !signaled && pending {
-                shared.local().points.insert(1, slot);
+                shared.local()?.points.insert(1, slot);
             } else {
                 self.pool.release(slot);
             }
@@ -695,7 +717,7 @@ impl SyncObj {
     pub(crate) fn import_opaque(&self, fd: BorrowedFd<'_>) -> Result<()> {
         // Transactional: validate fully before replacing the payload.
         let shared = Arc::new(Shared::import(&self.pool, self.timeline, fd)?);
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         self.replace(&mut state, Payload::Shared(shared));
         Ok(())
     }
@@ -708,7 +730,7 @@ impl SyncObj {
             .try_clone_to_owned()
             .map_err(|e| Error::Io("retain imported sync_file", e))?;
         let foreign = Arc::new(Foreign::new(owned, status));
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         self.replace(&mut state, Payload::Foreign(foreign));
         Ok(())
     }
@@ -719,7 +741,7 @@ impl SyncObj {
         if self.timeline {
             return Err(Error::Contract("invalid timeline sync move".into()));
         }
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         if let Payload::Shared(shared) = &state.payload {
             let shared = Arc::clone(shared);
             let generation = state.snapshot.unwrap_or_else(|| shared.load(TARGET));
@@ -751,19 +773,27 @@ impl SyncObj {
         );
         Ok((moved, false))
     }
-    pub(crate) fn install_moved(&self, moved: SyncState) {
-        let mut state = self.lock();
+    pub(crate) fn install_moved(&self, moved: SyncState) -> Result<()> {
+        let mut state = self.lock()?;
         let old = std::mem::replace(&mut *state, moved);
         if let Payload::Native(slot) = old.payload {
             self.pool.release(slot);
         }
+        Ok(())
     }
 }
 impl Drop for SyncObj {
     fn drop(&mut self) {
-        let state = self.state.get_mut().unwrap_or_else(|p| p.into_inner());
-        if let Payload::Native(slot) = state.payload {
-            self.pool.release(slot);
+        match self.state.get_mut() {
+            Ok(state) => {
+                if let Payload::Native(slot) = state.payload {
+                    self.pool.release(slot);
+                }
+            }
+            // A poisoned object's slot stays out of circulation.
+            Err(_) => crate::diag::diag!(
+                "RM synchronization object dropped with a poisoned lock; its slot is kept"
+            ),
         }
         self.magic = 0;
     }
@@ -780,8 +810,14 @@ pub(crate) enum SignalPlan {
 impl Shared {
     /// Record a local GPU point for `target` (submission accepted). The point
     /// reference moves here.
-    pub(crate) fn add_point(&self, target: u64, point: Slot) {
-        let mut local = self.local();
+    pub(crate) fn add_point(&self, target: u64, point: Slot) -> Result<()> {
+        let mut local = match self.local() {
+            Ok(local) => local,
+            Err(error) => {
+                self.pool.release(point);
+                return Err(error);
+            }
+        };
         if !self.timeline {
             // Monotonic: a signal reserved earlier (SyncObj::reserve_into)
             // commits after later moves/resets advanced the generation.
@@ -792,6 +828,7 @@ impl Shared {
         }
         drop(local);
         self.maximum(PENDING, target);
+        Ok(())
     }
 }
 
@@ -805,6 +842,29 @@ mod tests {
         pool.try_allocate().unwrap().unwrap()
     }
 
+    /// RUST.md §8: a poisoned object lock fails its users as device lost,
+    /// and dropping the object keeps its slot out of circulation.
+    #[test]
+    fn poisoned_object_lock_fails_as_device_lost() {
+        let (pool, _pages) = HostPages::pool(TimelineView::Native64, 1);
+        let sync = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
+        let Payload::Native(slot) = sync.lock().unwrap().payload else {
+            panic!("a new binary object has a native payload");
+        };
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                let _state = sync.state.lock().unwrap();
+                panic!("poison the object lock");
+            });
+            assert!(holder.join().is_err());
+        });
+        assert!(matches!(sync.lock(), Err(Error::DeviceLost(_))));
+        assert!(matches!(sync.foreign(), Err(Error::DeviceLost(_))));
+        assert!(matches!(sync.needs_fresh_slot(), Err(Error::DeviceLost(_))));
+        drop(sync);
+        assert_eq!(pool.refs(slot), 1);
+    }
+
     #[test]
     fn binary_status_reset_in_place_only_without_gpu_references() {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
@@ -812,25 +872,25 @@ mod tests {
         assert!(!sync.ready(0, false).unwrap().0);
         assert!(sync.signal(0, None).unwrap().0.is_none());
         assert!(sync.ready(0, false).unwrap().0);
-        let Payload::Native(first) = sync.lock().payload else {
+        let Payload::Native(first) = sync.lock().unwrap().payload else {
             panic!()
         };
         // Sole owner: reset writes the same slot (stock same-slot reset).
         let (unused, _) = sync.reset(None).unwrap();
         assert!(unused.is_none());
         assert!(!sync.ready(0, false).unwrap().0);
-        let Payload::Native(again) = sync.lock().payload else {
+        let Payload::Native(again) = sync.lock().unwrap().payload else {
             panic!()
         };
         assert_eq!(first, again);
         // A pending GPU release captures the slot: reset must not write it.
         sync.signal(0, None).unwrap();
         pool.retain(first);
-        assert!(sync.needs_fresh_slot());
+        assert!(sync.needs_fresh_slot().unwrap());
         let replacement = fresh(&pool);
         assert!(sync.reset(Some(replacement)).unwrap().0.is_none());
         assert_eq!(pool.read32(first).unwrap(), 1, "captured slot untouched");
-        let Payload::Native(now) = sync.lock().payload else {
+        let Payload::Native(now) = sync.lock().unwrap().payload else {
             panic!()
         };
         assert_eq!(now, replacement);
@@ -844,7 +904,7 @@ mod tests {
     fn binary_gpu_wait_detaches_the_slot_and_leaves_payload_unsignaled() {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let sync = SyncObj::new(&pool, false, 1, fresh(&pool)).unwrap();
-        let mut state = sync.lock();
+        let mut state = sync.lock().unwrap();
         let WaitPlan::Binary(slot) = sync.plan_wait(&state, 0).unwrap() else {
             panic!()
         };
@@ -862,16 +922,16 @@ mod tests {
             "no pending signal after wait"
         );
         // A later signal targets the fresh slot, never the consumed one.
-        let SignalPlan::Binary(target) = sync.plan_signal(&sync.lock(), 0).unwrap() else {
+        let SignalPlan::Binary(target) = sync.plan_signal(&sync.lock().unwrap(), 0).unwrap() else {
             panic!()
         };
         assert_eq!(target, replacement);
-        sync.commit_signal(&mut sync.lock(), 7, 42, 0);
+        sync.commit_signal(&mut sync.lock().unwrap(), 7, 42, 0);
         assert!(
             sync.ready(0, true).unwrap().0,
             "WAIT_PENDING sees the submission"
         );
-        assert_eq!(sync.lock().pending, Some((7, 42)));
+        assert_eq!(sync.lock().unwrap().pending, Some((7, 42)));
         pool.release(slot);
     }
 
@@ -880,14 +940,14 @@ mod tests {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let src = SyncObj::new(&pool, false, 1, fresh(&pool)).unwrap();
         let dst = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
-        let Payload::Native(old) = src.lock().payload else {
+        let Payload::Native(old) = src.lock().unwrap().payload else {
             panic!()
         };
         let (moved, _) = src.take_for_move(fresh(&pool)).unwrap();
-        dst.install_moved(moved);
+        dst.install_moved(moved).unwrap();
         assert!(dst.ready(0, false).unwrap().0);
         assert!(!src.ready(0, false).unwrap().0);
-        let Payload::Native(now) = dst.lock().payload else {
+        let Payload::Native(now) = dst.lock().unwrap().payload else {
             panic!()
         };
         assert_eq!(now, old);
@@ -901,24 +961,24 @@ mod tests {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let src = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
         let temp = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
-        let Payload::Native(slot) = src.lock().payload else {
+        let Payload::Native(slot) = src.lock().unwrap().payload else {
             panic!()
         };
         assert!(!src.ready(0, true).unwrap().0);
         assert_eq!(src.reserve_into(&temp).unwrap(), (true, false));
         assert!(src.ready(0, true).unwrap().0, "reserved signal is pending");
         assert!(!src.ready(0, false).unwrap().0, "but not complete");
-        assert_eq!(src.lock().pending, Some(RESERVED));
+        assert_eq!(src.lock().unwrap().pending, Some(RESERVED));
         // A second reservation (binary already has a pending signal) is refused.
         let other = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
         assert_eq!(src.reserve_into(&other).unwrap(), (false, false));
         // A consumer captures the payload before the deferred signal runs.
         let consumer = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
         let (moved, _) = src.take_for_move(fresh(&pool)).unwrap();
-        consumer.install_moved(moved);
+        consumer.install_moved(moved).unwrap();
         // The deferred batch signals the temporary: it still targets the
         // captured slot, never the source's replacement.
-        let SignalPlan::Binary(target) = temp.plan_signal(&temp.lock(), 0).unwrap() else {
+        let SignalPlan::Binary(target) = temp.plan_signal(&temp.lock().unwrap(), 0).unwrap() else {
             panic!()
         };
         assert_eq!(target, slot);
@@ -948,11 +1008,12 @@ mod tests {
             consumer.ready(0, true).unwrap().0,
             "pending across handles at once"
         );
-        let reserved = temp.lock().snapshot.unwrap();
+        let reserved = temp.lock().unwrap().snapshot.unwrap();
         // The consumer's capture advances the generation before the commit.
         let (moved, _) = consumer.take_for_move(fresh(&pool)).unwrap();
         assert_eq!(moved.snapshot, Some(reserved));
-        let SignalPlan::Shared(_, target) = temp.plan_signal(&temp.lock(), 0).unwrap() else {
+        let SignalPlan::Shared(_, target) = temp.plan_signal(&temp.lock().unwrap(), 0).unwrap()
+        else {
             panic!()
         };
         assert_eq!(
@@ -967,10 +1028,13 @@ mod tests {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let sync = SyncObj::new(&pool, true, 0xffff_fffe, fresh(&pool)).unwrap();
         assert!(matches!(
-            sync.plan_wait(&sync.lock(), 3).unwrap(),
+            sync.plan_wait(&sync.lock().unwrap(), 3).unwrap(),
             WaitPlan::Complete
         ));
-        let WaitPlan::Timeline(_, v) = sync.plan_wait(&sync.lock(), 0x1_0000_0001).unwrap() else {
+        let WaitPlan::Timeline(_, v) = sync
+            .plan_wait(&sync.lock().unwrap(), 0x1_0000_0001)
+            .unwrap()
+        else {
             panic!()
         };
         assert_eq!(v, 0x1_0000_0001);
@@ -1010,10 +1074,10 @@ mod tests {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let producer = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
         // Pending local GPU signal before export: it must survive conversion.
-        let Payload::Native(local) = producer.lock().payload else {
+        let Payload::Native(local) = producer.lock().unwrap().payload else {
             panic!()
         };
-        producer.commit_signal(&mut producer.lock(), 1, 9, 0);
+        producer.commit_signal(&mut producer.lock().unwrap(), 1, 9, 0);
         let shared = producer.share().unwrap();
         let fd = shared.memory.export().unwrap();
         let consumer = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
@@ -1029,13 +1093,14 @@ mod tests {
         assert!(consumer.ready(0, false).unwrap().0);
         assert_eq!(pool.refs(local), 0, "published point released");
         // Next generation: GPU signal plan advances the generation.
-        let SignalPlan::Shared(sh, target) = producer.plan_signal(&producer.lock(), 0).unwrap()
+        let SignalPlan::Shared(sh, target) =
+            producer.plan_signal(&producer.lock().unwrap(), 0).unwrap()
         else {
             panic!()
         };
         assert_eq!(target, 2);
         let point = fresh(&pool);
-        sh.add_point(target, point);
+        sh.add_point(target, point).unwrap();
         assert!(!consumer.ready(0, false).unwrap().0);
         assert!(sh.fail());
         assert!(matches!(
@@ -1055,10 +1120,10 @@ mod tests {
     fn shared_timeline_conversion_publishes_pending_gpu_values() {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let sync = SyncObj::new(&pool, true, 3, fresh(&pool)).unwrap();
-        let Payload::Native(local) = sync.lock().payload else {
+        let Payload::Native(local) = sync.lock().unwrap().payload else {
             panic!()
         };
-        sync.commit_signal(&mut sync.lock(), 1, 2, 7);
+        sync.commit_signal(&mut sync.lock().unwrap(), 1, 2, 7);
         let shared = sync.share().unwrap();
         assert_eq!(sync.value().unwrap().0, 3);
         assert!(sync.ready(7, true).unwrap().0);
@@ -1083,7 +1148,7 @@ mod tests {
         let shared = source.share().unwrap();
         let fd = shared.export().unwrap();
         let sync = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
-        let Payload::Native(original) = sync.lock().payload else {
+        let Payload::Native(original) = sync.lock().unwrap().payload else {
             panic!()
         };
         sync.import_opaque(fd.as_fd()).unwrap();
@@ -1095,23 +1160,23 @@ mod tests {
             crate::platform::create_sealable_memfd().unwrap(),
             1,
         ));
-        sync.rebind_native(&mut sync.lock(), fresh(&pool));
+        sync.rebind_native(&mut sync.lock().unwrap(), fresh(&pool));
         {
-            let mut state = sync.lock();
+            let mut state = sync.lock().unwrap();
             let old = std::mem::replace(&mut state.payload, Payload::Foreign(Arc::clone(&foreign)));
             let Payload::Native(slot) = old else { panic!() };
             pool.release(slot);
         }
-        assert!(sync.needs_fresh_slot());
+        assert!(sync.needs_fresh_slot().unwrap());
         assert!(matches!(
-            sync.plan_signal(&sync.lock(), 0).unwrap(),
+            sync.plan_signal(&sync.lock().unwrap(), 0).unwrap(),
             SignalPlan::ReplaceForeign
         ));
         assert!(matches!(
-            sync.plan_wait(&sync.lock(), 0).unwrap(),
+            sync.plan_wait(&sync.lock().unwrap(), 0).unwrap(),
             WaitPlan::Complete
         ));
-        assert!(sync.wait_consumes(&sync.lock()));
+        assert!(sync.wait_consumes(&sync.lock().unwrap()));
         let replacement = fresh(&pool);
         assert!(sync.signal(0, Some(replacement)).unwrap().0.is_none());
         assert!(sync.ready(0, false).unwrap().0);

@@ -924,7 +924,7 @@ impl Bridge {
         let mut watches = Vec::new();
         for point in points {
             // SAFETY: the ids come from this function's arguments, live for the call (# Safety).
-            if let Some(foreign) = unsafe { sync_ref(point.sync) }?.foreign() {
+            if let Some(foreign) = unsafe { sync_ref(point.sync) }?.foreign()? {
                 watches.push(self.core.watcher.watch_cpu(&self.core, foreign)?);
             }
         }
@@ -1010,7 +1010,7 @@ impl Bridge {
                             // an id of this call (`submit`'s # Safety): C keeps
                             // the payload alive until the call returns.
                             let sync = unsafe { &*sync };
-                            let mut state = sync.lock();
+                            let mut state = sync.lock()?;
                             check_planned(&state, planned, "wait");
                             // The batch now holds the consumed slot (held
                             // above); drop the payload's own reference.
@@ -1020,12 +1020,13 @@ impl Bridge {
                         Action::Rebind(sync, fresh) => {
                             // SAFETY: as for Consume: a payload of this call's ids.
                             let sync = unsafe { &*sync };
-                            sync.rebind_native(&mut sync.lock(), fresh);
+                            let mut state = sync.lock()?;
+                            sync.rebind_native(&mut state, fresh);
                         }
                         Action::Signal(sync, value, planned) => {
                             // SAFETY: as for Consume: a payload of this call's ids.
                             let sync = unsafe { &*sync };
-                            let mut state = sync.lock();
+                            let mut state = sync.lock()?;
                             check_planned(&state, planned, "signal");
                             sync.commit_signal(&mut state, context, token, value);
                         }
@@ -1048,9 +1049,9 @@ impl Bridge {
                             }
                         }
                         Action::SharedPoint(shared, target, point) => {
-                            shared.add_point(target, point);
-                            if let Err(error) = self
-                                .ensure_watcher_host(inner)
+                            if let Err(error) = shared
+                                .add_point(target, point)
+                                .and_then(|()| self.ensure_watcher_host(inner))
                                 .and_then(|()| self.core.watcher.publish(&self.core, shared))
                             {
                                 diag!("nvk Rust RM shared publication: {error}");
@@ -1108,7 +1109,7 @@ impl Bridge {
             // SAFETY: the ids come from this function's arguments, live for the call (# Safety).
             let sync = unsafe { sync_ref(point.sync) }?;
             let (plan, consumes) = {
-                let state = sync.lock();
+                let state = sync.lock()?;
                 (
                     sync.plan_wait(&state, point.value)?,
                     sync.wait_consumes(&state),
@@ -1178,7 +1179,10 @@ impl Bridge {
             });
             let plan = match rebound {
                 Some(fresh) if !sync.timeline => SignalPlan::Binary(fresh),
-                _ => sync.plan_signal(&sync.lock(), point.value)?,
+                _ => {
+                    let state = sync.lock()?;
+                    sync.plan_signal(&state, point.value)?
+                }
             };
             match plan {
                 SignalPlan::Binary(slot) => {
@@ -1284,7 +1288,7 @@ impl Bridge {
             Slot(Slot),
         }
         let next = {
-            let state = sync.lock();
+            let state = sync.lock()?;
             match &state.payload {
                 crate::syncobj::Payload::Foreign(f) => Next::Done(Some(f.duplicate()?)),
                 crate::syncobj::Payload::Native(slot) => {
@@ -3131,7 +3135,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: u64) -> i32
             b.core.live()?;
             // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
             let sync = unsafe { sync_ref(id) }?;
-            let mut fresh = if sync.needs_fresh_slot() {
+            let mut fresh = if sync.needs_fresh_slot()? {
                 Some(b.slot()?)
             } else {
                 None
@@ -3187,7 +3191,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_move(
                     return Err(error);
                 }
             };
-            target.install_moved(moved);
+            target.install_moved(moved)?;
             b.broadcast(changed);
             Ok(())
         })())
@@ -3209,7 +3213,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_signal(p: *mut Bridge, id: u64, value
             b.core.live()?;
             // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
             let sync = unsafe { sync_ref(id) }?;
-            let mut fresh = if !sync.timeline && sync.needs_fresh_slot() {
+            let mut fresh = if !sync.timeline && sync.needs_fresh_slot()? {
                 Some(b.slot()?)
             } else {
                 None

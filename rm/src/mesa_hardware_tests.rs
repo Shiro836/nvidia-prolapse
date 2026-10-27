@@ -364,7 +364,7 @@ fn ring_full_leaves_payloads_untouched() {
         );
         if r == 1 {
             // Retry the same batch with the consuming wait: still full.
-            let slot_of = |h: &SyncHandle| match h.obj().unwrap().lock().payload {
+            let slot_of = |h: &SyncHandle| match h.obj().unwrap().lock().unwrap().payload {
                 crate::syncobj::Payload::Native(slot) => slot,
                 _ => panic!("native"),
             };
@@ -376,7 +376,7 @@ fn ring_full_leaves_payloads_untouched() {
             assert_eq!(bridge.core.pool.refs(c_slot), 1);
             assert_eq!(bridge.core.pool.refs(t_slot), 1);
             assert!(consumed.obj().unwrap().ready(0, false).unwrap().0);
-            assert!(target.obj().unwrap().lock().pending.is_none());
+            assert!(target.obj().unwrap().lock().unwrap().pending.is_none());
             assert_eq!(c::sync_destroy(&bridge, target), 0);
             break token;
         }
