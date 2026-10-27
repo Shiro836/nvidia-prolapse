@@ -94,6 +94,7 @@ static int fd_count(void) {
   closedir(d);
   return n;
 }
+static void begin(struct Device *d);
 static void init_device(struct Device *d, PFN_vkCreateDevice create,
                         PFN_vkGetDeviceProcAddr resolve,
                         VkPhysicalDevice physical) {
@@ -130,6 +131,18 @@ static void init_device(struct Device *d, PFN_vkCreateDevice create,
       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
       .commandBufferCount = 1};
   CHECK(d->AllocateCommandBuffers(d->handle, &command, &d->command));
+  /* Device creation leaves GPU work outstanding (the queue's initial state, internal uploads that NVK
+   * flushes with the first command-buffer submission). The driver frees an object right away when no
+   * submitted work is outstanding and otherwise defers the free until that work retires, so the dma-buf
+   * import's property query below would free early or late depending on GPU timing, and two recordings of
+   * one build (capture.py) would differ in ioctl order and in the GPU VAs handed out after it. */
+  begin(d);
+  CHECK(d->EndCommandBuffer(d->command));
+  VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                         .commandBufferCount = 1,
+                         .pCommandBuffers = &d->command};
+  CHECK(d->QueueSubmit(d->queue, 1, &submit, VK_NULL_HANDLE));
+  CHECK(d->DeviceWaitIdle(d->handle));
 }
 static struct Buffer create_buffer(struct Device *d, int shared, int import_fd,
                                    int host) {

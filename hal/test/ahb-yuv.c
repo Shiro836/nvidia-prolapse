@@ -683,6 +683,21 @@ int main(int argc, char **argv) {
     VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool,
                                         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
     MUST(p_AllocateCommandBuffers(dev, &cbai, &cmd));
+    /* Device creation leaves GPU work outstanding (the queue's initial state, internal uploads that NVK
+     * flushes with the first command-buffer submission). The driver frees an object right away when no
+     * submitted work is outstanding and otherwise defers the free until that work retires, so the first
+     * imports' frees (their property queries) and the GPU VAs reused after them would depend on GPU timing.
+     * One command-buffer submission waited for here makes two recordings of one build
+     * (tests/vulkan/capture.py) compare equal. */
+    {
+        VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+        MUST(p_BeginCommandBuffer(cmd, &bi));
+        MUST(p_EndCommandBuffer(cmd));
+        VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd};
+        MUST(p_QueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+        MUST(p_QueueWaitIdle(queue));
+    }
 
     const int fds0 = count_fds();
     /* Dataspace values (graphics-common Dataspace.aidl): STANDARD << 16, TRANSFER << 22, RANGE << 27 */

@@ -515,6 +515,14 @@ int main(int argc, char **argv) {
     VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool,
                                         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
     MUST(p_AllocateCommandBuffers(dev, &cbai, &cmd));
+    /* Device creation leaves GPU work outstanding (the queue's initial state, internal uploads that NVK
+     * flushes with the first command-buffer submission). The driver frees an object right away when no
+     * submitted work is outstanding and otherwise defers the free until that work retires, so the first
+     * imports' frees (their property queries) and the GPU VAs reused after them would depend on GPU timing.
+     * One command-buffer submission waited for here makes two recordings of one build
+     * (tests/vulkan/capture.py) compare equal. */
+    begin();
+    submit_wait("device creation's GPU work", 0, NULL, 0, NULL, 1);
     check(*(uintptr_t *)cmd == HWVULKAN_DISPATCH_MAGIC, "VkCommandBuffer dispatch word == magic");
 
     /* ---- gralloc usage ---- */
@@ -909,6 +917,19 @@ int main(int argc, char **argv) {
     if (busy_clears < 8) busy_clears = 8;
     if (busy_clears > 400) busy_clears = 400;
     printf("    calibration: %.3f ms per 128 MiB clear -> %d clears\n", per_clear, busy_clears);
+    /* NV_TEST_BUSY_CLEARS overrides the measured count. The clear colours derive from the count and are
+     * command-stream bytes, so a recording that compares two runs (tests/vulkan/capture.py) fixes it. */
+    const char *fixed_clears = getenv("NV_TEST_BUSY_CLEARS");
+    if (fixed_clears) {
+        char *end;
+        long n = strtol(fixed_clears, &end, 10);
+        if (*fixed_clears == '\0' || *end != '\0' || n < 8 || n > 400) {
+            printf("FATAL: NV_TEST_BUSY_CLEARS=%s: expected an integer in 8..400\n", fixed_clears);
+            exit(2);
+        }
+        busy_clears = (int)n;
+        printf("    NV_TEST_BUSY_CLEARS: %d clears\n", busy_clears);
+    }
     VkCommandBuffer busy;
     struct hostbuf completion = hostbuf(4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     const uint32_t completion_value = 0x71c05eed;

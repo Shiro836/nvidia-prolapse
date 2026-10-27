@@ -43,6 +43,9 @@ MAGIC = b"NVCAP01\0"
 # ioctl sequence is compared. The rm capture writes one file per device and capture
 # (cap-<pid>-<pci bus/device>-<device number>-<n>.bin), so every case is captured today.
 NO_PUSH = {}
+# Busy-work size for hal/test/anb-roundtrip.c while recording: 64 clears of a 128 MiB image (8 GiB of writes)
+# stay pending at the test's first poll and finish far inside the 5 s SEMSURF fence lifetime on every GPU.
+BUSY_CLEARS = 64
 
 
 # Request codes whose count depends on GPU timing (dropped from the ioctl sequence):
@@ -230,6 +233,9 @@ def record_target(out, target, args):
             (capture / "go").write_text("push\n")
             env = {**env, "NV_RM_CAPTURE": str(capture), "NV_RM_CAPTURE_MODE": "push",
                    "NV_RM_CAPTURE_FRAMES": "1000000"}
+        # A fixed amount of busy GPU work in the HAL's ANB test (anb-roundtrip.c sizes it from a measured
+        # clear time otherwise, and the clear colours derive from the count).
+        env = {**env, "NV_TEST_BUSY_CLEARS": str(BUSY_CLEARS)}
         traces = out / f"{case}.strace"
         traces.mkdir()
         strace = ["strace", "-ff", "-qq", "-y", "-X", "raw", "-e", "trace=ioctl", "-o", str(traces / "t"),
