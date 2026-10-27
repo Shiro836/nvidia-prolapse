@@ -2021,6 +2021,7 @@ mod vk {
     pub(super) const ERROR_DEVICE_LOST: i32 = -4;
     pub(super) const ERROR_MEMORY_MAP_FAILED: i32 = -5;
     pub(super) const ERROR_TOO_MANY_OBJECTS: i32 = -10;
+    pub(super) const ERROR_UNKNOWN: i32 = -13;
     pub(super) const ERROR_INVALID_EXTERNAL_HANDLE: i32 = -1_000_072_003;
 }
 /// What a failed entry point's error means to the application, before the
@@ -2098,6 +2099,14 @@ enum Entry {
     /// RM running out of BAR space included; a lost device is published and
     /// reported the same way.
     Map,
+    /// `nv_rm_bind`, `nv_rm_unbind`: `vkBindBufferMemory`/`vkBindImageMemory`
+    /// (and their `2` forms) and `vkAllocateMemory`, which binds the new memory
+    /// to its VA. Their common codes are `OUT_OF_HOST_MEMORY` and
+    /// `OUT_OF_DEVICE_MEMORY`, without `DEVICE_LOST`. NVK reports a failed VM
+    /// bind as `VK_ERROR_UNKNOWN` (nvkmd_nouveau_va.c:109 at Mesa 26.2.5),
+    /// which every command may return; a lost device is published and reported
+    /// the same way.
+    Bind,
     /// Every other entry point: paths of a created device, where a lost device
     /// is `VK_ERROR_DEVICE_LOST` (spec "Lost Device").
     Device,
@@ -2108,26 +2117,45 @@ impl Entry {
         self.result(Failure::of(error))
     }
     fn result(self, failure: Failure) -> i32 {
-        match (self, failure) {
-            (
-                Self::Open | Self::Alloc | Self::Import | Self::Export | Self::Map | Self::Device,
-                Failure::HostMemory,
-            ) => vk::ERROR_OUT_OF_HOST_MEMORY,
-            (
-                Self::Map,
-                Failure::DeviceMemory | Failure::Lost | Failure::Refused | Failure::Contract,
-            ) => vk::ERROR_MEMORY_MAP_FAILED,
-            (Self::Export, Failure::DeviceMemory | Failure::Lost | Failure::Refused) => {
-                vk::ERROR_TOO_MANY_OBJECTS
-            }
-            (Self::Open | Self::Alloc | Self::Import | Self::Device, Failure::DeviceMemory)
-            | (Self::Alloc, Failure::Lost | Failure::Refused)
-            | (Self::Import, Failure::Lost) => vk::ERROR_OUT_OF_DEVICE_MEMORY,
-            (Self::Import, Failure::Refused) => vk::ERROR_INVALID_EXTERNAL_HANDLE,
-            (Self::Open, Failure::Lost | Failure::Refused | Failure::Contract)
-            | (Self::Alloc | Self::Import | Self::Export | Self::Device, Failure::Contract)
-            | (Self::Device, Failure::Refused) => vk::ERROR_INITIALIZATION_FAILED,
-            (Self::Device, Failure::Lost) => vk::ERROR_DEVICE_LOST,
+        use Failure::{Contract, DeviceMemory, HostMemory, Lost, Refused};
+        match self {
+            Self::Open => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+                Lost | Refused | Contract => vk::ERROR_INITIALIZATION_FAILED,
+            },
+            Self::Alloc => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory | Lost | Refused => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+                Contract => vk::ERROR_INITIALIZATION_FAILED,
+            },
+            Self::Import => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory | Lost => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+                Refused => vk::ERROR_INVALID_EXTERNAL_HANDLE,
+                Contract => vk::ERROR_INITIALIZATION_FAILED,
+            },
+            Self::Export => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory | Lost | Refused => vk::ERROR_TOO_MANY_OBJECTS,
+                Contract => vk::ERROR_INITIALIZATION_FAILED,
+            },
+            Self::Map => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory | Lost | Refused | Contract => vk::ERROR_MEMORY_MAP_FAILED,
+            },
+            Self::Bind => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+                Lost | Refused => vk::ERROR_UNKNOWN,
+                Contract => vk::ERROR_INITIALIZATION_FAILED,
+            },
+            Self::Device => match failure {
+                HostMemory => vk::ERROR_OUT_OF_HOST_MEMORY,
+                DeviceMemory => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+                Lost => vk::ERROR_DEVICE_LOST,
+                Refused | Contract => vk::ERROR_INITIALIZATION_FAILED,
+            },
         }
     }
 }
@@ -2532,55 +2560,53 @@ pub(crate) unsafe extern "C" fn nv_rm_bind(
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_bind", object, move || {
-        report((|| {
-            if out.is_null() {
-                return Err(Error::Contract("null bind output".into()));
+    guarded_as(Entry::Bind, "nv_rm_bind", object, move || {
+        if out.is_null() {
+            return Err(Error::Contract("null bind output".into()));
+        }
+        let b = present(object)?;
+        b.core.live()?;
+        if address < 1 << 34 || address.checked_add(size).is_none_or(|n| n > 1 << 40) {
+            return Err(Error::Contract("Mesa VA outside reserved range".into()));
+        }
+        let mut guard = b.lock()?;
+        let s = &mut guard.0;
+        b.reclaim_locked(s, false);
+        let buffer = s
+            .buffers
+            .get(&memory)
+            .ok_or_else(|| Error::Contract("bind unknown RM memory".into()))?;
+        let map = s.space.map_range(
+            &buffer.memory,
+            offset,
+            ByteSize::new(size),
+            Some(GpuVa::new(address)),
+            kind,
+        )?;
+        if map.address() != GpuVa::new(address) {
+            return Err(Error::Contract(
+                "RM did not honor fixed mapping address".into(),
+            ));
+        }
+        let id = next_id(s)?;
+        s.maps.insert(id, map);
+        s.bind_info.insert(id, (address, size, memory, offset));
+        if let Some(cap) = s.capture.as_mut() {
+            // VA → allocation index for pushbuffer capture; a reused VA
+            // replaces every stale overlapping entry.
+            let stale: Vec<u64> = cap
+                .binds
+                .range(..address + size)
+                .filter(|&(&start, &(len, _, _))| start + len > address)
+                .map(|(&start, _)| start)
+                .collect();
+            for start in stale {
+                cap.binds.remove(&start);
             }
-            let b = present(object)?;
-            b.core.live()?;
-            if address < 1 << 34 || address.checked_add(size).is_none_or(|n| n > 1 << 40) {
-                return Err(Error::Contract("Mesa VA outside reserved range".into()));
-            }
-            let mut guard = b.lock()?;
-            let s = &mut guard.0;
-            b.reclaim_locked(s, false);
-            let buffer = s
-                .buffers
-                .get(&memory)
-                .ok_or_else(|| Error::Contract("bind unknown RM memory".into()))?;
-            let map = s.space.map_range(
-                &buffer.memory,
-                offset,
-                ByteSize::new(size),
-                Some(GpuVa::new(address)),
-                kind,
-            )?;
-            if map.address() != GpuVa::new(address) {
-                return Err(Error::Contract(
-                    "RM did not honor fixed mapping address".into(),
-                ));
-            }
-            let id = next_id(s)?;
-            s.maps.insert(id, map);
-            s.bind_info.insert(id, (address, size, memory, offset));
-            if let Some(cap) = s.capture.as_mut() {
-                // VA → allocation index for pushbuffer capture; a reused VA
-                // replaces every stale overlapping entry.
-                let stale: Vec<u64> = cap
-                    .binds
-                    .range(..address + size)
-                    .filter(|&(&start, &(len, _, _))| start + len > address)
-                    .map(|(&start, _)| start)
-                    .collect();
-                for start in stale {
-                    cap.binds.remove(&start);
-                }
-                cap.binds.insert(address, (size, memory, offset));
-            }
-            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-            unsafe { output(out, id) }
-        })())
+            cap.binds.insert(address, (size, memory, offset));
+        }
+        // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
+        unsafe { output(out, id) }
     })
 }
 /// Immediate RM unmap, no GPU wait. Only for application-ordered Vulkan
@@ -2597,29 +2623,27 @@ pub(crate) unsafe extern "C" fn nv_rm_bind(
 pub(crate) unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: u64) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_unbind", object, move || {
-        report((|| {
-            let b = present(object)?;
-            let mut guard = b.lock()?;
-            let s = &mut guard.0;
-            b.reclaim_locked(s, false);
-            let result = s
-                .maps
-                .get_mut(&mapping)
-                .ok_or_else(|| Error::Contract("unbind unknown GPU mapping".into()))?
-                .try_unmap();
-            if let Err(error) = result {
-                // Keep the mapping and typed-VA reservation owned. C must not
-                // recycle this address after a failed kernel unmap.
-                b.lose_locked(s);
-                return Err(Error::DeviceLost(format!(
-                    "GPU unmap failed; reservation retained: {error}"
-                )));
-            }
-            s.maps.remove(&mapping);
-            s.bind_info.remove(&mapping);
-            Ok(())
-        })())
+    guarded_as(Entry::Bind, "nv_rm_unbind", object, move || {
+        let b = present(object)?;
+        let mut guard = b.lock()?;
+        let s = &mut guard.0;
+        b.reclaim_locked(s, false);
+        let result = s
+            .maps
+            .get_mut(&mapping)
+            .ok_or_else(|| Error::Contract("unbind unknown GPU mapping".into()))?
+            .try_unmap();
+        if let Err(error) = result {
+            // Keep the mapping and typed-VA reservation owned. C must not
+            // recycle this address after a failed kernel unmap.
+            b.lose_locked(s);
+            return Err(Error::DeviceLost(format!(
+                "GPU unmap failed; reservation retained: {error}"
+            )));
+        }
+        s.maps.remove(&mapping);
+        s.bind_info.remove(&mapping);
+        Ok(())
     })
 }
 /// Release a VA reservation and its mappings without waiting for the GPU:
@@ -4184,6 +4208,42 @@ mod tests {
                 "mmap NVIDIA allocation",
                 std::io::Error::from_raw_os_error(12)
             )),
+            -1
+        );
+    }
+    #[test]
+    fn bind_failures_follow_nvk() {
+        // vkBind*Memory and vkAllocateMemory have no DEVICE_LOST; NVK reports a
+        // failed VM bind as VK_ERROR_UNKNOWN (nvkmd_nouveau_va.c:109).
+        let bind = |error: Error| Entry::Bind.status(&error);
+        assert_eq!(bind(Error::DeviceLost("x".into())), -13);
+        assert_eq!(
+            bind(Error::Rm {
+                operation: "op",
+                status: 0x1f
+            }),
+            -13
+        );
+        assert_eq!(
+            bind(
+                MemoryError::GpuMappingLimits {
+                    offset: 0,
+                    length: ByteSize::new(1),
+                    allocation_size: ByteSize::new(0),
+                }
+                .into()
+            ),
+            -13
+        );
+        assert_eq!(
+            bind(Error::Rm {
+                operation: "op",
+                status: 0x51
+            }),
+            -2
+        );
+        assert_eq!(
+            bind(Error::Io("op", std::io::Error::from_raw_os_error(12))),
             -1
         );
     }
