@@ -174,6 +174,7 @@ mod tests {
         }
     }
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create")]
     fn independent_import_survives_exporter_and_fd_close() {
         use std::os::unix::fs::MetadataExt;
         let source = SyncMemory::new_cpu().unwrap();
@@ -211,6 +212,7 @@ mod tests {
         assert_eq!(references(), 0);
     }
     #[test]
+    #[cfg_attr(miri, ignore = "opens real files")]
     fn real_invalid_files_are_rejected_without_consuming_them() {
         let dev_null = File::open("/dev/null").unwrap();
         assert!(SyncMemory::import_cpu(dev_null.as_fd()).is_err());
@@ -235,6 +237,7 @@ mod tests {
         }
     }
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create and fork(2)")]
     fn forked_process_observes_shared_atomics() {
         unsafe extern "C" {
             fn fork() -> i32;

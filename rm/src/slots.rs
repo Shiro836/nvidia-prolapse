@@ -407,23 +407,36 @@ pub(crate) mod tests {
     /// CPU-only page standing in for an RM SYS mapping (same 16-byte layout).
     #[repr(C, align(4096))]
     pub(crate) struct HostPage([u64; PAGE_BYTES / 8]);
-    pub(crate) struct HostPages(#[allow(dead_code)] Vec<Box<HostPage>>);
+    /// Owns the pages a test pool maps. They are held as the raw pointers
+    /// `Box::into_raw` returned, never as `Box`es: moving a `Box` asserts
+    /// unique access, which would revoke the provenance the pool uses.
+    pub(crate) struct HostPages(Vec<*mut HostPage>);
     impl HostPages {
         pub(crate) fn pool(view: TimelineView, pages: usize) -> (Arc<SlotPool>, Self) {
             let pool = Arc::new(SlotPool::new(view));
-            let mut owned = Vec::new();
+            let mut owned = Self(Vec::new());
             for i in 0..pages {
                 // SAFETY: an all-zero u64 array is a valid HostPage.
                 let page: Box<HostPage> = unsafe { Box::new_zeroed().assume_init() };
-                let address = page.0.as_ptr().expose_provenance();
-                // SAFETY: the page is owned by the returned HostPages, which
-                // every test keeps alongside the pool; only the pool's atomics
-                // access it.
+                let page = Box::into_raw(page);
+                owned.0.push(page);
+                let address = page.expose_provenance();
+                // SAFETY: the page stays allocated until the returned
+                // HostPages drops, and every test keeps it alongside the
+                // pool; only the pool's atomics access it.
                 unsafe { pool.install_page(address, 0x1000_0000 + u64_from_usize(i * PAGE_BYTES)) }
                     .unwrap();
-                owned.push(page);
             }
-            (pool, Self(owned))
+            (pool, owned)
+        }
+    }
+    impl Drop for HostPages {
+        fn drop(&mut self) {
+            for &page in &self.0 {
+                // SAFETY: each pointer came from Box::into_raw in `pool` and
+                // is freed exactly once, here.
+                drop(unsafe { Box::from_raw(page) });
+            }
         }
     }
     impl SlotPool {

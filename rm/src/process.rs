@@ -86,6 +86,7 @@ mod tests {
     use super::ProcessBound;
 
     #[test]
+    #[cfg_attr(miri, ignore = "fork(2)")]
     fn an_object_from_before_fork_is_not_current_in_the_child() {
         unsafe extern "C" {
             fn fork() -> i32;

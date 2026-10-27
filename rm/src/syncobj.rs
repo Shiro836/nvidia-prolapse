@@ -923,6 +923,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create")]
     fn reserved_shared_binary_signal_fixes_its_generation() {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let producer = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
@@ -972,6 +973,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create")]
     fn foreign_terminal_error_is_never_success() {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let fd = crate::platform::create_sealable_memfd().unwrap();
@@ -993,6 +995,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create")]
     fn shared_binary_publishes_local_points_and_failure_never_completes() {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let producer = SyncObj::new(&pool, false, 0, fresh(&pool)).unwrap();
@@ -1038,6 +1041,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create")]
     fn shared_timeline_conversion_publishes_pending_gpu_values() {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let sync = SyncObj::new(&pool, true, 3, fresh(&pool)).unwrap();
@@ -1062,6 +1066,7 @@ mod tests {
         assert_eq!(sync.value().unwrap().0, 7);
     }
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create")]
     fn import_and_foreign_replacement_release_slots_exactly_once() {
         let (pool, _p) = HostPages::pool(TimelineView::Native64, 1);
         let source = SyncObj::new(&pool, false, 1, fresh(&pool)).unwrap();

@@ -186,6 +186,7 @@ mod tests {
 
     /// The abort path, observed from a child process running this test binary.
     #[test]
+    #[cfg_attr(miri, ignore = "re-runs the test binary as a child process")]
     fn panic_without_an_error_return_aborts() {
         const CHILD: &str = "NV_RM_FFI_GUARD_ABORT_CHILD";
         if std::env::var_os(CHILD).is_some() {

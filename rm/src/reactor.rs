@@ -225,6 +225,7 @@ impl Readiness {
 mod tests {
     use super::*;
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn reused_poll_storage_drops_old_watches_and_readiness() {
         let host = WakeFd::new().unwrap();
         let rc = WakeFd::new().unwrap();
@@ -253,6 +254,7 @@ mod tests {
         assert_eq!(readiness.fds.capacity(), capacity);
     }
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn interrupted_dispatch_invalidates_all_retained_foreign_watches() {
         // Exercise the exact state left by the EINTR syscall branch without
         // process-wide signal handlers or timing-sensitive signal injection.
@@ -279,6 +281,7 @@ mod tests {
         assert!(!readiness.observed(456));
     }
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn only_rc_readiness_requests_error_dispatch() {
         let host = WakeFd::new().unwrap();
         let rc = WakeFd::new().unwrap();
@@ -317,6 +320,7 @@ mod tests {
         assert!(wait_with_devices(&[rc.as_raw_fd(), jobs.as_raw_fd()], devices).unwrap());
     }
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn wake_before_registration_is_retained_and_drained() {
         let wake = WakeFd::new().unwrap();
         for _ in 0..100 {
@@ -330,12 +334,14 @@ mod tests {
         wake.drain().unwrap();
     }
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn invalid_fd_is_reported_instead_of_a_busy_loop() {
         // Large positive non-open descriptor (negative means ignored to poll).
         assert!(wait(&[c_int::MAX]).is_err());
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn device_disconnect_is_loss_but_foreign_hup_rechecks_its_owner() {
         let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
         drop(writer);

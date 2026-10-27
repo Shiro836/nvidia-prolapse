@@ -205,80 +205,103 @@ pub(crate) fn round_to_cpu_pages(bytes: usize, page_size: usize) -> io::Result<u
         })
 }
 
+/// Miri interprets the logic over heap memory, with no device and no inline
+/// assembly: there a barrier keeps only its ordering of CPU memory accesses,
+/// which a sequentially consistent fence provides.
+#[cfg(miri)]
+fn miri_barrier() {
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Order both device and ordinary memory reads/writes; not cache maintenance.
 #[inline]
 pub(crate) fn device_full_barrier() {
-    // asm's default memory clobber is intentional: never use nomem/readonly.
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: mfence touches no memory, stack or flags; the default memory
-    // clobber keeps the compiler from moving accesses across it.
-    unsafe {
-        std::arch::asm!("mfence", options(nostack, preserves_flags));
-    }
-    // A locked operation on a real local word also supports CPUs without SSE2.
-    #[cfg(target_arch = "x86")]
+    #[cfg(miri)]
+    miri_barrier();
+    #[cfg(not(miri))]
     {
-        let mut scratch = 0u32;
-        // SAFETY: the locked add writes only the local `scratch` (adding 0);
-        // the memory clobber orders every other access around it.
+        // asm's default memory clobber is intentional: never use nomem/readonly.
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: mfence touches no memory, stack or flags; the default memory
+        // clobber keeps the compiler from moving accesses across it.
         unsafe {
-            std::arch::asm!("lock add dword ptr [{word}], 0",
-            word = in(reg) &raw mut scratch, options(nostack));
+            std::arch::asm!("mfence", options(nostack, preserves_flags));
         }
-    }
-    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
-    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
-    unsafe {
-        std::arch::asm!("dsb sy", options(nostack, preserves_flags));
-    }
-    #[cfg(target_arch = "riscv64")]
-    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
-    unsafe {
-        std::arch::asm!("fence iorw, iorw", options(nostack, preserves_flags));
+        // A locked operation on a real local word also supports CPUs without SSE2.
+        #[cfg(target_arch = "x86")]
+        {
+            let mut scratch = 0u32;
+            // SAFETY: the locked add writes only the local `scratch` (adding 0);
+            // the memory clobber orders every other access around it.
+            unsafe {
+                std::arch::asm!("lock add dword ptr [{word}], 0",
+                word = in(reg) &raw mut scratch, options(nostack));
+            }
+        }
+        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+        // SAFETY: a barrier instruction; no memory, stack or flags are changed.
+        unsafe {
+            std::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        }
+        #[cfg(target_arch = "riscv64")]
+        // SAFETY: a barrier instruction; no memory, stack or flags are changed.
+        unsafe {
+            std::arch::asm!("fence iorw, iorw", options(nostack, preserves_flags));
+        }
     }
 }
 
 /// Order prior mapped-device/ordinary reads before subsequent reads.
 #[inline]
 pub(crate) fn device_read_barrier() {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
-    unsafe {
-        std::arch::asm!("lfence", options(nostack, preserves_flags));
-    }
-    #[cfg(any(target_arch = "x86", target_arch = "arm"))]
-    device_full_barrier();
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
-    unsafe {
-        std::arch::asm!("dsb ld", options(nostack, preserves_flags));
-    }
-    #[cfg(target_arch = "riscv64")]
-    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
-    unsafe {
-        std::arch::asm!("fence ir, ir", options(nostack, preserves_flags));
+    #[cfg(miri)]
+    miri_barrier();
+    #[cfg(not(miri))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: a barrier instruction; no memory, stack or flags are changed.
+        unsafe {
+            std::arch::asm!("lfence", options(nostack, preserves_flags));
+        }
+        #[cfg(any(target_arch = "x86", target_arch = "arm"))]
+        device_full_barrier();
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: a barrier instruction; no memory, stack or flags are changed.
+        unsafe {
+            std::arch::asm!("dsb ld", options(nostack, preserves_flags));
+        }
+        #[cfg(target_arch = "riscv64")]
+        // SAFETY: a barrier instruction; no memory, stack or flags are changed.
+        unsafe {
+            std::arch::asm!("fence ir, ir", options(nostack, preserves_flags));
+        }
     }
 }
 
 /// Order prior mapped-device/ordinary writes before subsequent writes.
 #[inline]
 pub(crate) fn device_write_barrier() {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
-    unsafe {
-        std::arch::asm!("sfence", options(nostack, preserves_flags));
-    }
-    #[cfg(target_arch = "x86")]
-    device_full_barrier();
-    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
-    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
-    unsafe {
-        std::arch::asm!("dsb st", options(nostack, preserves_flags));
-    }
-    #[cfg(target_arch = "riscv64")]
-    // SAFETY: a barrier instruction; no memory, stack or flags are changed.
-    unsafe {
-        std::arch::asm!("fence ow, ow", options(nostack, preserves_flags));
+    #[cfg(miri)]
+    miri_barrier();
+    #[cfg(not(miri))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: a barrier instruction; no memory, stack or flags are changed.
+        unsafe {
+            std::arch::asm!("sfence", options(nostack, preserves_flags));
+        }
+        #[cfg(target_arch = "x86")]
+        device_full_barrier();
+        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+        // SAFETY: a barrier instruction; no memory, stack or flags are changed.
+        unsafe {
+            std::arch::asm!("dsb st", options(nostack, preserves_flags));
+        }
+        #[cfg(target_arch = "riscv64")]
+        // SAFETY: a barrier instruction; no memory, stack or flags are changed.
+        unsafe {
+            std::arch::asm!("fence ow, ow", options(nostack, preserves_flags));
+        }
     }
 }
 

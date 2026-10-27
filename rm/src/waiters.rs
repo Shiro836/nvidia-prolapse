@@ -262,6 +262,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn dekker_skip_never_loses_a_wakeup_under_stress() {
         // Rounds of: N waiters wait for value r while a signaller races their
         // registration with its store. Every other round the signaller first
@@ -309,6 +310,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn device_event_wakes_leader_and_every_follower_without_cpu_notify() {
         // Stand-ins for the RM HOST/RC descriptors (eventfds). The "GPU"
         // writes the value and then raises HOST readiness only — the path a
@@ -397,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn signal_with_no_waiter_costs_no_wake() {
         let fixture = Fixture::new();
         fixture.signal(1);
@@ -412,6 +415,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn deadline_and_loss_end_every_waiter() {
         let fixture = Fixture::new();
         let start = Instant::now();
@@ -438,6 +442,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
     fn two_waiters_on_one_value_both_wake_promptly() {
         // CPU path of the two-waiter latency gate: both waiters (one leader,
         // one follower) must observe the signal well under 1 ms (p99).
