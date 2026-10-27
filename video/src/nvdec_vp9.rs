@@ -417,7 +417,7 @@ impl Default for FrameContext {
         ];
         for (tx, src) in coefs.iter().enumerate() {
             let mut k = 0;
-            for plane in c.coef[tx].iter_mut() {
+            for plane in &mut c.coef[tx] {
                 for r in plane.iter_mut() {
                     for band in r.iter_mut() {
                         for ctx in band.iter_mut() {
@@ -716,12 +716,12 @@ impl Vp9State {
         h.sharpness = low_u8(r.f(3)?);
         h.mode_ref_delta_enabled = r.bit()? != 0;
         if h.mode_ref_delta_enabled && r.bit()? != 0 {
-            for d in self.ref_deltas.iter_mut() {
+            for d in &mut self.ref_deltas {
                 if r.bit()? != 0 {
                     *d = r.s_i8(6)?;
                 }
             }
-            for d in self.mode_deltas.iter_mut() {
+            for d in &mut self.mode_deltas {
                 if r.bit()? != 0 {
                     *d = r.s_i8(6)?;
                 }
@@ -745,11 +745,11 @@ impl Vp9State {
         if seg.enabled {
             seg.update_map = r.bit()? != 0;
             if seg.update_map {
-                for p in seg.tree_probs.iter_mut() {
+                for p in &mut seg.tree_probs {
                     *p = if r.bit()? != 0 { low_u8(r.f(8)?) } else { 255 };
                 }
                 seg.temporal_update = r.bit()? != 0;
-                for p in seg.pred_probs.iter_mut() {
+                for p in &mut seg.pred_probs {
                     *p = if seg.temporal_update && r.bit()? != 0 {
                         low_u8(r.f(8)?)
                     } else {
@@ -849,7 +849,7 @@ impl Vp9State {
         let max_tx = [0, 1, 2, 3, 3][usize::from(h.tx_mode)];
         for tx in 0..=max_tx {
             if d.read(128) != 0 {
-                for plane in fc.coef[tx].iter_mut() {
+                for plane in &mut fc.coef[tx] {
                     for r in plane.iter_mut() {
                         for (band, ctxs) in r.iter_mut().enumerate() {
                             let n = if band == 0 { 3 } else { 6 };
@@ -863,7 +863,7 @@ impl Vp9State {
                 }
             }
         }
-        for p in fc.skip.iter_mut() {
+        for p in &mut fc.skip {
             d.diff_update(p);
         }
         if !h.is_intra() {
@@ -875,7 +875,7 @@ impl Vp9State {
                     d.diff_update(p);
                 }
             }
-            for p in fc.is_inter.iter_mut() {
+            for p in &mut fc.is_inter {
                 d.diff_update(p);
             }
             let s = h.sign_bias;
@@ -890,7 +890,7 @@ impl Vp9State {
                 0
             };
             if h.reference_mode == REFERENCE_MODE_SELECT {
-                for p in fc.comp_inter.iter_mut() {
+                for p in &mut fc.comp_inter {
                     d.diff_update(p);
                 }
             }
@@ -900,7 +900,7 @@ impl Vp9State {
                 }
             }
             if h.reference_mode != 0 {
-                for p in fc.comp_ref.iter_mut() {
+                for p in &mut fc.comp_ref {
                     d.diff_update(p);
                 }
             }
@@ -910,29 +910,29 @@ impl Vp9State {
             for p in fc.partition.iter_mut().flatten() {
                 d.diff_update(p);
             }
-            for p in fc.mv_joints.iter_mut() {
+            for p in &mut fc.mv_joints {
                 d.mv_update(p);
             }
-            for c in fc.mv.iter_mut() {
+            for c in &mut fc.mv {
                 d.mv_update(&mut c.sign);
-                for p in c.classes.iter_mut() {
+                for p in &mut c.classes {
                     d.mv_update(p);
                 }
                 d.mv_update(&mut c.class0[0]);
-                for p in c.bits.iter_mut() {
+                for p in &mut c.bits {
                     d.mv_update(p);
                 }
             }
-            for c in fc.mv.iter_mut() {
+            for c in &mut fc.mv {
                 for p in c.class0_fp.iter_mut().flatten() {
                     d.mv_update(p);
                 }
-                for p in c.fp.iter_mut() {
+                for p in &mut c.fp {
                     d.mv_update(p);
                 }
             }
             if h.allow_high_precision_mv {
-                for c in fc.mv.iter_mut() {
+                for c in &mut fc.mv {
                     d.mv_update(&mut c.class0_hp);
                     d.mv_update(&mut c.hp);
                 }

@@ -8,7 +8,7 @@ use super::{
 };
 use crate::ffi::{FailFlag, Failable};
 use crate::process::ProcessBound;
-use std::{cell::RefCell, ffi::CString, os::fd::IntoRawFd};
+use std::{cell::RefCell, ffi::CString};
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -554,7 +554,7 @@ pub unsafe extern "C" fn nv_video_copy_out(
             // Safety).
             let fd = unsafe { session.copy_out(id, &target) }?;
             // SAFETY: checked non-NULL, writable for the call (# Safety).
-            unsafe { release_fence_fd.write(fd.map_or(-1, |f| f.into_raw_fd())) };
+            unsafe { release_fence_fd.write(fd.map_or(-1, std::os::fd::IntoRawFd::into_raw_fd)) };
             Ok(0)
         },
     )
@@ -588,10 +588,10 @@ pub extern "C" fn nv_video_last_error() -> *const std::ffi::c_char {
 }
 
 // The C struct keeps its v1 size (the Cr-plane fields took over reserved words).
-const _: () = assert!(std::mem::size_of::<NvVideoTarget>() == 80);
+const _: () = assert!(size_of::<NvVideoTarget>() == 80);
 // ABI v2 structs: fixed C layout, no implicit padding.
-const _: () = assert!(std::mem::size_of::<NvVideoMasteringDisplay>() == 24);
-const _: () = assert!(std::mem::size_of::<NvVideoHdrMetadata>() == 64);
+const _: () = assert!(size_of::<NvVideoMasteringDisplay>() == 24);
+const _: () = assert!(size_of::<NvVideoHdrMetadata>() == 64);
 
 #[cfg(test)]
 mod tests {

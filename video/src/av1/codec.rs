@@ -203,7 +203,7 @@ impl CodecDecoder for Av1Decoder {
         if self.grain_capable {
             let l = self.surface_layout(max_width, max_height)?;
             self.chroma_offset = l.chroma_offset;
-            for p in self.private.iter_mut() {
+            for p in &mut self.private {
                 *p = alloc.vram(l.size)?;
             }
         }

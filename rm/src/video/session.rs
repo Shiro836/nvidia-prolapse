@@ -528,13 +528,13 @@ impl Session {
     /// Submit one unit; returns the displayable pictures it produced. After a
     /// `VideoError::Resize` only an end-of-stream drain (no data) is accepted.
     pub fn decode(&mut self, data: &[u8], timestamp: u64, flags: u32) -> VResult<u32> {
-        if let Some((w, h)) = self.resize_needed {
-            if !data.is_empty() {
-                return Err(VideoError::Invalid(format!(
-                    "the session needs re-creation at {w}x{h} (NV_VIDEO_E_RESIZE): only an \
+        if let Some((w, h)) = self.resize_needed
+            && !data.is_empty()
+        {
+            return Err(VideoError::Invalid(format!(
+                "the session needs re-creation at {w}x{h} (NV_VIDEO_E_RESIZE): only an \
                      end-of-stream drain is accepted"
-                )));
-            }
+            )));
         }
         let r = self.decode_unit(data, timestamp, flags);
         if let Err(VideoError::Resize { width, height, .. }) = &r {

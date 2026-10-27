@@ -91,7 +91,7 @@ struct Functions {
 /// `address` is non-NULL and is the address of a function whose C signature
 /// is exactly `F`, an `unsafe extern "C" fn` pointer type.
 unsafe fn symbol<F: Copy>(address: *mut c_void) -> F {
-    const { assert!(std::mem::size_of::<F>() == std::mem::size_of::<*mut c_void>()) };
+    const { assert!(size_of::<F>() == size_of::<*mut c_void>()) };
     // SAFETY: F is a function-pointer type of pointer size (asserted above);
     // data and function pointers share one representation on every target
     // this crate builds for (platform.rs); the caller names the signature.
@@ -214,8 +214,8 @@ mod tests {
         let expected = [40, 4, 0, 4, 8, 12, 16, 20, 24, 36];
         assert_eq!(
             [
-                std::mem::size_of::<Compiled>(),
-                std::mem::align_of::<Compiled>(),
+                size_of::<Compiled>(),
+                align_of::<Compiled>(),
                 std::mem::offset_of!(Compiled, code),
                 std::mem::offset_of!(Compiled, code_size),
                 std::mem::offset_of!(Compiled, registers),

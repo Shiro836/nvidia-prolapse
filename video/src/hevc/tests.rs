@@ -99,7 +99,7 @@ const FIELDS: &[(usize, usize, &str)] = &[
     (0x5f0, 16, "scaling tail pad"),
     (
         0x600,
-        super::desc::TILE_SIZES_SIZE,
+        desc::TILE_SIZES_SIZE,
         "tile sizes (0x1000-byte captures only)",
     ),
 ];
@@ -241,13 +241,7 @@ fn compare_with_stock_stream(name: &str, stream_name: &str, by_index: bool) -> V
             "{name} AU {k} CurrPicOrderCntVal"
         );
         matched += 1;
-        for (o, (ours, stock)) in job
-            .setup
-            .iter()
-            .zip(d)
-            .take(super::desc::SETUP_SIZE)
-            .enumerate()
-        {
+        for (o, (ours, stock)) in job.setup.iter().zip(d).take(desc::SETUP_SIZE).enumerate() {
             if ours != stock {
                 mism.push((k, o));
             }
@@ -519,9 +513,9 @@ fn testdata_parameter_sets() -> (Sps, Pps) {
     let mut sps = None;
     for n in split_annexb(HEVC) {
         match (n.nal[0] >> 1) & 0x3f {
-            33 => sps = Some(ps::parse_sps(&crate::bits::unescape(n.nal)).unwrap()),
+            33 => sps = Some(ps::parse_sps(&unescape(n.nal)).unwrap()),
             34 => {
-                let p = ps::parse_pps(&crate::bits::unescape(n.nal)).unwrap();
+                let p = ps::parse_pps(&unescape(n.nal)).unwrap();
                 return (sps.unwrap(), p);
             }
             _ => {}

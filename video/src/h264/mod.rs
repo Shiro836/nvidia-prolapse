@@ -783,10 +783,9 @@ impl Decoder {
                                 .dpb
                                 .iter()
                                 .position(|e| e.is_some_and(|r| r.long_term_idx == Some(idx)))
+                                && Some(j) != target
                             {
-                                if Some(j) != target {
-                                    self.dpb[j] = None;
-                                }
+                                self.dpb[j] = None;
                             }
                             match target {
                                 Some(i) => {
@@ -808,7 +807,7 @@ impl Decoder {
                         Mmco::MaxLongTermIdx(p1) => {
                             self.max_lt_idx = p1.checked_sub(1);
                             let m = self.max_lt_idx;
-                            for e in self.dpb.iter_mut() {
+                            for e in &mut self.dpb {
                                 if e.is_some_and(|r| {
                                     r.long_term_idx.is_some_and(|i| m.is_none_or(|m| i > m))
                                 }) {
@@ -825,7 +824,7 @@ impl Decoder {
                             if self.max_lt_idx.is_none_or(|m| idx > m) {
                                 return Err(H264Error::LongTermIdxAboveMax { mmco: 6, idx }.into());
                             }
-                            for e in self.dpb.iter_mut() {
+                            for e in &mut self.dpb {
                                 if e.is_some_and(|r| r.long_term_idx == Some(idx)) {
                                     *e = None;
                                 }
@@ -894,7 +893,7 @@ impl Decoder {
             return slot(s);
         }
         let refs: Vec<u8> = self.dpb.iter().flatten().filter_map(|r| r.slot).collect();
-        let s = match self.slot_surface.iter().position(|e| e.is_none()) {
+        let s = match self.slot_surface.iter().position(Option::is_none) {
             Some(s) => s,
             None => (0..MAX_SLOTS)
                 .find(|&s| !refs.contains(&slot(s)))

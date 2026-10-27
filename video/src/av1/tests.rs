@@ -349,7 +349,7 @@ fn superres_geometry_and_motion_field_gate() {
         order_hint_bits: 8,
         ..Default::default()
     };
-    let cur = header::FrameHeader {
+    let cur = FrameHeader {
         frame_type: header::INTER_FRAME,
         use_superres: true,
         superres_denom: 12,
@@ -377,7 +377,7 @@ fn superres_geometry_and_motion_field_gate() {
         "stock projects no motion field on a superres frame: {mf:?}"
     );
     // The same reference geometry without superres is usable.
-    let cur2 = header::FrameHeader {
+    let cur2 = FrameHeader {
         frame_width: 320,
         upscaled_width: 320,
         use_superres: false,
@@ -404,7 +404,7 @@ fn large_scale_tile_list_stays_unsupported() {
     // OBU header: forbidden 0, type 8, extension 0, has_size_field 1, reserved 0.
     c.push_unit(&[0x42, 0x01, 0x00]);
     match c.next_out() {
-        Err(obu::Av1Error::Unsupported(msg)) => assert!(msg.contains("OBU_TILE_LIST"), "{msg}"),
+        Err(Av1Error::Unsupported(msg)) => assert!(msg.contains("OBU_TILE_LIST"), "{msg}"),
         Err(e) => panic!("expected Unsupported, got {e}"),
         Ok(_) => panic!("expected Unsupported, got a picture"),
     }

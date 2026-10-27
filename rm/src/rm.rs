@@ -1441,7 +1441,7 @@ impl Mapping {
             .cpu_address()
             .checked_add(offset)
             .ok_or_else(|| Error::Contract("semaphore CPU address overflow".into()))?;
-        if address % std::mem::align_of::<std::sync::atomic::AtomicU64>() != 0
+        if address % align_of::<std::sync::atomic::AtomicU64>() != 0
             || offset.checked_add(8).is_none_or(|end| end > self.size)
         {
             return Err(Error::Contract(
@@ -1509,7 +1509,7 @@ pub fn bdf_string(p: [u32; 4]) -> String {
 pub(crate) fn select_accessible_card(
     cards: &[abi::Card],
     want: Option<[u32; 4]>,
-    probe: impl Fn(u32) -> std::io::Result<()>,
+    probe: impl Fn(u32) -> io::Result<()>,
 ) -> Result<abi::Card> {
     use std::io::ErrorKind::{NotFound, PermissionDenied};
     let candidates: Vec<&abi::Card> = cards
@@ -1590,7 +1590,7 @@ mod select_tests {
     }
     /// Multi-GPU container (the 20261015-nvdec-xgen Turing/Ada/Blackwell
     /// rentals): RM lists every host GPU, only one /dev/nvidiaN is granted.
-    fn container(minor: u32) -> std::io::Result<()> {
+    fn container(minor: u32) -> io::Result<()> {
         match minor {
             0 => Err(IoError::from(ErrorKind::PermissionDenied)),
             1 => Err(IoError::from(ErrorKind::NotFound)),

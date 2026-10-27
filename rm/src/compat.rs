@@ -487,8 +487,8 @@ mod tests {
     #[test]
     fn optional_static_bar1_exact_layouts_and_missing_outputs() {
         const NAME: &str = "NV2080_CTRL_FB_GET_STATIC_BAR1_INFO_PARAMS";
-        assert_eq!(std::mem::size_of::<abi::StaticBar1Info>(), 24);
-        assert_eq!(std::mem::align_of::<abi::StaticBar1Info>(), 8);
+        assert_eq!(size_of::<abi::StaticBar1Info>(), 24);
+        assert_eq!(align_of::<abi::StaticBar1Info>(), 8);
         let mut present = 0;
         let mut size_only = 0;
         let mut with_range = 0;
@@ -904,8 +904,8 @@ mod tests {
     }
     #[test]
     fn cpu_unmap_cookie_preserves_full_width_and_public_status_offset() {
-        assert_eq!(std::mem::size_of::<abi::UnmapMemory>(), 32);
-        assert_eq!(std::mem::align_of::<abi::UnmapMemory>(), 8);
+        assert_eq!(size_of::<abi::UnmapMemory>(), 32);
+        assert_eq!(align_of::<abi::UnmapMemory>(), 8);
         let mut checked = 0;
         for &(version, _) in data::VERSIONS {
             let c = Compat::for_version(version).unwrap();

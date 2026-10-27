@@ -141,7 +141,10 @@ impl SlotPool {
 
     /// Next page index to install, or None at the hard limit.
     pub(crate) fn next_page(&self) -> Option<usize> {
-        let free = self.free.lock().unwrap_or_else(|p| p.into_inner());
+        let free = self
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         (free.pages < MAX_PAGES).then_some(free.pages)
     }
 
@@ -149,7 +152,7 @@ impl SlotPool {
         !self
             .free
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .free
             .is_empty()
     }
@@ -165,7 +168,10 @@ impl SlotPool {
         if cpu == 0 || !cpu.is_multiple_of(4096) || !gpu.is_multiple_of(4096) {
             return Err(Error::Contract("unaligned semaphore pool page".into()));
         }
-        let mut free = self.free.lock().unwrap_or_else(|p| p.into_inner());
+        let mut free = self
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let index = free.pages;
         if index >= MAX_PAGES {
             return Err(Error::Contract(
@@ -214,7 +220,7 @@ impl SlotPool {
         let slot = Slot(
             self.free
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .free
                 .pop()?,
         );
@@ -249,7 +255,7 @@ impl SlotPool {
             fence(Ordering::Acquire);
             self.free
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .free
                 .push(slot.0);
         }

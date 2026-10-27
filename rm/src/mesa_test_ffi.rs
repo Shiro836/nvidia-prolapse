@@ -38,7 +38,7 @@ pub(in crate::mesa) struct SyncHandle {
 }
 impl SyncHandle {
     /// The payload behind the id, for fixtures that inspect bridge state.
-    pub(in crate::mesa) fn obj(&self) -> Result<&crate::syncobj::SyncObj> {
+    pub(in crate::mesa) fn obj(&self) -> Result<&SyncObj> {
         // SAFETY: the id came from nv_rm_sync_create and is destroyed only by
         // sync_destroy, which consumes this handle; the returned borrow of
         // `self` ends before that can happen, so the payload is not destroyed

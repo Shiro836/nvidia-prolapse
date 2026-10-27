@@ -605,7 +605,7 @@ impl ParserState {
             }
         }
         let r = r.expect("NUM_REF_FRAMES > 0: the loop above picks a slot");
-        for k in idx.iter_mut() {
+        for k in &mut idx {
             if *k == 0xff {
                 *k = r;
             }
@@ -667,7 +667,7 @@ impl ParserState {
                 };
         }
         if h.frame_type == KEY_FRAME && h.show_frame {
-            for s in self.refs.iter_mut() {
+            for s in &mut self.refs {
                 s.valid = false;
                 s.order_hint = 0;
             }
@@ -1353,9 +1353,7 @@ impl ParserState {
             if h.frame_type == KEY_FRAME {
                 // 7.21: load the shown key frame's state, then refresh every slot with it.
                 let s = self.refs[usize::from(h.frame_to_show_map_idx)];
-                for slot in self.refs.iter_mut() {
-                    *slot = s;
-                }
+                self.refs.fill(s);
             }
             return;
         }

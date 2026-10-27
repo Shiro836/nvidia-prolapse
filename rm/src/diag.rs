@@ -90,7 +90,7 @@ pub(crate) fn install_panic_hook() {
         std::panic::set_hook(Box::new(move |info| {
             let location = info
                 .location()
-                .map_or_else(|| "unknown location".into(), |l| l.to_string());
+                .map_or_else(|| "unknown location".into(), ToString::to_string);
             write(format_args!("nvk Rust RM panic at {location}: {info}"));
             previous(info);
         }));

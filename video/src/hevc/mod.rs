@@ -309,7 +309,7 @@ impl Decoder {
         let mut keep: Vec<u64> = Vec::new();
         if !idr {
             for (list, out) in [(&h0.rps.s0, &mut before), (&h0.rps.s1, &mut after)] {
-                for &(dp, used) in list.iter() {
+                for &(dp, used) in list {
                     match self.dpb.iter().find(|d| d.poc == poc + dp) {
                         Some(p) => {
                             if used {

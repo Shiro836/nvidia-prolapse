@@ -180,7 +180,9 @@ impl Shared {
         Ok(shared)
     }
     fn local(&self) -> MutexGuard<'_, SharedLocal> {
-        self.local.lock().unwrap_or_else(|p| p.into_inner())
+        self.local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     /// Publish completed local GPU points. Returns whether the shared word
     /// changed (the caller then broadcasts HOST once).
@@ -339,7 +341,9 @@ impl SyncObj {
         self.magic == MAGIC
     }
     pub(crate) fn lock(&self) -> MutexGuard<'_, SyncState> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Replace the payload, releasing the old native slot reference.

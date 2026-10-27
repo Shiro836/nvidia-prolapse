@@ -403,7 +403,7 @@ impl CodecDecoder for Vp9Decoder {
             .ok_or(Vp9Error::HeadersOverrun)?
             .to_vec();
         let readback = (!h.error_resilient && !h.frame_parallel)
-            .then(|| COUNTS..COUNTS + std::mem::size_of::<Vp9EntropyCounts>());
+            .then(|| COUNTS..COUNTS + size_of::<Vp9EntropyCounts>());
         let show = h.show_frame;
         // stream_len is the whole frame (stock), the engine reads from the
         // first tile (frameTagSize + offsetToDctParts).

@@ -309,7 +309,7 @@ pub(crate) struct Bridge {
     inner: Mutex<Confined>,
     /// Perf capture armed (frame markers take the lock only then); set at
     /// open or by a late arm from submit.
-    capture: std::sync::atomic::AtomicBool,
+    capture: AtomicBool,
     /// Set by the C-boundary guard when a panic interrupted a call on this
     /// bridge (crate::ffi); never cleared.
     failed: crate::ffi::FailFlag,
@@ -341,7 +341,9 @@ unsafe fn sync_ref<'a>(id: u64) -> Result<&'a SyncObj> {
 
 impl Bridge {
     fn lock(&self) -> MutexGuard<'_, Confined> {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     fn new(pci: [u32; 4]) -> Result<(Self, Info)> {
         crate::diag::install_panic_hook();
@@ -385,7 +387,7 @@ impl Bridge {
             .map(|c| crate::capture::Capture::new(c, usize_from_u32(pci[1] << 8 | pci[2])));
         let bridge = Self {
             core,
-            capture: std::sync::atomic::AtomicBool::new(capture.is_some()),
+            capture: AtomicBool::new(capture.is_some()),
             failed: crate::ffi::FailFlag::default(),
             process: crate::process::ProcessBound::new()
                 .map_err(|e| Error::Io("register the fork handler", e))?,
@@ -506,10 +508,10 @@ impl Bridge {
     /// thread scans on its own path).
     fn check(&self) -> Result<()> {
         self.core.live()?;
-        if self.core.scan_due(false) {
-            if let Ok(mut guard) = self.inner.try_lock() {
-                return self.scan_locked(&mut guard.0);
-            }
+        if self.core.scan_due(false)
+            && let Ok(mut guard) = self.inner.try_lock()
+        {
+            return self.scan_locked(&mut guard.0);
         }
         Ok(())
     }
@@ -623,7 +625,7 @@ impl Bridge {
         // one it is blocked on frees a blocked channel.
         let completed = shared.completed().unwrap_or(0);
         let pool = &self.core.pool;
-        for &(batch, acquire) in inner.acquires[index].iter() {
+        for &(batch, acquire) in &inner.acquires[index] {
             if batch <= completed {
                 continue;
             }
@@ -796,10 +798,10 @@ impl Bridge {
     /// Lock-free hint check, then reclaim if Inner is free right now (status
     /// and wait paths never block on another thread's allocation).
     fn reclaim_try(&self) {
-        if self.core.reclaim_pending.load(Ordering::Acquire) != 0 {
-            if let Ok(mut guard) = self.inner.try_lock() {
-                self.reclaim_locked(&mut guard.0, false);
-            }
+        if self.core.reclaim_pending.load(Ordering::Acquire) != 0
+            && let Ok(mut guard) = self.inner.try_lock()
+        {
+            self.reclaim_locked(&mut guard.0, false);
         }
     }
     /// Perform one free. `group_failed`: an earlier unmap of the same group
@@ -844,10 +846,8 @@ impl Bridge {
     }
 
     fn broadcast(&self, changed: bool) {
-        if changed {
-            if let Err(error) = self.core.trigger.trigger() {
-                diag!("RM shared payload broadcast: {error}");
-            }
+        if changed && let Err(error) = self.core.trigger.trigger() {
+            diag!("RM shared payload broadcast: {error}");
         }
     }
 
@@ -1275,7 +1275,7 @@ impl Bridge {
             Fence(u64, u64),
             Gate(Arc<Shared>, u64),
             /// Reserved native slot; this export holds one reference.
-            Slot(crate::slots::Slot),
+            Slot(Slot),
         }
         let next = {
             let state = sync.lock();
@@ -1483,8 +1483,7 @@ impl Bridge {
             cap.binds.len()
         );
         inner.capture = Some(cap);
-        self.capture
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.capture.store(true, Ordering::Relaxed);
     }
     /// `share`: the context whose TSG the new context's channel joins on
     /// its own subcontext (VEID); `None` gives the context a TSG of its own.
@@ -1668,11 +1667,11 @@ fn record_acquires(
     let index = context_index(context)
         .expect("the context was resolved by the submit that accepted the batch");
     let list = &mut inner.acquires[index];
-    if list.front().is_some() {
-        if let Some(Ok(completed)) = inner.queues[index].as_ref().map(|q| q.shared().completed()) {
-            while list.front().is_some_and(|(t, _)| *t <= completed) {
-                list.pop_front();
-            }
+    if list.front().is_some()
+        && let Some(Ok(completed)) = inner.queues[index].as_ref().map(|q| q.shared().completed())
+    {
+        while list.front().is_some_and(|(t, _)| *t <= completed) {
+            list.pop_front();
         }
     }
     list.extend(acquires.into_iter().map(|a| (token, a)));
@@ -2784,10 +2783,10 @@ pub(crate) unsafe extern "C" fn nv_rm_context_fence(
             }
             let b = present(object)?;
             b.core.live()?;
-            if b.capture.load(std::sync::atomic::Ordering::Relaxed) {
-                if let Some(cap) = b.lock().0.capture.as_mut() {
-                    cap.mark(id, token, 1);
-                }
+            if b.capture.load(Ordering::Relaxed)
+                && let Some(cap) = b.lock().0.capture.as_mut()
+            {
+                cap.mark(id, token, 1);
             }
             let fence = {
                 let guard = b.lock();
@@ -3368,10 +3367,10 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_export_fd(
             }
             let b = present(object)?;
             b.core.live()?;
-            if b.capture.load(std::sync::atomic::Ordering::Relaxed) {
-                if let Some(cap) = b.lock().0.capture.as_mut() {
-                    cap.mark(0, id, 2 + opaque);
-                }
+            if b.capture.load(Ordering::Relaxed)
+                && let Some(cap) = b.lock().0.capture.as_mut()
+            {
+                cap.mark(0, id, 2 + opaque);
             }
             let fd = if opaque != 0 {
                 // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.

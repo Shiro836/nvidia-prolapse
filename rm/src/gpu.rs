@@ -220,7 +220,7 @@ struct MappingPlan {
 /// Turing+ PTE kinds (public tu102/gb202 dev_mmu.h).
 const KIND_GENERIC: u32 = 0x06;
 const KIND_GENERIC_COMPRESSIBLE: u32 = 0x08;
-const BIG_PAGE: u64 = u64_from_usize(crate::rm::BIG_PAGE);
+const BIG_PAGE: u64 = u64_from_usize(rm::BIG_PAGE);
 
 /// The PTE kind a VA may carry for this memory. NVK asks for the generic
 /// compressible kind for images it decided to compress; only memory RM made
@@ -252,7 +252,7 @@ fn mapping_plan(
         allocation_size,
         address,
         kind,
-        crate::rm::PhysicalPages::Small4K,
+        rm::PhysicalPages::Small4K,
         KIND_GENERIC,
     )
 }
@@ -274,7 +274,7 @@ fn mapping_plan_paged(
     allocation_size: u64,
     address: Option<u64>,
     kind: Option<u32>,
-    pages: crate::rm::PhysicalPages,
+    pages: rm::PhysicalPages,
     generic_kind: u32,
 ) -> Result<MappingPlan> {
     if length == 0
@@ -302,8 +302,8 @@ fn mapping_plan_paged(
     // RM picks the kind (observed in stock's RM alloc requests).
     let s8_chooser = generic_kind != KIND_GENERIC && kind == Some(KIND_S8);
     let typed = kind.is_some() && (!compat.supports_kind_override() || s8_chooser);
-    if pages == crate::rm::PhysicalPages::Huge2M {
-        let block = u64_from_usize(crate::rm::POOL_BLOCK_SIZE);
+    if pages == rm::PhysicalPages::Huge2M {
+        let block = u64_from_usize(rm::POOL_BLOCK_SIZE);
         if kind.is_some()
             || offset != 0
             || length != block
@@ -319,7 +319,7 @@ fn mapping_plan_paged(
             wire_kind: 0,
         });
     }
-    let big_pages = pages == crate::rm::PhysicalPages::Big64K;
+    let big_pages = pages == rm::PhysicalPages::Big64K;
     let big = big_pages
         && offset.is_multiple_of(BIG_PAGE)
         && length.is_multiple_of(BIG_PAGE)
@@ -408,7 +408,7 @@ impl AddressSpace {
         kind: u32,
     ) -> Result<GpuMapping> {
         // A pool block maps without a kind; nvkmd's kind 0 means "none".
-        let kind = if memory.pages == crate::rm::PhysicalPages::Huge2M && kind == 0 {
+        let kind = if memory.pages == rm::PhysicalPages::Huge2M && kind == 0 {
             None
         } else {
             Some(kind)
@@ -2347,11 +2347,11 @@ mod compression_tests {
     #[test]
     fn stock_compressible_request_attr() {
         // Stock 615 RM requests: 64 KiB/8 MiB 0x01002000, >= 16 MiB 0x09002000.
-        assert_eq!(crate::rm::compressible_attr(64 << 10), 0x0100_2000);
-        assert_eq!(crate::rm::compressible_attr(8 << 20), 0x0100_2000);
-        assert_eq!(crate::rm::compressible_attr(16 << 20), 0x0900_2000);
-        assert!(crate::rm::compression_granted(0x0900_1000)); // RM answer: COMPR REQUIRED
-        assert!(!crate::rm::compression_granted(0x0900_0000));
+        assert_eq!(rm::compressible_attr(64 << 10), 0x0100_2000);
+        assert_eq!(rm::compressible_attr(8 << 20), 0x0100_2000);
+        assert_eq!(rm::compressible_attr(16 << 20), 0x0900_2000);
+        assert!(rm::compression_granted(0x0900_1000)); // RM answer: COMPR REQUIRED
+        assert!(!rm::compression_granted(0x0900_0000));
     }
     /// Pascal (generic kind 0xfe) on 550 (typed VA) vs 580 (kindOverride):
     /// the typed VA must ask RM for a block-linear kind, the 580 plan and every
@@ -2369,7 +2369,7 @@ mod compression_tests {
                 1 << 24,
                 Some(1 << 34),
                 kind,
-                crate::rm::PhysicalPages::Small4K,
+                rm::PhysicalPages::Small4K,
                 generic,
             )
             .unwrap()
@@ -2442,7 +2442,7 @@ mod compression_tests {
             1 << 24,
             Some(1 << 34),
             Some(0x11),
-            crate::rm::PhysicalPages::Small4K,
+            rm::PhysicalPages::Small4K,
             G,
         )
         .unwrap();
@@ -2462,7 +2462,7 @@ mod compression_tests {
                 1 << 24,
                 Some(1 << 34),
                 Some(kind),
-                crate::rm::PhysicalPages::Small4K,
+                rm::PhysicalPages::Small4K,
                 generic,
             )
             .unwrap()
@@ -2490,7 +2490,7 @@ mod compression_tests {
     #[ignore = "requires an NVIDIA RM device; VA reservations only, no GPU commands"]
     fn typed_va_kind_sweep() {
         use std::fs::OpenOptions;
-        let client = crate::rm::Client::open().unwrap();
+        let client = rm::Client::open().unwrap();
         let card = client
             .cards()
             .unwrap()
@@ -2590,7 +2590,7 @@ mod compression_tests {
                 1 << 24,
                 Some(address),
                 Some(6),
-                crate::rm::PhysicalPages::Big64K,
+                rm::PhysicalPages::Big64K,
                 KIND_GENERIC,
             )
             .unwrap()
@@ -2608,7 +2608,7 @@ mod compression_tests {
             1 << 24,
             Some(1 << 34),
             Some(6),
-            crate::rm::PhysicalPages::Small4K,
+            rm::PhysicalPages::Small4K,
             KIND_GENERIC,
         )
         .unwrap();
@@ -2621,7 +2621,7 @@ mod compression_tests {
                 1 << 24,
                 Some(1 << 34),
                 Some(8),
-                crate::rm::PhysicalPages::Big64K,
+                rm::PhysicalPages::Big64K,
                 KIND_GENERIC
             )
             .is_err()

@@ -22,9 +22,7 @@
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
     clippy::bool_to_int_with_if,
-    clippy::collapsible_if,
     clippy::doc_markdown,
-    clippy::explicit_iter_loop,
     clippy::items_after_statements,
     clippy::many_single_char_names,
     clippy::mem_forget,
@@ -32,7 +30,6 @@
     clippy::missing_panics_doc,
     clippy::needless_continue,
     clippy::needless_pass_by_value,
-    clippy::redundant_closure_for_method_calls,
     clippy::similar_names,
     clippy::single_match_else,
     clippy::struct_excessive_bools,
@@ -43,7 +40,6 @@
     clippy::wildcard_enum_match_arm,
     missing_debug_implementations,
     missing_docs,
-    unused_qualifications,
     reason = "pre-standard code; cleanup tracked"
 )]
 #![cfg_attr(

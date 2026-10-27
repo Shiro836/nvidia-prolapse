@@ -20,8 +20,7 @@ use std::{os::fd::AsRawFd, rc::Rc, time::Duration};
 const NV2080_ENGINE_TYPE_NVDEC0: u32 = 0x13;
 const ENTRIES: usize = 1024;
 /// `NVC9B0_ALLOCATION_PARAMETERS` size, as its `size` field records it.
-const DECODER_PARAMS_SIZE: u32 =
-    const_u32_from_usize(std::mem::size_of::<crate::abi::VideoDecoder>());
+const DECODER_PARAMS_SIZE: u32 = const_u32_from_usize(size_of::<crate::abi::VideoDecoder>());
 const COMMAND_BYTES: usize = 65536;
 
 pub struct NvdecChannel {

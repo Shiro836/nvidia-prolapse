@@ -117,8 +117,7 @@ pub struct VideoChannel {
 
 const ENTRIES: usize = 1024;
 /// `NVC9B0_ALLOCATION_PARAMETERS` size, as its `size` field records it.
-const DECODER_PARAMS_SIZE: u32 =
-    const_u32_from_usize(std::mem::size_of::<crate::abi::VideoDecoder>());
+const DECODER_PARAMS_SIZE: u32 = const_u32_from_usize(size_of::<crate::abi::VideoDecoder>());
 
 impl VideoChannel {
     pub fn new(device: &Rc<Device>) -> Result<Self> {
@@ -750,7 +749,7 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
             method(&mut words, 4, 0x300, &[0]); // EXECUTE
             report.frame_times.push(ch.run(words)?);
             report.decoded += 1;
-            let mut counts_raw = vec![0u8; std::mem::size_of::<Vp9EntropyCounts>()];
+            let mut counts_raw = vec![0u8; size_of::<Vp9EntropyCounts>()];
             // Sound only after the GPU handoff: ch.run (synchronous submit + wait) above completed this frame.
             desc_cpu.read_bytes(VP9_COUNTS, &mut counts_raw)?;
             let counts = Vp9EntropyCounts::from_bytes(&counts_raw);

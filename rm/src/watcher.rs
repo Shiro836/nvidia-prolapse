@@ -324,10 +324,8 @@ impl Watcher {
                 changed |= shared.fail();
             }
         }
-        if changed {
-            if let Err(error) = core.trigger.trigger() {
-                diag!("RM final shared publication: {error}");
-            }
+        if changed && let Err(error) = core.trigger.trigger() {
+            diag!("RM final shared publication: {error}");
         }
     }
     /// Device loss: fail shared payloads still awaiting local completion and
@@ -360,10 +358,8 @@ impl Watcher {
             core.pool.release(slot);
         }
         drop(state);
-        if changed {
-            if let Err(error) = core.trigger.trigger() {
-                diag!("RM publish device loss: {error}");
-            }
+        if changed && let Err(error) = core.trigger.trigger() {
+            diag!("RM publish device loss: {error}");
         }
     }
 }
@@ -441,10 +437,10 @@ fn run(core: &Arc<Core>) {
             }
             return;
         }
-        if readiness.observed(watcher.wake.as_raw_fd()) {
-            if let Err(error) = watcher.wake.drain() {
-                diag!("RM foreign watcher wake drain: {error}");
-            }
+        if readiness.observed(watcher.wake.as_raw_fd())
+            && let Err(error) = watcher.wake.drain()
+        {
+            diag!("RM foreign watcher wake drain: {error}");
         }
         service(core, &readiness, host);
     }
@@ -584,10 +580,8 @@ fn service(core: &Arc<Core>, readiness: &Readiness, host: Option<RawFd>) {
         });
     }
     drop(state);
-    if broadcast {
-        if let Err(error) = core.trigger.trigger() {
-            diag!("RM shared broadcast: {error}");
-        }
+    if broadcast && let Err(error) = core.trigger.trigger() {
+        diag!("RM shared broadcast: {error}");
     }
     if lost && !core.is_lost() {
         core.mark_lost();

@@ -343,19 +343,19 @@ impl Drop for HostListener {
             .expect("an event source holds its resources until it is dropped")
             .device;
         let raw = self.as_raw_fd();
-        if self.listener != 0 {
-            if let Err(error) = device.client.free(device.subdevice, self.listener) {
-                // Keep the descriptor/OS event alive: RM may still post to it.
-                diag!("RM extra HOST listener teardown failed; retaining it: {error}");
-                std::mem::forget(self.fd.take());
-                return;
-            }
+        if self.listener != 0
+            && let Err(error) = device.client.free(device.subdevice, self.listener)
+        {
+            // Keep the descriptor/OS event alive: RM may still post to it.
+            diag!("RM extra HOST listener teardown failed; retaining it: {error}");
+            std::mem::forget(self.fd.take());
+            return;
         }
-        if self.os_event {
-            if let Err(error) = os_event(device, raw, false) {
-                diag!("RM extra HOST OS event free failed; retaining fd: {error}");
-                std::mem::forget(self.fd.take());
-            }
+        if self.os_event
+            && let Err(error) = os_event(device, raw, false)
+        {
+            diag!("RM extra HOST OS event free failed; retaining fd: {error}");
+            std::mem::forget(self.fd.take());
         }
     }
 }
@@ -364,7 +364,7 @@ impl Drop for HostListener {
 /// shared opaque payload changes. Valid while the owning Bridge is open.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TriggerPort {
-    port: crate::rm::ControlPort,
+    port: rm::ControlPort,
     subdevice: u32,
 }
 impl TriggerPort {

@@ -141,10 +141,10 @@ impl Waiters {
             return;
         }
         self.bump();
-        if self.leader.load(Ordering::SeqCst) {
-            if let Err(error) = self.wake.notify() {
-                diag!("RM waiter wake failed: {error}");
-            }
+        if self.leader.load(Ordering::SeqCst)
+            && let Err(error) = self.wake.notify()
+        {
+            diag!("RM waiter wake failed: {error}");
         }
     }
 

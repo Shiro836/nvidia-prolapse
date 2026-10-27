@@ -15,10 +15,8 @@
 #![expect(
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
-    clippy::collapsible_if,
     clippy::default_trait_access,
     clippy::doc_markdown,
-    clippy::explicit_iter_loop,
     clippy::if_not_else,
     clippy::items_after_statements,
     clippy::manual_midpoint,
@@ -27,7 +25,6 @@
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::needless_range_loop,
-    clippy::redundant_closure_for_method_calls,
     clippy::same_functions_in_if_condition,
     clippy::semicolon_if_nothing_returned,
     clippy::similar_names,
@@ -41,7 +38,6 @@
     missing_debug_implementations,
     missing_docs,
     unreachable_pub,
-    unused_qualifications,
     reason = "pre-standard code; cleanup tracked"
 )]
 #![cfg_attr(

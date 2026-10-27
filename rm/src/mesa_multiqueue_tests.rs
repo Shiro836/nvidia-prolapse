@@ -81,7 +81,7 @@ impl Work {
         let guard = b.lock();
         let inner = &guard.0;
         let (device, space) = (&inner.device, &inner.space);
-        let compute = crate::capabilities::query(device).unwrap().compute;
+        let compute = capabilities::query(device).unwrap().compute;
         let out_mem = device.allocate_vram(INVOCATIONS * 4).unwrap();
         let out_va = space.map(&out_mem).unwrap();
         let mut out = out_mem.map().unwrap();

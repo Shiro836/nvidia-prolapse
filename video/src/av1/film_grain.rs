@@ -101,7 +101,7 @@ pub fn build(seq: &SequenceHeader, g: &FilmGrainParams, out: &mut [u8]) {
     let mut luma = vec![[0i32; 82]; 73];
     let shift = 12 - bd + u32::from(g.grain_scale_shift);
     let mut rng = Rng(g.grain_seed);
-    for row in luma.iter_mut() {
+    for row in &mut luma {
         for v in row.iter_mut() {
             let x = if g.num_y_points > 0 {
                 i32::from(GAUSSIAN_SEQUENCE[rng.next(11)])
