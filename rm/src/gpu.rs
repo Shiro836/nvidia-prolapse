@@ -6,7 +6,7 @@
 use crate::diag::diag;
 use crate::{
     abi,
-    rm::{self, Device, Error, Memory, Result, WaitError},
+    rm::{self, ChannelError, Device, Error, Memory, MemoryError, Result, WaitError},
     slots::{Slot, SlotPool},
 };
 use nv_rm_core::conv::{const_u32_from_usize, high_u32, low_u32, u64_from_usize, usize_from_u32};
@@ -39,7 +39,10 @@ impl Object {
         let handle = device
             .client
             .allocate(parent, class, parameters)
-            .map_err(|e| Error::Contract(format!("allocate RM class {class:#x}: {e}")))?;
+            .map_err(|source| ChannelError::Allocate {
+                class,
+                source: Box::new(source),
+            })?;
         Ok(Rc::new(Self {
             device: Rc::clone(device),
             handle,
@@ -91,7 +94,10 @@ impl Object {
                     .client
                     .control(device.subdevice, 0x20800124, &mut query)?;
                 if query.count == 0 || query.count > 65536 {
-                    return Err(Error::Contract("invalid RM engine class count".into()));
+                    return Err(ChannelError::ClassList {
+                        reason: "invalid class count",
+                    }
+                    .into());
                 }
                 let mut classes = vec![0u32; usize_from_u32(query.count)];
                 query.classes = u64_from_usize(classes.as_mut_ptr().expose_provenance());
@@ -99,9 +105,10 @@ impl Object {
                     .client
                     .control(device.subdevice, 0x20800124, &mut query)?;
                 if usize_from_u32(query.count) > classes.len() {
-                    return Err(Error::Contract(
-                        "RM engine class count grew during query".into(),
-                    ));
+                    return Err(ChannelError::ClassList {
+                        reason: "class count grew during query",
+                    }
+                    .into());
                 }
                 Ok(classes[..usize_from_u32(query.count)].contains(&class))
             },
@@ -289,9 +296,12 @@ fn mapping_plan_paged(
         })
         || kind.is_some_and(|kind| kind > 255)
     {
-        return Err(Error::Contract(
-            "GPU mapping exceeds memory/VA/kind limits".into(),
-        ));
+        return Err(MemoryError::GpuMappingLimits {
+            offset,
+            length,
+            allocation_size,
+        }
+        .into());
     }
     // Pre-Turing S8 always comes from RM's chooser (typed VA), also on drivers
     // with kindOverride: closed 580.178.04 on GP100 refuses kindOverride 0x2a
@@ -309,9 +319,11 @@ fn mapping_plan_paged(
             || length != block
             || address.is_some_and(|a| !a.is_multiple_of(block))
         {
-            return Err(Error::Contract(
-                "a huge-page pool block maps whole, without a kind, at a 2 MiB aligned VA".into(),
-            ));
+            return Err(MemoryError::Invalid {
+                operation: "GPU-map a huge-page pool block",
+                reason: "a huge-page pool block maps whole, without a kind, at a 2 MiB aligned VA",
+            }
+            .into());
         }
         return Ok(MappingPlan {
             typed: None,
@@ -326,9 +338,11 @@ fn mapping_plan_paged(
         && address.is_some_and(|a| a.is_multiple_of(BIG_PAGE));
     if kind == Some(KIND_GENERIC_COMPRESSIBLE) && big_pages && !big {
         // RM rejects compressed PTEs at a VA not aligned to the big page.
-        return Err(Error::Contract(
-            "compressed mapping must be 64 KiB aligned in offset, size and VA".into(),
-        ));
+        return Err(MemoryError::Invalid {
+            operation: "GPU-map compressed memory",
+            reason: "compressed mapping must be 64 KiB aligned in offset, size and VA",
+        }
+        .into());
     }
     Ok(MappingPlan {
         typed: if typed {
@@ -453,9 +467,11 @@ impl AddressSpace {
             generic_kind,
         )?;
         if !Rc::ptr_eq(&self.device, &memory.device) {
-            return Err(Error::Contract(
-                "cross-device mapping needs explicit peer support".into(),
-            ));
+            return Err(MemoryError::Invalid {
+                operation: "GPU-map memory",
+                reason: "cross-device mapping needs explicit peer support",
+            }
+            .into());
         }
         // Before kindOverride, a typed virtual allocation carries the kind.
         // Public535 virtual_mem.c + dma.c: reservation belongs to NV50_MEMORY_VIRTUAL,
@@ -507,9 +523,10 @@ impl AddressSpace {
             || address.is_some_and(|expected| expected != call.address)
         {
             // Owned mapping rolls back before the reservation is freed.
-            return Err(Error::Contract(
-                "RM returned invalid or displaced GPU VA".into(),
-            ));
+            return Err(MemoryError::GpuVa {
+                address: call.address,
+            }
+            .into());
         }
         Ok(mapping)
     }
@@ -517,10 +534,7 @@ impl AddressSpace {
 /// Pre-Turing typed VA: RM's chosen kind must be the requested one.
 fn typed_kind_check(generic_kind: u32, requested: u32, chosen: u32) -> Result<()> {
     if generic_kind != KIND_GENERIC && chosen != requested {
-        return Err(Error::Contract(format!(
-            "RM chose PTE kind {chosen:#x} for a typed VA that requested kind {requested:#x} \
-             (driver without kindOverride, pre-Turing); refusing the mapping"
-        )));
+        return Err(MemoryError::KindMismatch { chosen, requested }.into());
     }
     Ok(())
 }
@@ -599,9 +613,11 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
     let classes = device.classes()?;
     for required in [0xc661, 0xc96f, engine_class] {
         if !classes.contains(&required) {
-            return Err(Error::Contract(format!(
-                "copy backend requires RM class {required:#x}, absent from device"
-            )));
+            return Err(ChannelError::MissingClass {
+                operation: "copy backend",
+                class: required,
+            }
+            .into());
         }
     }
     let space = AddressSpace::new(device)?;
@@ -765,9 +781,12 @@ fn run_check(device: &Rc<Device>, compute: bool) -> Result<usize> {
         };
         let actual = dst.read_u32(i * 4)?;
         if actual != expected {
-            return Err(Error::Contract(format!(
-                "GPU result mismatch word {i}: {actual:#x} != {expected:#x}"
-            )));
+            return Err(ChannelError::ResultMismatch {
+                word: i,
+                actual,
+                expected,
+            }
+            .into());
         }
     }
     // Stop scheduling before destroying the channel and releasing its mappings.
@@ -787,9 +806,7 @@ pub(crate) fn modern_host(channel: u32) -> Result<bool> {
     match channel {
         0xc36f | 0xc46f | 0xc56f | 0xc76f | 0xc86f | 0xc96f | 0xca6f => Ok(true),
         0xa06f | 0xa16f | 0xb06f | 0xc06f => Ok(false),
-        _ => Err(Error::Contract(format!(
-            "unimplemented host method class {channel:#x}"
-        ))),
+        _ => Err(ChannelError::HostClass { class: channel }.into()),
     }
 }
 fn host_visibility(words: &mut Vec<u32>, channel: u32) -> Result<()> {
@@ -820,9 +837,7 @@ fn host_semaphore(
     timestamp: bool,
 ) -> Result<()> {
     if !address.is_multiple_of(16) || address >= 1 << 40 {
-        return Err(Error::Contract(
-            "unaligned or out-of-range host semaphore address".into(),
-        ));
+        return Err(ChannelError::SemaphoreAddress { address }.into());
     }
     if modern_host(channel)? {
         let operation = if acquire {
@@ -844,9 +859,11 @@ fn host_semaphore(
         );
     } else {
         if native64 {
-            return Err(Error::Contract(
-                "pre-Volta host lacks native64 semaphore payload".into(),
-            ));
+            return Err(ChannelError::Unsupported {
+                operation: "host semaphore",
+                reason: "pre-Volta host lacks native64 semaphore payload",
+            }
+            .into());
         }
         // Legacy RELEASE_WFI_EN is zero, unlike the modern SEM_EXECUTE bit.
         let operation = if acquire {
@@ -920,9 +937,10 @@ impl Tsg {
     fn keep_veid0_share(&self, share: Rc<Object>) -> Result<()> {
         let mut slot = self.veid0_share.borrow_mut();
         if slot.is_some() {
-            return Err(Error::Contract(
-                "TSG already has a VEID 0 context share".into(),
-            ));
+            return Err(ChannelError::Group {
+                reason: "already has a VEID 0 context share",
+            }
+            .into());
         }
         *slot = Some(share);
         Ok(())
@@ -930,9 +948,10 @@ impl Tsg {
     fn keep_zcull(&self, mapping: GpuMapping) -> Result<()> {
         let mut zcull = self.zcull.borrow_mut();
         if zcull.is_some() {
-            return Err(Error::Contract(
-                "TSG already has a ZCULL context-switch buffer bound".into(),
-            ));
+            return Err(ChannelError::Group {
+                reason: "already has a ZCULL context-switch buffer bound",
+            }
+            .into());
         }
         *zcull = Some(mapping);
         Ok(())
@@ -950,7 +969,9 @@ struct Subcontext {
 impl Subcontext {
     fn take(tsg: Rc<Tsg>) -> Result<Self> {
         let (veid, rest) = lowest_free_veid(tsg.free_veids.get()).ok_or_else(|| {
-            Error::Contract("TSG has no free subcontext (all 64 VEIDs in use)".into())
+            Error::from(ChannelError::Group {
+                reason: "has no free subcontext (all 64 VEIDs in use)",
+            })
         })?;
         tsg.free_veids.set(rest);
         Ok(Self { veid, tsg })
@@ -1049,10 +1070,19 @@ impl QueueShared {
     }
     pub(crate) fn retired(&self, token: u64) -> Result<bool> {
         if self.lost.load(Ordering::Acquire) {
-            return Err(Error::DeviceLost("persistent RM channel is lost".into()));
+            return Err(ChannelError::Lost {
+                operation: "query retirement",
+            }
+            .into());
         }
-        if token > self.sequence.load(Ordering::Acquire) {
-            return Err(Error::Contract("unissued RM completion token".into()));
+        let issued = self.sequence.load(Ordering::Acquire);
+        if token > issued {
+            return Err(ChannelError::Token {
+                operation: "query retirement",
+                token,
+                issued,
+            }
+            .into());
         }
         Ok(token == 0 || self.completed()? >= token)
     }
@@ -1160,13 +1190,12 @@ pub(crate) fn timeline_release(
 
 /// Right-align mutable methods before the slot's immutable interrupt suffix.
 fn completion_tail_offset(words: usize) -> Result<usize> {
-    let bytes = words
-        .checked_mul(4)
-        .ok_or_else(|| Error::Contract("host command size overflow".into()))?;
+    let too_large = || ChannelError::HostMethodsTooLarge { words };
+    let bytes = words.checked_mul(4).ok_or_else(too_large)?;
     let offset = (TAIL_STRIDE - TAIL_IRQ_BYTES)
         .checked_sub(bytes)
         .filter(|offset| *offset >= TAIL_PREFIX_BYTES)
-        .ok_or_else(|| Error::Contract("host methods exceed reserved command slot".into()))?;
+        .ok_or_else(too_large)?;
     Ok(offset)
 }
 
@@ -1255,7 +1284,13 @@ impl SubmissionLedger {
         waits: usize,
     ) -> Result<std::result::Result<(u64, usize), u64>> {
         if entries == 0 || entries >= QUEUE_ENTRIES || waits > 1024 {
-            return Err(Error::Contract("batch exceeds queue capacity".into()));
+            return Err(ChannelError::Batch {
+                operation: "reserve ring entries",
+                entries,
+                waits,
+                signals: 0,
+            }
+            .into());
         }
         // Leave one entry unused: PUT==GET must never describe a full ring.
         if self.used_entries + entries >= QUEUE_ENTRIES {
@@ -1270,7 +1305,7 @@ impl SubmissionLedger {
             .sequence
             .checked_add(u64_from_usize(waits))
             .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| Error::Contract("GPU completion sequence exhausted".into()))?;
+            .ok_or(ChannelError::SequenceExhausted)?;
         let slot = self
             .pending
             .back()
@@ -1298,9 +1333,11 @@ impl SubmissionLedger {
                     .token));
             }
             if too_far {
-                return Err(Error::Contract(
-                    "sem32 submission exceeds half range".into(),
-                ));
+                return Err(ChannelError::Sem32Range {
+                    token,
+                    retired: self.retired,
+                }
+                .into());
             }
         }
         Ok(next)
@@ -1316,9 +1353,10 @@ impl SubmissionLedger {
     }
     fn retire(&mut self, completed: u64) -> Result<()> {
         if completed > self.sequence || completed < self.retired {
-            return Err(Error::Contract(
-                "GPU completion outside issued timeline".into(),
-            ));
+            return Err(ChannelError::Timeline {
+                reason: "GPU completion outside issued timeline",
+            }
+            .into());
         }
         // Intermediate imported-wait values never retire a batch's storage.
         while self.pending.front().is_some_and(|p| p.token <= completed) {
@@ -1372,9 +1410,11 @@ fn bind_zcull(device: &Rc<Device>, space: &AddressSpace, channel: u32) -> Result
         .client
         .control(device.handle, 0x801707, &mut properties)?;
     if properties.size == 0 {
-        return Err(Error::Contract(
-            "RM reports no GRAPHICS_ZCULL context size; graphics channel cannot bind ZCULL".into(),
-        ));
+        return Err(ChannelError::Unsupported {
+            operation: "bind ZCULL",
+            reason: "RM reports no GRAPHICS_ZCULL context size; graphics channel cannot bind ZCULL",
+        }
+        .into());
     }
     let memory = device.allocate_vram(usize_from_u32(properties.size))?;
     let mapping = space.map(&memory)?;
@@ -1383,9 +1423,10 @@ fn bind_zcull(device: &Rc<Device>, space: &AddressSpace, channel: u32) -> Result
         .checked_add(mapping.length())
         .is_none_or(|end| end >= 16 << 30)
     {
-        return Err(Error::Contract(
-            "internal GPU allocation collides with Mesa VA heap".into(),
-        ));
+        return Err(ChannelError::VaHeapCollision {
+            what: "internal GPU allocation",
+        }
+        .into());
     }
     let mut bind = abi::ZcullBind {
         client: device.client.root,
@@ -1447,7 +1488,7 @@ impl Queue {
     ) -> Result<Self> {
         // On error the caller still owns `retire`; on success QueueShared does.
         if mask == 0 || mask & !31 != 0 {
-            return Err(Error::Contract("unsupported GPU engine mask".into()));
+            return Err(ChannelError::EngineMask { mask }.into());
         }
         let caps = crate::capabilities::query(device)?;
         let modern = caps.usermode.is_some();
@@ -1459,9 +1500,7 @@ impl Queue {
             // with the graphics channel, and it too carries the compute class
             // only (stock 580.178.04 on GP10x).
             if mask != 16 {
-                return Err(Error::Contract(format!(
-                    "a context in a shared TSG supports only the compute engine (mask 0x10), got {mask:#x}"
-                )));
+                return Err(ChannelError::SharedGroupEngine { mask }.into());
             }
             if modern {
                 device.client.compat.require_constant(
@@ -1470,9 +1509,10 @@ impl Queue {
                 )?;
             }
             if !Rc::ptr_eq(&share.subcontext.tsg.object.device, device) {
-                return Err(Error::Contract(
-                    "a shared TSG belongs to another RM device".into(),
-                ));
+                return Err(ChannelError::Group {
+                    reason: "is shared from another RM device",
+                }
+                .into());
             }
         }
         // Public NV_CHANNELGPFIFO_ALLOCATION_PARAMETERS.hObjectError accepts
@@ -1509,9 +1549,10 @@ impl Queue {
                 .checked_add(va.length)
                 .is_none_or(|end| end >= 16 << 30)
             {
-                return Err(Error::Contract(
-                    "internal GPU allocation collides with Mesa VA heap".into(),
-                ));
+                return Err(ChannelError::VaHeapCollision {
+                    what: "internal GPU allocation",
+                }
+                .into());
             }
         }
         let tsg = match share {
@@ -1652,9 +1693,11 @@ impl Queue {
         let bar1_doorbell = caps.usermode.is_some_and(|class| class >= 0xc661);
         let completion = crate::fences::NativeFenceSurface::new(device, space, channel.handle)?;
         if !modern && completion.native64() {
-            return Err(Error::Contract(
-                "pre-Volta channel and native64 surface capability disagree".into(),
-            ));
+            return Err(ChannelError::Unsupported {
+                operation: "create a channel",
+                reason: "pre-Volta channel and native64 surface capability disagree",
+            }
+            .into());
         }
         // Retirement follows the public completion surface's width (as before).
         // Last fallible step before the slot reference moves into QueueShared.
@@ -1744,9 +1787,11 @@ impl Queue {
     /// membar, RELEASE_WFI) of every later submission. Volta+ host only.
     pub(crate) fn enable_timing(&mut self, space: &AddressSpace) -> Result<()> {
         if !modern_host(self.channel_class)? {
-            return Err(Error::Contract(
-                "perf capture timestamps need a Volta+ host class (SEM_EXECUTE)".into(),
-            ));
+            return Err(ChannelError::Unsupported {
+                operation: "perf capture timestamps",
+                reason: "need a Volta+ host class (SEM_EXECUTE)",
+            }
+            .into());
         }
         let bytes = crate::capture::TS_ENTRIES * 32;
         let mem = self
@@ -1783,7 +1828,10 @@ impl Queue {
     /// ordinary submission or status query.
     pub(crate) fn check_error(&mut self) -> Result<()> {
         if self.lost {
-            return Err(Error::Contract("persistent RM channel is lost".into()));
+            return Err(ChannelError::LostChannel {
+                operation: "scan the channel error notifier",
+            }
+            .into());
         }
         crate::platform::device_read_barrier();
         if self.error_notifier.read_u32(12)? >> 16 == 0xffff {
@@ -1796,16 +1844,16 @@ impl Queue {
             let word12 = self.error_notifier.read_u32(12)?;
             let stamp = u64::from(self.error_notifier.read_u32(0)?)
                 | (u64::from(self.error_notifier.read_u32(4)?) << 32);
-            return Err(Error::Contract(format!(
-                "GPU channel error {} at PUT={} sequence={}; device lost \
-                 (host class {:#x}, notifier info16={:#06x} status={:#06x} timeStamp={stamp:#x})",
-                self.error_notifier.read_u32(8)?,
-                self.put,
-                self.ledger.sequence,
-                self.channel_class,
-                word12 & 0xffff,
-                word12 >> 16
-            )));
+            return Err(ChannelError::Rc {
+                error: self.error_notifier.read_u32(8)?,
+                put: self.put,
+                sequence: self.ledger.sequence,
+                host_class: self.channel_class,
+                info16: word12 & 0xffff,
+                status: word12 >> 16,
+                timestamp: stamp,
+            }
+            .into());
         }
         Ok(())
     }
@@ -1818,7 +1866,10 @@ impl Queue {
     /// the submitting caller (stock retires temporaries at end of submit too).
     pub(crate) fn retire_completion(&mut self) -> Result<()> {
         if self.lost {
-            return Err(Error::Contract("persistent RM channel is lost".into()));
+            return Err(ChannelError::LostChannel {
+                operation: "retire completed batches",
+            }
+            .into());
         }
         if self.ledger.pending.is_empty() {
             return Ok(());
@@ -1829,9 +1880,10 @@ impl Queue {
         // retirement ordering rather than silently accepting a corrupt value.
         if completed > self.completion.read_completed()? {
             self.mark_lost();
-            return Err(Error::Contract(
-                "retirement preceded public completion".into(),
-            ));
+            return Err(ChannelError::Timeline {
+                reason: "retirement preceded public completion",
+            }
+            .into());
         }
         if let Err(e) = self.ledger.retire(completed) {
             self.mark_lost();
@@ -1853,8 +1905,19 @@ impl Queue {
     /// # Safety
     /// `drm_fd` is negative (rejected) or an open descriptor for the whole call.
     pub(crate) unsafe fn context_fence(&self, drm_fd: i32, token: u64) -> Result<OwnedFd> {
-        if self.lost || token == 0 || token > self.ledger.sequence {
-            return Err(Error::Contract("invalid/lost RM completion token".into()));
+        if self.lost {
+            return Err(ChannelError::LostChannel {
+                operation: "export a context fence",
+            }
+            .into());
+        }
+        if token == 0 || token > self.ledger.sequence {
+            return Err(ChannelError::Token {
+                operation: "export a context fence",
+                token,
+                issued: self.ledger.sequence,
+            }
+            .into());
         }
         // SAFETY: `drm_fd` is this function's, under its contract.
         unsafe { self.completion.context_fence(drm_fd, token) }
@@ -1882,9 +1945,10 @@ impl Queue {
             .checked_add(u64_from_usize(bytes))
             .is_none_or(|end| end >= 1 << 34)
         {
-            return Err(Error::Contract(
-                "GPU dependency commands collide with Mesa VA heap".into(),
-            ));
+            return Err(ChannelError::VaHeapCollision {
+                what: "GPU dependency commands",
+            }
+            .into());
         }
         Ok((cpu, gpu))
     }
@@ -1917,18 +1981,20 @@ impl Queue {
         before_kick: impl FnOnce(u64) -> Result<()>,
     ) -> Result<SubmitStatus> {
         if self.stopped {
-            return Err(Error::Contract(
-                "cannot submit to a stopped RM channel".into(),
-            ));
+            return Err(ChannelError::Stopped.into());
         }
         if pushes.len() > 1000
             || pushes.last().is_some_and(|p| p.flags & 2 != 0)
             || waits.len() > 1024
             || signals.len() > 65536
         {
-            return Err(Error::Contract(
-                "invalid/incomplete GPFIFO batch or waits".into(),
-            ));
+            return Err(ChannelError::Batch {
+                operation: "submit",
+                entries: pushes.len(),
+                waits: waits.len(),
+                signals: signals.len(),
+            }
+            .into());
         }
         for p in pushes {
             if p.address & 3 != 0
@@ -1941,9 +2007,12 @@ impl Queue {
                 || p.size >= 1 << 23
                 || p.flags & !3 != 0
             {
-                return Err(Error::Contract(
-                    "GPFIFO push outside hardware limits".into(),
-                ));
+                return Err(ChannelError::Push {
+                    address: p.address,
+                    size: p.size,
+                    flags: p.flags,
+                }
+                .into());
             }
         }
         self.retire_completion()?;
@@ -2145,15 +2214,13 @@ impl Queue {
             if !self.bar1_doorbell {
                 let visible = self.ring.read_u32(8192 + 0x8c)?;
                 if visible != put {
-                    return Err(Error::Contract(format!(
-                        "GP_PUT read back {visible} after writing {put}; channel state unknown"
-                    )));
+                    return Err(ChannelError::PutReadback { visible, put }.into());
                 }
                 crate::platform::device_full_barrier();
             }
             self.doorbell
                 .as_mut()
-                .ok_or_else(|| Error::Contract("missing modern doorbell".into()))?
+                .ok_or(ChannelError::Doorbell)?
                 .write_u32(0x90, self.token)?;
         }
         Ok(())

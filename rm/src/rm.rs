@@ -17,7 +17,7 @@ use std::{
 };
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-pub use nv_rm_core::error::{Error, Result, SyncError, WaitError};
+pub use nv_rm_core::error::{ChannelError, Error, MemoryError, Result, SyncError, WaitError};
 pub(crate) fn status(operation: &'static str, value: u32) -> Result<()> {
     if value == 0 {
         Ok(())
@@ -538,11 +538,9 @@ impl Device {
         system: bool,
         kind: u32,
     ) -> Result<Rc<Memory>> {
-        if kind != self.generic_kind()? {
-            return Err(Error::Contract(format!(
-                "block-linear memory kind {kind:#x} is not the uncompressed generic kind {:#x}",
-                self.generic_kind()?
-            )));
+        let generic = self.generic_kind()?;
+        if kind != generic {
+            return Err(MemoryError::BlockLinearKind { kind, generic }.into());
         }
         self.allocate_placed(requested_size, alignment, false, system, false, Some(kind))
     }
@@ -557,9 +555,11 @@ impl Device {
         alignment: usize,
     ) -> Result<Rc<Memory>> {
         if !requested_size.is_multiple_of(BIG_PAGE) {
-            return Err(Error::Contract(
-                "compressible allocation must be a 64 KiB multiple".into(),
-            ));
+            return Err(MemoryError::Invalid {
+                operation: "allocate compressible memory",
+                reason: "compressible allocation must be a 64 KiB multiple",
+            }
+            .into());
         }
         self.allocate_placed(
             requested_size,
@@ -599,17 +599,14 @@ impl Device {
         let granted = parameters.attr & pool_block::ATTR_CHECKED;
         if granted != pool_block::ATTR & pool_block::ATTR_CHECKED || parameters.size != size {
             let status = self.client.free(self.handle, handle);
-            return Err(Error::Contract(format!(
-                "RM granted pool block attr {:#010x} size {:#x} (requested attr {:#010x}: VIDMEM, \
-                 CONTIGUOUS, PAGE_SIZE HUGE, COMPR NONE, size {size:#x}){}",
-                parameters.attr,
-                parameters.size,
-                pool_block::ATTR,
-                match status {
-                    Ok(()) => String::new(),
-                    Err(e) => format!("; freeing it failed too: {e}"),
-                }
-            )));
+            return Err(MemoryError::PoolBlockGrant {
+                attr: parameters.attr,
+                size: parameters.size,
+                requested_attr: pool_block::ATTR,
+                requested_size: size,
+                free: status.err().map(Box::new),
+            }
+            .into());
         }
         let grant = PoolBlockGrant {
             attr: parameters.attr,
@@ -641,10 +638,18 @@ impl Device {
         block_linear_kind: Option<u32>,
     ) -> Result<Rc<Memory>> {
         if alignment < 4096 || !alignment.is_power_of_two() {
-            return Err(Error::Contract("invalid RM memory alignment".into()));
+            return Err(MemoryError::Invalid {
+                operation: "allocate memory",
+                reason: "invalid RM memory alignment",
+            }
+            .into());
         }
         if requested_size == 0 {
-            return Err(Error::Contract("zero-sized VRAM allocation".into()));
+            return Err(MemoryError::Invalid {
+                operation: "allocate memory",
+                reason: "zero-sized VRAM allocation",
+            }
+            .into());
         }
         let size = platform::round_to_cpu_pages(requested_size, self.client.cpu_page_size)
             .map_err(|e| Error::Io("round RM allocation to CPU pages", e))?;
@@ -693,16 +698,14 @@ impl Device {
                 || (parameters.attr >> 12) & 3 != 0
             {
                 let status = self.client.free(self.handle, handle);
-                return Err(Error::Contract(format!(
-                    "RM granted block-linear memory {size:#x} kind {:#x} attr {:#010x} (requested kind {kind:#x}, \
-                     FORMAT BLOCK_LINEAR, COMPR NONE){}",
-                    parameters.format,
-                    parameters.attr,
-                    match status {
-                        Ok(()) => String::new(),
-                        Err(e) => format!("; freeing it failed too: {e}"),
-                    }
-                )));
+                return Err(MemoryError::BlockLinearGrant {
+                    size: u64_from_usize(size),
+                    format: parameters.format,
+                    attr: parameters.attr,
+                    kind,
+                    free: status.err().map(Box::new),
+                }
+                .into());
             }
         }
         if compressible && std::env::var_os("NV_RM_DEBUG_COMPRESSION").is_some() {
@@ -910,15 +913,15 @@ impl Memory {
     }
     pub fn map(self: &Rc<Self>) -> Result<Mapping> {
         if self.pages == PhysicalPages::Huge2M {
-            return Err(Error::Contract(
-                "a GPU-internal pool block is never CPU-mapped".into(),
-            ));
+            return Err(MemoryError::Invalid {
+                operation: "CPU-map memory",
+                reason: "a GPU-internal pool block is never CPU-mapped",
+            }
+            .into());
         }
         loop {
             if self.device.cpu_mapping_failed() {
-                return Err(Error::DeviceLost(
-                    "CPU mapping cleanup previously failed".into(),
-                ));
+                return Err(MemoryError::CleanupFailed.into());
             }
             match self.map_once() {
                 Ok(mapping) => return Ok(mapping),
@@ -927,9 +930,7 @@ impl Memory {
                     Ok(false) => return Err(error),
                     Err(cleanup) => {
                         self.device.cpu_map_failed.set(true);
-                        return Err(Error::DeviceLost(format!(
-                            "CPU map pressure eviction failed: {cleanup}"
-                        )));
+                        return Err(MemoryError::EvictionFailed(Box::new(cleanup)).into());
                     }
                 },
                 Err(error) => return Err(error),
@@ -939,7 +940,11 @@ impl Memory {
     fn map_once(self: &Rc<Self>) -> Result<Mapping> {
         let device = &self.device;
         if self.size == 0 {
-            return Err(Error::Contract("cannot CPU-map empty memory".into()));
+            return Err(MemoryError::Invalid {
+                operation: "CPU-map memory",
+                reason: "cannot CPU-map empty memory",
+            }
+            .into());
         }
         // Validate the inverse operation before acquiring the RM lease.
         device
@@ -1045,8 +1050,9 @@ impl Memory {
             // rollback must also own that unusual but successful mmap result.
             lease.vma = Some((address.expose_provenance(), mapping_size));
             lease.state.vma = true;
-            let base = NonNull::new(address.cast::<u8>())
-                .ok_or_else(|| Error::Contract("mmap returned address zero".into()))?;
+            let base = NonNull::new(address.cast::<u8>()).ok_or(MemoryError::CpuMapping {
+                reason: "mmap returned address zero",
+            })?;
             // Lazy owned mappings survive logical map/unmap pairs. Like public
             // Mesa persistent maps, lifetime follows the allocation; idle leases
             // remain pressure-reclaimable and retain their actual BAR charge.
@@ -1074,9 +1080,11 @@ impl Memory {
                     // Drop will retry, then quarantine rather than free memory
                     // or refund BAR capacity while a lease may still be live.
                     device.cpu_map_failed.set(true);
-                    return Err(Error::DeviceLost(format!(
-                        "{error}; CPU map rollback failed: {cleanup}"
-                    )));
+                    return Err(MemoryError::RollbackFailed {
+                        error: Box::new(error),
+                        cleanup: Box::new(cleanup),
+                    }
+                    .into());
                 }
                 Err(error)
             }
@@ -1085,11 +1093,11 @@ impl Memory {
 }
 fn map_pressure(error: &Error) -> bool {
     match error {
-        Error::BarPressure {
+        Error::Memory(MemoryError::BarPressure {
             used,
             requested,
             limit,
-        } => *used != 0 && *limit != 0 && requested <= limit,
+        }) => *used != 0 && *limit != 0 && requested <= limit,
         Error::Io("mmap NVIDIA allocation", error) => error.raw_os_error() == Some(12),
         Error::Rm {
             operation: "RM map memory",
@@ -1130,21 +1138,24 @@ impl BarReservation {
         Ok(reservation)
     }
     fn resize(&mut self, bytes: u64) -> Result<()> {
-        let other = self
-            .budget
-            .used
-            .get()
-            .checked_sub(self.bytes)
-            .ok_or_else(|| Error::Contract("unbalanced BAR reservation".into()))?;
-        let next = other
-            .checked_add(bytes)
-            .ok_or_else(|| Error::Contract("BAR mapping budget overflow".into()))?;
+        let other =
+            self.budget
+                .used
+                .get()
+                .checked_sub(self.bytes)
+                .ok_or(MemoryError::BarAccounting {
+                    reason: "unbalanced BAR reservation",
+                })?;
+        let next = other.checked_add(bytes).ok_or(MemoryError::BarAccounting {
+            reason: "BAR mapping budget overflow",
+        })?;
         if bytes != 0 && (self.budget.limit == 0 || next > self.budget.limit) {
-            return Err(Error::BarPressure {
+            return Err(MemoryError::BarPressure {
                 used: other,
                 requested: bytes,
                 limit: self.budget.limit,
-            });
+            }
+            .into());
         }
         self.budget.used.set(next);
         self.bytes = bytes;
@@ -1196,9 +1207,10 @@ impl CpuMappingState {
     ) -> Result<()> {
         let Some(owner) = resources.as_mut() else {
             return if self.vma || self.rm {
-                Err(Error::Contract(
-                    "live CPU map lost its resource owner".into(),
-                ))
+                Err(MemoryError::NotLive {
+                    reason: "live CPU map lost its resource owner",
+                }
+                .into())
             } else {
                 Ok(())
             };
@@ -1292,7 +1304,10 @@ fn cpu_mapping_extent(
     page: usize,
 ) -> Result<(usize, usize)> {
     if page == 0 || !page.is_power_of_two() {
-        return Err(Error::Contract("invalid CPU page size".into()));
+        return Err(MemoryError::CpuMapping {
+            reason: "invalid CPU page size",
+        }
+        .into());
     }
     // The low bits of the cookie below the page size: less than `page`, so a usize.
     let within_page = usize::try_from(cookie & (u64_from_usize(page) - 1))
@@ -1300,29 +1315,36 @@ fn cpu_mapping_extent(
     // Owned allocations must also validate RM's returned length. USERD may
     // expose a larger range than the logical register window.
     if returned_length < u64_from_usize(size) {
-        return Err(Error::Contract(
-            "RM returned an undersized CPU mapping".into(),
-        ));
+        return Err(MemoryError::CpuMapping {
+            reason: "RM returned an undersized CPU mapping",
+        }
+        .into());
     }
     let exposed = if owned {
         size
     } else {
-        usize::try_from(returned_length).map_err(|error| {
-            Error::Contract(format!("USERD size exceeds CPU address range: {error}"))
+        usize::try_from(returned_length).map_err(|_unrepresentable| MemoryError::UserdLength {
+            length: returned_length,
         })?
     };
     if size == 0 || !within_page.is_multiple_of(4) {
-        return Err(Error::Contract("empty or unaligned RM CPU mapping".into()));
+        return Err(MemoryError::CpuMapping {
+            reason: "empty or unaligned RM CPU mapping",
+        }
+        .into());
     }
     let extent = exposed
         .checked_add(within_page)
-        .ok_or_else(|| Error::Contract("CPU mapping extent overflow".into()))?;
+        .ok_or(MemoryError::CpuMapping {
+            reason: "CPU mapping extent overflow",
+        })?;
     let rounded = platform::round_to_cpu_pages(extent, page)
         .map_err(|e| Error::Io("round mmap extent", e))?;
     if isize::try_from(rounded).is_err() {
-        return Err(Error::Contract(
-            "CPU mapping exceeds Rust pointer offset range".into(),
-        ));
+        return Err(MemoryError::CpuMapping {
+            reason: "CPU mapping exceeds Rust pointer offset range",
+        }
+        .into());
     }
     Ok((within_page, rounded))
 }
@@ -1352,11 +1374,24 @@ impl Mapping {
         }
         result
     }
+    /// The error of an unaligned or out-of-bounds access of `len` bytes at `offset`.
+    fn out_of_bounds(&self, access: &'static str, offset: usize, len: usize) -> Error {
+        MemoryError::OutOfBounds {
+            access,
+            offset,
+            len,
+            size: self.size,
+        }
+        .into()
+    }
     fn live(&self) -> Result<()> {
         if self.lease.state.vma {
             Ok(())
         } else {
-            Err(Error::Contract("CPU mapping is no longer live".into()))
+            Err(MemoryError::NotLive {
+                reason: "CPU mapping is no longer live",
+            }
+            .into())
         }
     }
     /// An external Vulkan caller owns synchronization and dereference validity.
@@ -1369,9 +1404,7 @@ impl Mapping {
     pub(crate) fn write_u32(&mut self, offset: usize, value: u32) -> Result<()> {
         self.live()?;
         if !offset.is_multiple_of(4) || offset.checked_add(4).is_none_or(|end| end > self.size) {
-            return Err(Error::Contract(
-                "unaligned/out-of-bounds mapped write".into(),
-            ));
+            return Err(self.out_of_bounds("mapped write", offset, 4));
         }
         // SAFETY: offset + 4 <= size (checked above) keeps the word inside
         // the live mapping (live() above).
@@ -1389,7 +1422,7 @@ impl Mapping {
             .checked_add(data.len())
             .is_none_or(|end| end > self.size)
         {
-            return Err(Error::Contract("out-of-bounds mapped bulk write".into()));
+            return Err(self.out_of_bounds("mapped bulk write", offset, data.len()));
         }
         // SAFETY: offset + len <= size (checked above), inside the live
         // mapping.
@@ -1407,7 +1440,7 @@ impl Mapping {
             .checked_add(out.len())
             .is_none_or(|end| end > self.size)
         {
-            return Err(Error::Contract("out-of-bounds mapped bulk read".into()));
+            return Err(self.out_of_bounds("mapped bulk read", offset, out.len()));
         }
         // SAFETY: offset + len <= size (checked above), inside the live
         // mapping.
@@ -1421,9 +1454,7 @@ impl Mapping {
     pub(crate) fn read_u32(&self, offset: usize) -> Result<u32> {
         self.live()?;
         if !offset.is_multiple_of(4) || offset.checked_add(4).is_none_or(|end| end > self.size) {
-            return Err(Error::Contract(
-                "unaligned/out-of-bounds mapped read".into(),
-            ));
+            return Err(self.out_of_bounds("mapped read", offset, 4));
         }
         // SAFETY: offset + 4 <= size (checked above), inside the live mapping.
         let word = unsafe { self.pointer.as_ptr().add(offset / 4) };
@@ -1440,13 +1471,11 @@ impl Mapping {
         let address = self
             .cpu_address()
             .checked_add(offset)
-            .ok_or_else(|| Error::Contract("semaphore CPU address overflow".into()))?;
+            .ok_or_else(|| self.out_of_bounds("cached semaphore atomic", offset, 8))?;
         if address % align_of::<std::sync::atomic::AtomicU64>() != 0
             || offset.checked_add(8).is_none_or(|end| end > self.size)
         {
-            return Err(Error::Contract(
-                "unaligned/out-of-bounds cached semaphore atomic".into(),
-            ));
+            return Err(self.out_of_bounds("cached semaphore atomic", offset, 8));
         }
         // SAFETY: offset + 8 <= size (checked above), inside the live mapping.
         let word = unsafe { self.pointer.as_ptr().cast::<u8>().add(offset) };
@@ -1482,9 +1511,12 @@ impl Mapping {
             let actual = unsafe { word.read_volatile() };
             let expected = pattern_word(i);
             if actual != expected {
-                return Err(Error::Contract(format!(
-                    "VRAM CPU round trip failed at word {i}: {actual:#x} != {expected:#x}"
-                )));
+                return Err(MemoryError::PatternMismatch {
+                    word: i,
+                    actual,
+                    expected,
+                }
+                .into());
             }
         }
         Ok(count)
@@ -1657,21 +1689,21 @@ mod budget_tests {
     use super::*;
     #[test]
     fn mapping_pressure_never_retries_contract_permission_or_cleanup_failures() {
-        assert!(map_pressure(&Error::BarPressure {
+        assert!(map_pressure(&Error::Memory(MemoryError::BarPressure {
             used: 4096,
             requested: 4096,
             limit: 4096
-        }));
-        assert!(!map_pressure(&Error::BarPressure {
+        })));
+        assert!(!map_pressure(&Error::Memory(MemoryError::BarPressure {
             used: 4096,
             requested: 8192,
             limit: 4096
-        }));
-        assert!(!map_pressure(&Error::BarPressure {
+        })));
+        assert!(!map_pressure(&Error::Memory(MemoryError::BarPressure {
             used: 4096,
             requested: 4096,
             limit: 0
-        }));
+        })));
         for status in [0x51, 0x1a] {
             assert!(map_pressure(&Error::Rm {
                 operation: "RM map memory",
@@ -1703,6 +1735,7 @@ mod budget_tests {
             io::Error::from_raw_os_error(12)
         )));
         assert!(!map_pressure(&Error::DeviceLost("rollback failed".into())));
+        assert!(!map_pressure(&MemoryError::CleanupFailed.into()));
         assert!(!map_pressure(&Error::Contract("invalid extent".into())));
     }
     #[test]

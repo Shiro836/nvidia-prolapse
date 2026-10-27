@@ -2,7 +2,7 @@
 //! Owned CPU mappings are lazy and may survive logical unmap until allocation
 //! free. Idle leases are reclaimable under CPU-VA/RM/BAR pressure; active leases
 //! are never indexed. One weak FIFO gives O(1) transitions without an Rc cycle.
-use crate::rm::{Error, Result};
+use crate::rm::{MemoryError, Result};
 use std::{
     cell::RefCell,
     rc::{Rc, Weak},
@@ -98,16 +98,16 @@ impl<M: Lease> Slot<M> {
         address: impl FnOnce(&M) -> T,
     ) -> Result<T> {
         if self.entry.borrow().failed {
-            return Err(Error::DeviceLost(
-                "CPU mapping slot has incomplete cleanup".into(),
-            ));
+            return Err(MemoryError::CleanupFailed.into());
         }
         let refs = self
             .entry
             .borrow()
             .refs
             .checked_add(1)
-            .ok_or_else(|| Error::Contract("CPU mapping reference overflow".into()))?;
+            .ok_or(MemoryError::CpuMapping {
+                reason: "CPU mapping reference overflow",
+            })?;
         // Remove an idle lease before it can be exposed to a caller. No registry
         // or slot borrow crosses make: it can reclaim another idle mapping.
         self.unlink();
@@ -126,14 +126,12 @@ impl<M: Lease> Slot<M> {
     }
     pub(crate) fn release(&self) -> Result<()> {
         let mut entry = self.entry.borrow_mut();
-        let refs = entry
-            .refs
-            .checked_sub(1)
-            .ok_or_else(|| Error::Contract("unmap RM memory without a CPU map".into()))?;
-        let mapping = entry
-            .mapping
-            .as_mut()
-            .ok_or_else(|| Error::Contract("CPU map reference has no owned mapping".into()))?;
+        let refs = entry.refs.checked_sub(1).ok_or(MemoryError::NotLive {
+            reason: "unmap RM memory without a CPU map",
+        })?;
+        let mapping = entry.mapping.as_mut().ok_or(MemoryError::NotLive {
+            reason: "CPU map reference has no owned mapping",
+        })?;
         if refs == 0 && !mapping.retain_idle() {
             if let Err(error) = mapping.release() {
                 entry.failed = true;
@@ -217,6 +215,7 @@ impl<M: Lease> Registry<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rm::Error;
     use std::cell::Cell;
     struct Fake {
         keep: bool,
@@ -296,7 +295,7 @@ mod tests {
                 || panic!("failed slot must not remap"),
                 |_| panic!("failed slot must not expose pointer")
             ),
-            Err(Error::DeviceLost(_))
+            Err(Error::Memory(MemoryError::CleanupFailed))
         ));
         assert!(!registry.evict_one().unwrap());
         fail.set(false);
@@ -314,7 +313,7 @@ mod tests {
                 || panic!("failed idle slot must not remap"),
                 |_| panic!("partially unmapped idle pointer must not escape")
             ),
-            Err(Error::DeviceLost(_))
+            Err(Error::Memory(MemoryError::CleanupFailed))
         ));
         fail.set(false);
         assert!(registry.evict_one().unwrap());

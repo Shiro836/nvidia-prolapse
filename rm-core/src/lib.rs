@@ -13,4 +13,4 @@ pub mod error;
 pub mod push;
 pub mod reclaim;
 
-pub use error::{Error, Result, SyncError, WaitError};
+pub use error::{ChannelError, Error, MemoryError, Result, SyncError, WaitError};

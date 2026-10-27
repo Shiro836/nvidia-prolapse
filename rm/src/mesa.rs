@@ -1993,19 +1993,15 @@ fn present(bridge: Option<&Bridge>) -> Result<&Bridge> {
 fn vk_status(error: &Error) -> i32 {
     match error {
         Error::DeviceLost(_) => -4,
-        Error::Sync(sync) => {
-            if sync.is_device_lost() {
+        Error::Sync(_) | Error::Channel(_) | Error::Memory(_) => {
+            if error.is_device_lost() {
                 -4
             } else {
                 -3
             }
         }
         Error::Io(_, error) if error.raw_os_error() == Some(12) => -1,
-        Error::Io(..)
-        | Error::Rm { .. }
-        | Error::Contract(_)
-        | Error::Wait(_)
-        | Error::BarPressure { .. } => -3,
+        Error::Io(..) | Error::Rm { .. } | Error::Contract(_) | Error::Wait(_) => -3,
     }
 }
 fn report(result: Result<()>) -> i32 {
@@ -3590,7 +3586,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rm::SyncError;
+    use crate::rm::{ChannelError, MemoryError, SyncError};
     use std::mem::{offset_of, size_of};
     #[test]
     fn status_codes_match_the_c_abi() {
@@ -3632,12 +3628,73 @@ mod tests {
         ] {
             assert_eq!(vk_status(&error.into()), status);
         }
-        let bar = Error::BarPressure {
-            used: 1,
-            requested: 2,
-            limit: 3,
-        };
-        assert_eq!(vk_status(&bar), -3);
+        // Channel and memory failures keep the status their old DeviceLost or
+        // Contract form had: only a lost queue channel and a broken CPU-map
+        // cleanup are device loss.
+        let lost = |operation| ChannelError::Lost { operation };
+        assert_eq!(vk_status(&lost("x").into()), -4);
+        for error in [
+            ChannelError::LostChannel { operation: "x" },
+            ChannelError::Stopped,
+            ChannelError::Rc {
+                error: 31,
+                put: 0,
+                sequence: 0,
+                host_class: 0xc96f,
+                info16: 0,
+                status: 0xffff,
+                timestamp: 0,
+            },
+            ChannelError::Allocate {
+                class: 0xc96f,
+                source: Box::new(Error::DeviceLost("x".into())),
+            },
+            ChannelError::Token {
+                operation: "x",
+                token: 2,
+                issued: 1,
+            },
+            ChannelError::Timeline { reason: "x" },
+            ChannelError::SequenceExhausted,
+            ChannelError::Doorbell,
+        ] {
+            assert_eq!(vk_status(&error.into()), -3);
+        }
+        for (error, status) in [
+            (MemoryError::CleanupFailed, -4),
+            (
+                MemoryError::EvictionFailed(Box::new(Error::Contract("x".into()))),
+                -4,
+            ),
+            (
+                MemoryError::RollbackFailed {
+                    error: Box::new(Error::Contract("x".into())),
+                    cleanup: Box::new(Error::Contract("y".into())),
+                },
+                -4,
+            ),
+            (
+                MemoryError::BarPressure {
+                    used: 1,
+                    requested: 2,
+                    limit: 3,
+                },
+                -3,
+            ),
+            (MemoryError::NotLive { reason: "x" }, -3),
+            (
+                MemoryError::OutOfBounds {
+                    access: "x",
+                    offset: 4,
+                    len: 4,
+                    size: 4,
+                },
+                -3,
+            ),
+            (MemoryError::GpuVa { address: 1 }, -3),
+        ] {
+            assert_eq!(vk_status(&error.into()), status);
+        }
         assert_eq!(report(Ok(())), 0);
     }
     #[test]
