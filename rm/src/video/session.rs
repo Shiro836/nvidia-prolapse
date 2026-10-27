@@ -37,11 +37,11 @@ use std::{
 
 /// Descriptor slot size (VP9: pic_s 0, tiles 0x200, probs 0x900, counts
 /// 0x1800, status 0x4c00; stock 615.71.09 trace).
-pub const DESCRIPTOR_BYTES: usize = 0x5000;
-pub const RING_SLOTS: usize = 4;
+pub(crate) const DESCRIPTOR_BYTES: usize = 0x5000;
+pub(crate) const RING_SLOTS: usize = 4;
 const BITSTREAM_INITIAL: usize = 16 << 20;
 
-pub struct SessionInfo {
+pub(crate) struct SessionInfo {
     pub codec: u32,
     pub max_width: u32,
     pub max_height: u32,
@@ -258,7 +258,7 @@ pub(crate) fn engine_status_error(status: &[u8; 16], picture: u32) -> Option<Str
     })
 }
 
-pub struct Session {
+pub(crate) struct Session {
     codec: Box<dyn CodecDecoder>,
     // Field order = drop order: channels before the memory they reference.
     nvdec: NvdecChannel,
@@ -299,13 +299,13 @@ pub struct Session {
 /// Per-session timing (submit → completion is only measured where the CPU
 /// waits anyway).
 #[derive(Default, Debug, Clone)]
-pub struct Stats {
+pub(crate) struct Stats {
     pub decoded: u64,
     pub cpu_waits: u64,
 }
 
 impl Session {
-    pub fn new(dev: &VideoDevice, info: SessionInfo, codec_config: &[u8]) -> VResult<Self> {
+    pub(crate) fn new(dev: &VideoDevice, info: SessionInfo, codec_config: &[u8]) -> VResult<Self> {
         let class = dev.info.nvdec_class;
         if class == 0 {
             return Err(VideoError::Unsupported("GPU exposes no NVDEC class".into()));
@@ -472,10 +472,6 @@ impl Session {
         })
     }
 
-    pub fn decoder_class(&self) -> u32 {
-        self.nvdec.decoder_class
-    }
-
     fn free_surfaces(&self) -> Vec<usize> {
         let referenced = self.codec.referenced();
         (0..self.surfaces.len())
@@ -527,7 +523,7 @@ impl Session {
     /// may therefore retire the input buffer as soon as a unit reports 0.
     /// Submit one unit; returns the displayable pictures it produced. After a
     /// `VideoError::Resize` only an end-of-stream drain (no data) is accepted.
-    pub fn decode(&mut self, data: &[u8], timestamp: u64, flags: u32) -> VResult<u32> {
+    pub(crate) fn decode(&mut self, data: &[u8], timestamp: u64, flags: u32) -> VResult<u32> {
         if let Some((w, h)) = self.resize_needed
             && !data.is_empty()
         {
@@ -544,7 +540,7 @@ impl Session {
     }
 
     /// The coded size the last `VideoError::Resize` asked for.
-    pub fn required_size(&self) -> Option<(u32, u32)> {
+    pub(crate) fn required_size(&self) -> Option<(u32, u32)> {
         self.resize_needed
     }
 
@@ -732,7 +728,7 @@ impl Session {
     }
 
     /// Next picture in display order (its decode may still run).
-    pub fn next_picture(&mut self) -> Option<(u64, u64, PictureInfo)> {
+    pub(crate) fn next_picture(&mut self) -> Option<(u64, u64, PictureInfo)> {
         let id = self.display.pop_front()?;
         let p = &self.pictures[&id];
         Some((id, p.timestamp, p.info))
@@ -740,14 +736,14 @@ impl Session {
 
     /// HDR static metadata of picture `id` (ABI v2). A picture whose unit declared none
     /// returns the empty value; an unknown id is a caller error.
-    pub fn picture_hdr(&self, id: u64) -> VResult<HdrStaticMetadata> {
+    pub(crate) fn picture_hdr(&self, id: u64) -> VResult<HdrStaticMetadata> {
         self.pictures
             .get(&id)
             .map(|p| p.hdr)
             .ok_or_else(|| VideoError::Invalid(format!("unknown picture id {id}")))
     }
 
-    pub fn release(&mut self, id: u64) -> VResult<()> {
+    pub(crate) fn release(&mut self, id: u64) -> VResult<()> {
         self.display.retain(|d| *d != id);
         self.pictures
             .remove(&id)
@@ -755,7 +751,7 @@ impl Session {
             .ok_or_else(|| VideoError::Invalid(format!("unknown picture id {id}")))
     }
 
-    pub fn flush(&mut self) -> VResult<()> {
+    pub(crate) fn flush(&mut self) {
         self.codec.flush();
         self.failed = None;
         self.resize_needed = None;
@@ -767,12 +763,6 @@ impl Session {
         for (_, id) in std::mem::take(&mut self.reorder) {
             self.pictures.remove(&id);
         }
-        Ok(())
-    }
-
-    /// Wait for all NVDEC work (session teardown, tests).
-    pub fn idle(&mut self) -> VResult<()> {
-        self.nvdec.wait(&self.drm, self.nvdec.submitted)
     }
 
     /// Copy picture `id` into the caller's target and return the copy's
@@ -781,7 +771,7 @@ impl Session {
     /// # Safety
     /// Every non-negative descriptor in `t` (plane dma-bufs, acquire fence) is
     /// open for the whole call; the fds stay the caller's.
-    pub unsafe fn copy_out(&mut self, id: u64, t: &Target) -> VResult<Option<OwnedFd>> {
+    pub(crate) unsafe fn copy_out(&mut self, id: u64, t: &Target) -> VResult<Option<OwnedFd>> {
         self.copy.reap()?;
         let pic = self
             .pictures
@@ -1045,13 +1035,6 @@ impl Session {
         }?;
         Ok(Some(fd))
     }
-
-    pub fn layout(&self) -> SurfaceLayout {
-        self.layout
-    }
-    pub fn info(&self) -> &SessionInfo {
-        &self.info
-    }
 }
 
 impl Drop for Session {
@@ -1080,7 +1063,7 @@ impl Drop for Session {
 }
 
 /// Target description (NvVideoTarget, fds borrowed).
-pub struct Target {
+pub(crate) struct Target {
     /// Y, CbCr (NV12/P010) or Y, Cb, Cr (FORMAT_YUV420P); [2] unused for the bi-planar formats.
     pub dmabuf_fd: [i32; 3],
     pub offset: [u64; 3],

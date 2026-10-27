@@ -41,7 +41,7 @@ use nv_rm_core::conv::{
 use std::{rc::Rc, time::Duration, time::Instant};
 
 /// Public NVDEC classes, newest first (clc9b0.h, clcdb0.h, clcfb0.h).
-pub const DECODER_CLASSES: [u32; 4] = [0xcfb0, 0xcdb0, 0xc9b0, 0xc7b0];
+pub(crate) const DECODER_CLASSES: [u32; 4] = [0xcfb0, 0xcdb0, 0xc9b0, 0xc7b0];
 const NV2080_ENGINE_TYPE_NVDEC0: u32 = 0x13;
 
 const fn round_up(v: usize, a: usize) -> usize {
@@ -96,7 +96,7 @@ fn alloc_zeroed(
 /// An NVDEC channel on our own VA space: TSG on the NVDEC0 runlist, SYNC
 /// context share, 0xC96F GPFIFO and the decoder class object. Frames are
 /// submitted one at a time and waited on with a host semaphore release.
-pub struct VideoChannel {
+pub(crate) struct VideoChannel {
     device: Rc<Device>,
     pub space: AddressSpace,
     pub decoder_class: u32,
@@ -120,7 +120,7 @@ const ENTRIES: usize = 1024;
 const DECODER_PARAMS_SIZE: u32 = const_u32_from_usize(size_of::<crate::abi::VideoDecoder>());
 
 impl VideoChannel {
-    pub fn new(device: &Rc<Device>) -> Result<Self> {
+    pub(crate) fn new(device: &Rc<Device>) -> Result<Self> {
         let classes = device.classes()?;
         let decoder_class = DECODER_CLASSES
             .into_iter()
@@ -233,14 +233,17 @@ impl VideoChannel {
     }
 
     /// Allocate a zeroed VRAM buffer mapped into the channel's VA space.
-    pub fn buffer(&self, size: usize) -> Result<(Rc<crate::rm::Memory>, crate::gpu::GpuMapping)> {
+    pub(crate) fn buffer(
+        &self,
+        size: usize,
+    ) -> Result<(Rc<crate::rm::Memory>, crate::gpu::GpuMapping)> {
         alloc_zeroed(&self.device, &self.space, size)
     }
 
     /// Submit `words` (subchannel-4 decoder methods ending in EXECUTE),
     /// append a host semaphore release with WFI and wait for it. Returns the
     /// submit-to-release time.
-    pub fn run(&mut self, mut words: Vec<u32>) -> Result<Duration> {
+    pub(crate) fn run(&mut self, mut words: Vec<u32>) -> Result<Duration> {
         if self.serial == 0 {
             let mut first = Vec::new();
             method(&mut first, 4, 0, &[self.decoder_class]); // SET_OBJECT
@@ -472,7 +475,7 @@ fn slot_u32(slot: usize) -> u32 {
 
 /// Build the engine's nvdec_vp9_pic_s for a parsed frame (field mapping
 /// checked against the stock pic_s of the same streams, see compare-desc).
-pub fn vp9_pic(
+pub(crate) fn vp9_pic(
     h: &crate::vp9::FrameHeader,
     st: &crate::vp9::Vp9State,
     stream_len: usize,
@@ -779,7 +782,7 @@ pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
 
 /// Block-linear (64x8 GOB, 2-GOB blocks) offset of pixel (x, y) in a plane of
 /// `stride` bytes; tinygrad extra/hevc/hevc.py `_addr_table`.
-pub fn block_linear_offset(x: usize, y: usize, stride: usize) -> usize {
+pub(crate) fn block_linear_offset(x: usize, y: usize, stride: usize) -> usize {
     let (gob_x, gob_y) = (x / 64, y / 8);
     let base = ((gob_y / 2 * (stride / 64) + gob_x) * 2 + gob_y % 2) * 512;
     let (lx, ly) = (x % 64, y % 8);

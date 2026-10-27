@@ -170,7 +170,7 @@ pub fn select(classes: &[u32], rm_sm: u32) -> Result<Capabilities> {
     })
 }
 
-pub fn query(device: &Device) -> Result<Capabilities> {
+pub(crate) fn query(device: &Device) -> Result<Capabilities> {
     let mut entries = [[0xcu32, 0]];
     let mut query = abi::GrInfo {
         count: 1,

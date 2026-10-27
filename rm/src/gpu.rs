@@ -1402,7 +1402,7 @@ fn bind_zcull(device: &Rc<Device>, space: &AddressSpace, channel: u32) -> Result
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
-pub struct Push {
+pub(crate) struct Push {
     pub address: u64,
     pub size: u32,
     pub flags: u32,

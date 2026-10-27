@@ -23,7 +23,7 @@ const ENTRIES: usize = 1024;
 const DECODER_PARAMS_SIZE: u32 = const_u32_from_usize(size_of::<crate::abi::VideoDecoder>());
 const COMMAND_BYTES: usize = 65536;
 
-pub struct NvdecChannel {
+pub(crate) struct NvdecChannel {
     device: Rc<Device>,
     pub decoder_class: u32,
     /// Host GPFIFO class (relocation encoding, `super::reloc`).
@@ -46,7 +46,11 @@ pub struct NvdecChannel {
 }
 
 impl NvdecChannel {
-    pub fn new(device: &Rc<Device>, space: &AddressSpace, decoder_class: u32) -> VResult<Self> {
+    pub(crate) fn new(
+        device: &Rc<Device>,
+        space: &AddressSpace,
+        decoder_class: u32,
+    ) -> VResult<Self> {
         let caps = crate::capabilities::query(device)?;
         let host_class = caps.channel;
         if !crate::gpu::modern_host(host_class)? {
@@ -164,7 +168,7 @@ impl NvdecChannel {
 
     /// Append the timeline release and kick. Returns the timeline value that
     /// signals completion. Never waits.
-    pub fn submit(&mut self, mut words: Vec<u32>) -> VResult<u64> {
+    pub(crate) fn submit(&mut self, mut words: Vec<u32>) -> VResult<u64> {
         let value = self.submitted + 1;
         crate::gpu::timeline_release(
             &mut words,
@@ -216,13 +220,13 @@ impl NvdecChannel {
         Ok(value)
     }
 
-    pub fn completed(&self) -> VResult<u64> {
+    pub(crate) fn completed(&self) -> VResult<u64> {
         Ok(self.timeline.read_completed()?)
     }
 
     /// Block until `value` completed: sync_file of the timeline + poll(2), no
     /// spinning. A 2 s bound turns a hung engine into DEVICE_LOST.
-    pub fn wait(&self, drm: &std::fs::File, value: u64) -> VResult<()> {
+    pub(crate) fn wait(&self, drm: &std::fs::File, value: u64) -> VResult<()> {
         if self.completed()? >= value {
             return Ok(());
         }

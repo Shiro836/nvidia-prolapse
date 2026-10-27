@@ -12,11 +12,11 @@
 //!
 //! Stock behaviour this follows was observed in libnvcuvid 615.71.09 (RM
 //! traces, disassembly); ELF addresses are cited, no code is copied.
-pub mod channel;
+pub(crate) mod channel;
 pub mod ffi;
 #[cfg(test)]
-pub mod pretend;
-pub mod session;
+pub(crate) mod pretend;
+pub(crate) mod session;
 
 pub use nv_video::{
     ABI_VERSION, Allocator, BspCapsV2, BuildContext, CODEC_AV1, CODEC_H264, CODEC_HEVC, CODEC_VP9,
@@ -138,7 +138,7 @@ impl VideoDevice {
             },
         })
     }
-    pub fn caps(&self, codec: u32) -> VResult<NvVideoCaps> {
+    pub(crate) fn caps(&self, codec: u32) -> VResult<NvVideoCaps> {
         if !(CODEC_H264..=CODEC_AV1).contains(&codec) {
             return Err(VideoError::Invalid(format!("unknown codec {codec}")));
         }

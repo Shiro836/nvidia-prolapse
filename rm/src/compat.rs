@@ -50,23 +50,24 @@ impl Profile {
 mod data;
 
 #[derive(Clone, Copy, Debug)]
-pub struct Compat {
+pub(crate) struct Compat {
     version: &'static str,
     profile: &'static Profile,
 }
 impl Compat {
-    pub fn for_version(version: &str) -> Result<Self> {
+    pub(crate) fn for_version(version: &str) -> Result<Self> {
         let (version, profile) = data::VERSIONS.iter().find(|(v, _)| *v == version)
             .ok_or_else(|| Error::Contract(format!("NVIDIA {version}: no exact public ABI profile; generate and verify that release before use")))?;
         Ok(Self { version, profile })
     }
-    pub fn version(&self) -> &'static str {
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) fn version(&self) -> &'static str {
         self.version
     }
-    pub fn constant(&self, name: &str) -> Option<u64> {
+    pub(crate) fn constant(&self, name: &str) -> Option<u64> {
         self.profile.constant(name)
     }
-    pub fn require_constant(&self, name: &str, value: u64) -> Result<()> {
+    pub(crate) fn require_constant(&self, name: &str, value: u64) -> Result<()> {
         if self.constant(name) != Some(value) {
             return Err(self.unsupported(
                 name,
@@ -89,10 +90,10 @@ impl Compat {
             )
         })
     }
-    pub fn layout_size(&self, name: &str) -> Result<usize> {
+    pub(crate) fn layout_size(&self, name: &str) -> Result<usize> {
         Ok(self.layout(name)?.size)
     }
-    pub fn require_same_layout(&self, name: &str) -> Result<()> {
+    pub(crate) fn require_same_layout(&self, name: &str) -> Result<()> {
         let current = data::CANONICAL
             .layout(name)
             .ok_or_else(|| self.unsupported(name, "no implemented canonical layout"))?;
@@ -102,7 +103,7 @@ impl Compat {
         Ok(())
     }
     /// Called before opening any device. Old wrappers alone are not RM evidence.
-    pub fn require_client_abi(&self) -> Result<()> {
+    pub(crate) fn require_client_abi(&self) -> Result<()> {
         for name in [
             "nv_ioctl_rm_api_version_t",
             "nv_ioctl_card_info_t",
@@ -140,7 +141,7 @@ impl Compat {
         }
         Ok(())
     }
-    pub fn supports_semsurf_bind(&self) -> bool {
+    pub(crate) fn supports_semsurf_bind(&self) -> bool {
         // BIND exists as a stub in old headers; UNBIND was added with the real
         // channel registration contract. Exact profiles preserve branch hops.
         self.constant("NV_SEMAPHORE_SURFACE_CTRL_CMD_UNBIND_CHANNEL") == Some(0xda0006)
@@ -149,16 +150,18 @@ impl Compat {
                 .ok()
                 == Some(40)
     }
-    pub fn supports_kind_override(&self) -> bool {
+    pub(crate) fn supports_kind_override(&self) -> bool {
         self.profile
             .layout("NVOS46_PARAMETERS")
             .is_some_and(|l| l.field("kindOverride").is_some())
             && self.constant("NVOS46_FLAGS_PAGE_KIND_OVERRIDE_YES") == Some(0x80000)
     }
-    pub fn schedule_size(&self) -> Result<usize> {
+    #[cfg(test)]
+    pub(crate) fn schedule_size(&self) -> Result<usize> {
         self.layout_size("NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS")
     }
-    pub fn supports_external_memory(&self) -> bool {
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn supports_external_memory(&self) -> bool {
         self.constant("NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD") == Some(0x3d05)
             && self.constant("NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECT_FROM_FD") == Some(0x3d06)
             && self.constant("DRM_NVIDIA_GEM_IMPORT_NVKMS_MEMORY") == Some(1)
@@ -168,13 +171,13 @@ impl Compat {
                 .layout("NvKmsKapiPrivImportMemoryParams")
                 .is_some()
     }
-    pub fn supports_identify_object(&self) -> bool {
+    pub(crate) fn supports_identify_object(&self) -> bool {
         self.constant("DRM_NVIDIA_GEM_IDENTIFY_OBJECT") == Some(0xe)
     }
     /// Optional cache eligibility evidence only. Older size-only queries cannot
     /// prove a nonzero static BAR range's start; never infer a zero offset.
     #[cfg(test)]
-    pub fn supports_static_bar1_range(&self) -> bool {
+    pub(crate) fn supports_static_bar1_range(&self) -> bool {
         self.constant("NV2080_CTRL_CMD_FB_GET_STATIC_BAR1_INFO") == Some(0x20801354)
             && self
                 .profile

@@ -27,7 +27,6 @@
     clippy::many_single_char_names,
     clippy::mem_forget,
     clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
     clippy::needless_continue,
     clippy::needless_pass_by_value,
     clippy::similar_names,

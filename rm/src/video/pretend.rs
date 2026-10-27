@@ -11,7 +11,7 @@ use super::{
 use nv_rm_core::conv::{u64_from_usize, usize_from_u32};
 
 /// One built picture.
-pub struct Built {
+pub(crate) struct Built {
     pub desc: Vec<u8>,
     pub words: Vec<u32>,
     /// GPU addresses the build used (descriptor slot, bitstream slot).
@@ -35,7 +35,7 @@ impl Allocator for Mock {
 }
 
 /// The codec as `session.rs` creates it for `class`.
-pub fn decoder(
+pub(crate) fn decoder(
     codec: u32,
     class: u32,
     w: u32,
@@ -55,7 +55,7 @@ pub fn decoder(
 }
 
 /// Decode units as a caller feeds them: Annex-B access units, IVF frames.
-pub fn units(codec: u32, data: &[u8]) -> Vec<Vec<u8>> {
+pub(crate) fn units(codec: u32, data: &[u8]) -> Vec<Vec<u8>> {
     match codec {
         CODEC_H264 | CODEC_HEVC => bits::access_units(data, codec == CODEC_HEVC)
             .into_iter()
@@ -70,7 +70,7 @@ pub fn units(codec: u32, data: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// Run `data` through the codec for `class` / `host_class`; the caller releases every picture at once.
-pub fn run(
+pub(crate) fn run(
     codec: u32,
     class: u32,
     host_class: u32,
@@ -88,7 +88,7 @@ pub fn run(
 /// produced, empty when the unit produced none (parameter sets only, a skipped RASL picture,
 /// `pic_output_flag = 0`). This is the codec-side counterpart of `nv_video_decode`'s ABI v2
 /// return value.
-pub fn run_units(
+pub(crate) fn run_units(
     codec: u32,
     class: u32,
     host_class: u32,
@@ -159,7 +159,7 @@ pub fn run_units(
 }
 
 /// Decoded class methods (subchannel 4) of a method list: (method, values) in order, any header form.
-pub fn methods(words: &[u32]) -> Vec<(u32, &'static str, Vec<u32>)> {
+pub(crate) fn methods(words: &[u32]) -> Vec<(u32, &'static str, Vec<u32>)> {
     let mut r = Vec::new();
     let mut i = 0;
     while i < words.len() {

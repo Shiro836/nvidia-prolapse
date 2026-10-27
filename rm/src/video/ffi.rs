@@ -265,7 +265,7 @@ fn release<T: Failable>(handle: Box<T>, entry: &str) {
 /// # Safety
 /// `dev` NULL or a live device, `caps` NULL or writable, for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nv_video_query_caps(
+pub(crate) unsafe extern "C" fn nv_video_query_caps(
     dev: *mut NvVideoDevice,
     codec: u32,
     caps: *mut NvVideoCaps,
@@ -474,7 +474,7 @@ pub unsafe extern "C" fn nv_video_picture_hdr(
 /// # Safety
 /// `s` NULL or a live session, `width`/`height` NULL or writable, for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nv_video_required_size(
+pub(crate) unsafe extern "C" fn nv_video_required_size(
     s: *mut NvVideoSession,
     width: *mut u32,
     height: *mut u32,
@@ -503,7 +503,7 @@ pub unsafe extern "C" fn nv_video_required_size(
 /// # Safety
 /// `s` NULL or a live session for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nv_video_flush(s: *mut NvVideoSession) -> i32 {
+pub(crate) unsafe extern "C" fn nv_video_flush(s: *mut NvVideoSession) -> i32 {
     // SAFETY: `s` is NULL or a live session for the call (# Safety).
     let handle = unsafe { session_ref(s) };
     guard(
@@ -511,7 +511,7 @@ pub unsafe extern "C" fn nv_video_flush(s: *mut NvVideoSession) -> i32 {
         handle.map(|h| -> &dyn Failable { h }),
         || {
             null(s, "session")?;
-            present(handle)?.session()?.flush()?;
+            present(handle)?.session()?.flush();
             Ok(0)
         },
     )

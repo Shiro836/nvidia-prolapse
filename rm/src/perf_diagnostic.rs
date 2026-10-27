@@ -83,11 +83,11 @@ mod tests {
     use super::*;
     #[test]
     fn payload_matches_public_610_c_oracle() {
-        assert_eq!(std::mem::size_of::<BoostParameters>(), 8);
-        assert_eq!(std::mem::align_of::<BoostParameters>(), 4);
+        assert_eq!(size_of::<BoostParameters>(), 8);
+        assert_eq!(align_of::<BoostParameters>(), 4);
         assert_eq!(std::mem::offset_of!(BoostParameters, flags), 0);
         assert_eq!(std::mem::offset_of!(BoostParameters, duration), 4);
-        assert_eq!(std::mem::size_of::<abi::Control>(), 32);
+        assert_eq!(size_of::<abi::Control>(), 32);
         assert_eq!(abi::iowr(0x2a, 32), 0xc020462a);
     }
 }

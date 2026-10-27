@@ -97,7 +97,7 @@ pub struct Client {
     pub(crate) control: File,
     pub(crate) root: u32,
     pub version: String,
-    pub compat: Compat,
+    pub(crate) compat: Compat,
     pub(crate) cpu_page_size: usize,
 }
 impl Client {
@@ -174,7 +174,7 @@ impl Client {
     /// accident. No fallback: an absent or inaccessible requested BDF, any
     /// other open error, or no accessible card at all fails with the reason
     /// for every candidate.
-    pub fn select_card(&self, want: Option<[u32; 4]>) -> Result<abi::Card> {
+    pub(crate) fn select_card(&self, want: Option<[u32; 4]>) -> Result<abi::Card> {
         select_accessible_card(&self.cards()?, want, |minor| {
             OpenOptions::new()
                 .read(true)
@@ -752,7 +752,7 @@ pub(crate) struct PoolBlockGrant {
     pub(crate) size: u64,
 }
 /// Size of one GPU-internal pool block (one 2 MiB huge page).
-pub const POOL_BLOCK_SIZE: usize = 2 << 20;
+pub(crate) const POOL_BLOCK_SIZE: usize = 2 << 20;
 /// NVOS32 request of a GPU-internal pool block, field by field from public
 /// nvos.h; these are the values the proprietary driver (615.78.08) sends for
 /// the device memory that holds its command buffers' QMDs, kernel parameter
@@ -1492,7 +1492,7 @@ impl Mapping {
 }
 
 /// Normalized PCI BDF `dddd:bb:dd.f` of an RM card.
-pub fn card_bdf(card: &abi::Card) -> [u32; 4] {
+pub(crate) fn card_bdf(card: &abi::Card) -> [u32; 4] {
     [
         card.pci.domain,
         u32::from(card.pci.bus),
@@ -1500,7 +1500,7 @@ pub fn card_bdf(card: &abi::Card) -> [u32; 4] {
         u32::from(card.pci.function),
     ]
 }
-pub fn bdf_string(p: [u32; 4]) -> String {
+pub(crate) fn bdf_string(p: [u32; 4]) -> String {
     format!("{:04x}:{:02x}:{:02x}.{:x}", p[0], p[1], p[2], p[3])
 }
 
