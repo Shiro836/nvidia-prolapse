@@ -281,6 +281,7 @@ submit, fence signal/wait, memory map/unmap and the per-frame decoder path. On t
 ```
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --locked
 cargo deny check
 cargo +nightly-2026-10-24 miri test -p <crate> <unsafe modules the change touches>

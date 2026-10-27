@@ -2,7 +2,8 @@
 //! Bounded, explicitly requested performance-vote experiment; no production policy.
 //! Public OGKM 610.57.04 ctrl2080perf.h:54-102 and nvos.h NVOS54.
 //! Independent public-header C assertions verified all five Android CPU ABIs.
-use crate::{abi, rm};
+use crate::{abi, diag::diag, rm};
+use nv_rm_core::conv::u64_from_usize;
 use std::{os::fd::AsRawFd, rc::Rc};
 
 #[repr(C)]
@@ -44,7 +45,7 @@ impl PerformanceVote {
             client: self.device.client.root,
             object: self.device.subdevice,
             command: 0x2080200a,
-            parameters: (&mut params as *mut BoostParameters) as u64,
+            parameters: u64_from_usize((&raw mut params).expose_provenance()),
             size: 8,
             ..Default::default()
         };
@@ -71,9 +72,7 @@ impl PerformanceVote {
 impl Drop for PerformanceVote {
     fn drop(&mut self) {
         if let Err(e) = self.clear() {
-            eprintln!(
-                "PERF_BOOST cleanup: {e}; bounded expiry and RM object teardown remain active"
-            );
+            diag!("PERF_BOOST cleanup: {e}; bounded expiry and RM object teardown remain active");
         }
     }
 }

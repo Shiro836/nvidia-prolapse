@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MIT
 //! Explicit, bounded diagnostic only. Never called by the production backend.
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "a command-line diagnostic: its progress goes to stdout, its error to stderr"
+)]
 use nv_bionic_native::{perf_diagnostic::PerformanceVote, rm};
 use std::io::Write;
 

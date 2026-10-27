@@ -4,8 +4,14 @@
 //!   versions        every exact release compiled in, with static predicates
 //!   version VER     static facts for VER, or the exact refusal
 //!   caps            running driver: class list, SM ISA, capability selection,
-//!                   semaphore-surface layout/caps, BAR1 (card info fb_size)
+//!                   semaphore-surface layout/caps, BAR1 (card info `fb_size`)
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "a command-line probe: its report goes to stdout, its usage error to stderr"
+)]
 use nv_bionic_native::{capabilities, diagnostics, rm};
+use std::fmt::Write as _;
 
 fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
@@ -16,7 +22,9 @@ fn esc(s: &str) -> String {
             '\\' => o.push_str("\\\\"),
             '\n' => o.push_str("\\n"),
             '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c if u32::from(c) < 0x20 => {
+                write!(o, "\\u{:04x}", u32::from(c)).expect("writing to a String cannot fail");
+            }
             c => o.push(c),
         }
     }
@@ -42,6 +50,10 @@ fn facts_json(f: &diagnostics::VersionFacts) -> String {
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one JSON object, field by field in output order; splitting it scatters the schema"
+)]
 fn caps() -> (bool, String) {
     let libc = if cfg!(target_os = "android") {
         "bionic"
@@ -116,18 +128,17 @@ fn caps() -> (bool, String) {
             .read(true)
             .write(true)
             .open(&node)
-        {
-            if matches!(
+            && matches!(
                 e.kind(),
                 std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
-            ) {
-                skipped.push(format!(
-                    "{{\"minor\":{},\"error\":{}}}",
-                    card.minor,
-                    esc(&e.to_string())
-                ));
-                continue;
-            }
+            )
+        {
+            skipped.push(format!(
+                "{{\"minor\":{},\"error\":{}}}",
+                card.minor,
+                esc(&e.to_string())
+            ));
+            continue;
         }
         let pci = format!(
             "{:04x}:{:02x}:{:02x}.{:x}",
@@ -157,7 +168,7 @@ fn caps() -> (bool, String) {
                     Ok(v) => fields.push(format!("\"rm_sm_isa\":\"0x{v:x}\"")),
                     Err(e) => {
                         ok = false;
-                        fields.push(format!("\"rm_sm_isa_error\":{}", esc(&e.to_string())))
+                        fields.push(format!("\"rm_sm_isa_error\":{}", esc(&e.to_string())));
                     }
                 }
                 match &classes {
@@ -173,7 +184,7 @@ fn caps() -> (bool, String) {
                     }
                     Err(e) => {
                         ok = false;
-                        fields.push(format!("\"classes_error\":{}", esc(&e.to_string())))
+                        fields.push(format!("\"classes_error\":{}", esc(&e.to_string())));
                     }
                 }
                 if let (Ok(sm), Ok(classes)) = (&sm, &classes) {
@@ -193,7 +204,7 @@ fn caps() -> (bool, String) {
                         )),
                         Err(e) => {
                             ok = false;
-                            fields.push(format!("\"selection_error\":{}", esc(&e.to_string())))
+                            fields.push(format!("\"selection_error\":{}", esc(&e.to_string())));
                         }
                     }
                 }
@@ -218,7 +229,7 @@ fn caps() -> (bool, String) {
                     }
                     Err(e) => {
                         ok = false;
-                        fields.push(format!("\"semaphore_error\":{}", esc(&e.to_string())))
+                        fields.push(format!("\"semaphore_error\":{}", esc(&e.to_string())));
                     }
                 }
             }
@@ -275,5 +286,5 @@ fn main() {
         }
     };
     println!("{text}");
-    std::process::exit(if ok { 0 } else { 1 });
+    std::process::exit(i32::from(!ok));
 }
