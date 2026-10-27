@@ -39,16 +39,42 @@ pub enum Error {
     Memory(#[from] MemoryError),
 }
 
+/// `NV_STATUS` values (open-gpu-kernel-modules `kernel-open/common/inc/nvstatuscodes.h`) that
+/// classify a failure for the application.
+pub mod status {
+    /// `NV_ERR_GPU_IS_LOST`: "GPU lost from the bus".
+    pub const GPU_IS_LOST: u32 = 0x0f;
+    /// `NV_ERR_GPU_IN_FULLCHIP_RESET`: "GPU currently in full-chip reset".
+    pub const GPU_IN_FULLCHIP_RESET: u32 = 0x10;
+    /// `NV_ERR_INSUFFICIENT_RESOURCES`: "Ran out of a critical resource, other than memory".
+    pub const INSUFFICIENT_RESOURCES: u32 = 0x1a;
+    /// `NV_ERR_NO_MEMORY`: "Out of memory".
+    pub const NO_MEMORY: u32 = 0x51;
+    /// `NV_ERR_RC_ERROR`: "Generic RC error" (robust channel recovery killed the channel).
+    pub const RC_ERROR: u32 = 0x60;
+    /// `NV_ERR_RESET_REQUIRED`: "Reset required".
+    pub const RESET_REQUIRED: u32 = 0x62;
+}
+
 impl Error {
     /// The device or channel is unusable and the object must be destroyed: what the C ABI
-    /// reports as `VK_ERROR_DEVICE_LOST`.
+    /// reports as `VK_ERROR_DEVICE_LOST`. RM says so itself with the [`status`] values for a
+    /// GPU that fell off the bus, is resetting, needs a reset, or whose channel was killed by
+    /// robust channel recovery.
     pub fn is_device_lost(&self) -> bool {
         match self {
             Self::DeviceLost(_) => true,
+            Self::Rm { status, .. } => matches!(
+                *status,
+                status::GPU_IS_LOST
+                    | status::GPU_IN_FULLCHIP_RESET
+                    | status::RC_ERROR
+                    | status::RESET_REQUIRED
+            ),
             Self::Sync(error) => error.is_device_lost(),
             Self::Channel(error) => error.is_device_lost(),
             Self::Memory(error) => error.is_device_lost(),
-            Self::Io(..) | Self::Rm { .. } | Self::Contract(_) | Self::Wait(_) => false,
+            Self::Io(..) | Self::Contract(_) | Self::Wait(_) => false,
         }
     }
 }
@@ -548,3 +574,33 @@ pub enum WaitError {
 
 /// `Result` with the backend's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::{Error, status};
+
+    #[test]
+    fn rm_statuses_that_report_a_lost_gpu_are_device_loss() {
+        let rm = |status| Error::Rm {
+            operation: "op",
+            status,
+        };
+        for lost in [
+            status::GPU_IS_LOST,
+            status::GPU_IN_FULLCHIP_RESET,
+            status::RC_ERROR,
+            status::RESET_REQUIRED,
+        ] {
+            assert!(rm(lost).is_device_lost(), "{lost:#x}");
+        }
+        // NV_ERR_INVALID_ARGUMENT, NV_ERR_INSUFFICIENT_PERMISSIONS, out of memory.
+        for refused in [
+            0x1f,
+            0x1b,
+            status::NO_MEMORY,
+            status::INSUFFICIENT_RESOURCES,
+        ] {
+            assert!(!rm(refused).is_device_lost(), "{refused:#x}");
+        }
+    }
+}

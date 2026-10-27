@@ -2017,17 +2017,19 @@ fn present(bridge: Option<&Bridge>) -> Result<&Bridge> {
 /// device, `VK_ERROR_OUT_OF_HOST_MEMORY` (-1) for an `ENOMEM` syscall, and
 /// `VK_ERROR_INITIALIZATION_FAILED` (-3) for every other failure.
 fn vk_status(error: &Error) -> i32 {
+    if error.is_device_lost() {
+        return -4;
+    }
     match error {
-        Error::DeviceLost(_) => -4,
-        Error::Sync(_) | Error::Channel(_) | Error::Memory(_) => {
-            if error.is_device_lost() {
-                -4
-            } else {
-                -3
-            }
-        }
         Error::Io(_, error) if error.raw_os_error() == Some(12) => -1,
-        Error::Io(..) | Error::Rm { .. } | Error::Contract(_) | Error::Wait(_) => -3,
+        Error::Io(..)
+        | Error::Rm { .. }
+        | Error::Contract(_)
+        | Error::Wait(_)
+        | Error::DeviceLost(_)
+        | Error::Sync(_)
+        | Error::Channel(_)
+        | Error::Memory(_) => -3,
     }
 }
 fn report(result: Result<()>) -> i32 {
@@ -3640,6 +3642,18 @@ mod tests {
             elapsed: Duration::ZERO,
         };
         assert_eq!(vk_status(&wait.into()), -3);
+        // RM reporting a GPU off the bus, in or needing a reset, or a channel
+        // killed by robust channel recovery: device loss (nvstatuscodes.h).
+        for status in [0x0f, 0x10, 0x60, 0x62] {
+            assert_eq!(
+                vk_status(&Error::Rm {
+                    operation: "op",
+                    status
+                }),
+                -4,
+                "{status:#x}"
+            );
+        }
         // A poisoned or closed payload and a failed producer are device loss;
         // an operation that does not apply is a refused request.
         for (error, status) in [
