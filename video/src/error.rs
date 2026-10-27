@@ -137,11 +137,19 @@ impl VideoError {
     }
 }
 
-/// RM/channel failures inside a session are device-level: the session must be
-/// destroyed (`NV_VIDEO_E_DEVICE_LOST`).
+/// RM/channel failures inside a session. Running out of memory (RM out of memory, or a
+/// host `ENOMEM`) is `NV_VIDEO_E_NO_MEMORY`, as `nv_video.h` defines it; every other failure
+/// leaves the session's RM objects in an unknown state, so the session must be destroyed
+/// (`NV_VIDEO_E_DEVICE_LOST`). A lost device is never reported as out of memory.
 impl From<nv_rm_core::Error> for VideoError {
     fn from(e: nv_rm_core::Error) -> Self {
-        Self::DeviceLost(e.to_string())
+        let host_enomem =
+            matches!(&e, nv_rm_core::Error::Io(_, io) if io.raw_os_error() == Some(12));
+        if !e.is_device_lost() && (e.is_out_of_device_memory() || host_enomem) {
+            Self::NoMemory(e.to_string())
+        } else {
+            Self::DeviceLost(e.to_string())
+        }
     }
 }
 
@@ -219,4 +227,30 @@ pub fn unsupported<T>(m: impl Into<String>) -> VResult<T> {
 /// Always.
 pub fn bitstream<T>(m: impl Into<String>) -> VResult<T> {
     Err(VideoError::Bitstream(m.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VideoError;
+    use nv_rm_core::Error;
+
+    #[test]
+    fn rm_failures_keep_out_of_memory_apart_from_loss() {
+        let rm = |status| Error::Rm {
+            operation: "op",
+            status,
+        };
+        let code = |error: Error| VideoError::from(error).code();
+        // nv_video.h: NV_VIDEO_E_NO_MEMORY = -4, NV_VIDEO_E_DEVICE_LOST = -5.
+        assert_eq!(code(rm(0x51)), -4);
+        assert_eq!(code(rm(0x1a)), -4);
+        assert_eq!(
+            code(Error::Io("op", std::io::Error::from_raw_os_error(12))),
+            -4
+        );
+        assert_eq!(code(rm(0x0f)), -5);
+        assert_eq!(code(rm(0x1f)), -5);
+        assert_eq!(code(Error::DeviceLost("x".into())), -5);
+        assert_eq!(code(Error::Contract("x".into())), -5);
+    }
 }

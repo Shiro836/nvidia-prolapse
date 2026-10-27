@@ -56,9 +56,14 @@ struct VramBuffer {
 }
 
 fn vram(device: &Rc<Device>, space: &AddressSpace, size: usize) -> VResult<VramBuffer> {
-    let memory = device
-        .allocate_vram(size)
-        .map_err(|e| VideoError::NoMemory(format!("VRAM {size} bytes: {e}")))?;
+    let memory = device.allocate_vram(size).map_err(|e| {
+        // A failed allocation is out of memory, unless the device is lost.
+        if e.is_device_lost() {
+            VideoError::DeviceLost(format!("VRAM {size} bytes: {e}"))
+        } else {
+            VideoError::NoMemory(format!("VRAM {size} bytes: {e}"))
+        }
+    })?;
     let gpu = space.map(&memory)?;
     if gpu.address().get() & 0xff != 0 || gpu.address().get() >> 40 != 0 {
         return Err(VideoError::DeviceLost(
