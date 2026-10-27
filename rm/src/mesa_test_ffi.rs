@@ -280,6 +280,7 @@ impl<'b> CpuMap<'b> {
         // (rm.rs Memory::map_once), so the allocation size bounds it.
         let len = b
             .lock()
+            .unwrap()
             .0
             .buffers
             .get(&memory)

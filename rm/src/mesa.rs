@@ -340,10 +340,16 @@ unsafe fn sync_ref<'a>(id: u64) -> Result<&'a SyncObj> {
 }
 
 impl Bridge {
-    fn lock(&self) -> MutexGuard<'_, Confined> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// The device state. A poisoned lock (a thread panicked inside it; the
+    /// FFI guard has marked the device lost) is fatal for the device
+    /// (RUST.md §8): every later call fails as lost instead of using state a
+    /// panic may have left half-updated.
+    fn lock(&self) -> Result<MutexGuard<'_, Confined>> {
+        self.inner.lock().map_err(|error| {
+            Error::DeviceLost(format!(
+                "device state lock: {error} (a thread panicked while holding it)"
+            ))
+        })
     }
     fn new(pci: [u32; 4]) -> Result<(Self, Info)> {
         crate::diag::install_panic_hook();
@@ -417,7 +423,7 @@ impl Bridge {
                 bind_info: HashMap::new(),
             })),
         };
-        bridge.grow(&mut bridge.lock().0)?;
+        bridge.grow(&mut bridge.lock()?.0)?;
         Ok((bridge, info))
     }
 
@@ -425,7 +431,7 @@ impl Bridge {
     /// Map one more 64 KiB SYS page (CPU-cached, GPU-uncached; never unmapped
     /// before device teardown). Requires Inner.
     fn grow(&self, inner: &mut Inner) -> Result<()> {
-        if self.core.pool.next_page().is_none() {
+        if self.core.pool.next_page()?.is_none() {
             return Err(Error::Contract(
                 "semaphore slot pool exhausted (1M live slots)".into(),
             ));
@@ -462,7 +468,7 @@ impl Bridge {
     }
     fn slot_locked(&self, inner: &mut Inner) -> Result<Slot> {
         loop {
-            if let Some(slot) = self.core.pool.try_allocate() {
+            if let Some(slot) = self.core.pool.try_allocate()? {
                 return Ok(slot);
             }
             self.grow(inner)?;
@@ -471,11 +477,11 @@ impl Bridge {
     /// Allocate without holding any lock; takes Inner only to grow the pool.
     fn slot(&self) -> Result<Slot> {
         loop {
-            if let Some(slot) = self.core.pool.try_allocate() {
+            if let Some(slot) = self.core.pool.try_allocate()? {
                 return Ok(slot);
             }
-            let mut guard = self.lock();
-            if !self.core.pool.has_free() {
+            let mut guard = self.lock()?;
+            if !self.core.pool.has_free()? {
                 self.grow(&mut guard.0)?;
             }
         }
@@ -545,7 +551,7 @@ impl Bridge {
             |_| {
                 // RC readiness / EINTR / 1 s period: authoritative error state.
                 core.scan_due(true);
-                let mut guard = self.lock();
+                let mut guard = self.lock()?;
                 self.scan_locked(&mut guard.0)
             },
         );
@@ -555,7 +561,7 @@ impl Bridge {
         result
     }
     fn queue_shared(&self, context: u64) -> Result<Arc<QueueShared>> {
-        let guard = self.lock();
+        let guard = self.lock()?;
         Ok(Arc::clone(queue_ref(&guard.0, context)?.shared()))
     }
     fn wait_token(&self, context: u64, token: u64, timeout_ns: u64) -> Result<bool> {
@@ -573,7 +579,7 @@ impl Bridge {
     fn drain_timeout(&self, timeout_ns: u64) -> Result<()> {
         let start = Instant::now();
         let pending: Vec<(u64, u64)> = {
-            let guard = self.lock();
+            let guard = self.lock()?;
             self.core.live()?;
             guard
                 .0
@@ -661,7 +667,7 @@ impl Bridge {
                 Ok(true)
             },
             |_| {
-                let mut guard = self.lock();
+                let mut guard = self.lock()?;
                 // Refresh every channel's error notifier: an RC'd channel no
                 // longer runs, which the predicate above accepts. Its error is
                 // logged here; the device is already lost.
@@ -949,7 +955,7 @@ impl Bridge {
         signals: &[SyncPoint],
     ) -> Result<SubmitStatus> {
         self.core.live()?;
-        let mut guard = self.lock();
+        let mut guard = self.lock()?;
         let inner = &mut guard.0;
         if self.core.scan_due(false) {
             self.scan_locked(inner)?;
@@ -1267,7 +1273,7 @@ impl Bridge {
         if sync.timeline {
             return Err(Error::Contract("timeline SYNC_FD export is invalid".into()));
         }
-        let mut guard = self.lock();
+        let mut guard = self.lock()?;
         let inner = &mut guard.0;
         self.core.live()?;
         enum Next {
@@ -1734,23 +1740,40 @@ impl Drop for Bridge {
         let drained = self.drain_timeout(5_000_000_000);
         if let Err(e) = &drained {
             diag!("RM close drain failed; tearing down lost channels: {e}");
-            let mut guard = self.lock();
-            self.lose_locked(&mut guard.0);
+            match self.lock() {
+                Ok(mut guard) => self.lose_locked(&mut guard.0),
+                Err(error) => diag!("RM close: {error}"),
+            }
         }
         self.core.watcher.stop(&self.core);
         if drained.is_err() {
             // Release what the lost channels wait on, then let them run out
             // (bounded): never free a channel blocked in an acquire.
-            let pending: Vec<_> = {
-                let mut guard = self.lock();
-                let inner = &mut guard.0;
-                (1..=u64_from_usize(inner.queues.len()))
-                    .filter_map(|context| self.unblock_locked(inner, context))
-                    .collect()
+            let pending: Vec<_> = match self.lock() {
+                Ok(mut guard) => {
+                    let inner = &mut guard.0;
+                    (1..=u64_from_usize(inner.queues.len()))
+                        .filter_map(|context| self.unblock_locked(inner, context))
+                        .collect()
+                }
+                Err(error) => {
+                    diag!("RM close: {error}");
+                    Vec::new()
+                }
             };
             self.quiesce(&pending, Duration::from_secs(5));
         }
-        let mut guard = self.lock();
+        let mut guard = match self.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                // State a panic may have left half-updated is not walked:
+                // its channels and objects drop with the Bridge, in field
+                // order, and leaked payloads stop touching the pool's pages.
+                diag!("RM close: {error}; explicit teardown skipped");
+                self.core.pool.close();
+                return;
+            }
+        };
         let inner = &mut guard.0;
         for (index, queue) in inner.queues.iter().enumerate() {
             if let Some(queue) = queue {
@@ -2144,7 +2167,7 @@ pub(crate) unsafe extern "C" fn nv_rm_alloc(
                     "unsupported memory placement/tiled allocation (tile mode, or a kind on compressible or pool-block memory)".into(),
                 ));
             }
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let s = &mut guard.0;
             // Retired frees first: their memory may be what this needs.
             b.reclaim_locked(s, false);
@@ -2222,7 +2245,7 @@ pub(crate) unsafe extern "C" fn nv_rm_map(p: *mut Bridge, memory: u64, out: *mut
             }
             let b = present(object)?;
             b.core.live()?;
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let s = &mut guard.0;
             b.reclaim_locked(s, false);
             let buffer = s
@@ -2256,7 +2279,7 @@ pub(crate) unsafe extern "C" fn nv_rm_unmap(p: *mut Bridge, memory: u64) -> i32 
             let b = present(object)?;
             // Cleanup remains possible after loss. A failed final teardown keeps
             // both its logical reference and the partially released lease owned.
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let s = &mut guard.0;
             let result = s
                 .buffers
@@ -2292,7 +2315,7 @@ pub(crate) unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: u64) -> i32 {
             // thread must produce): the RM object is freed once the work
             // outstanding now has retired (reclaim.rs). Cleanup stays possible
             // after loss; lost queues keep the object until close.
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let s = &mut guard.0;
             let buffer = s
                 .buffers
@@ -2346,7 +2369,7 @@ pub(crate) unsafe extern "C" fn nv_rm_bind(
             if address < 1 << 34 || address.checked_add(size).is_none_or(|n| n > 1 << 40) {
                 return Err(Error::Contract("Mesa VA outside reserved range".into()));
             }
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let s = &mut guard.0;
             b.reclaim_locked(s, false);
             let buffer = s
@@ -2400,7 +2423,7 @@ pub(crate) unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: u64) -> i3
     guarded("nv_rm_unbind", object, move || {
         report((|| {
             let b = present(object)?;
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let s = &mut guard.0;
             b.reclaim_locked(s, false);
             let result = s
@@ -2462,7 +2485,7 @@ pub(crate) unsafe extern "C" fn nv_rm_va_free(
                 .checked_add(size)
                 .filter(|&end| size != 0 && address >= 1 << 34 && end <= 1 << 40)
                 .ok_or_else(|| Error::Contract("VA free outside reserved range".into()))?;
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let s = &mut guard.0;
             // Transactional: validate every id (known, inside this range, no
             // duplicates) before taking any; on error C keeps the range.
@@ -2534,7 +2557,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_create(
             }
             let b = present(object)?;
             b.core.live()?;
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let id = b.create_context(&mut guard.0, engines, None)?;
             // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, id) }
@@ -2567,7 +2590,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_create_shared(
             }
             let b = present(object)?;
             b.core.live()?;
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let id = b.create_context(&mut guard.0, engines, Some(share))?;
             // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
             unsafe { output(out, id) }
@@ -2591,7 +2614,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -
     guarded("nv_rm_context_destroy", object, move || {
         report((|| {
             let b = present(object)?;
-            let token = queue_ref(&b.lock().0, id)?.last_token();
+            let token = queue_ref(&b.lock()?.0, id)?.last_token();
             // Bounded quiesce: an unsignaled (e.g. foreign-gated) batch is lost
             // after 5 s; its acquires are then released so the channel runs
             // out, and only the idle channel is RM-freed (no schedule-off
@@ -2605,14 +2628,14 @@ pub(crate) unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -
                 });
             if !drained {
                 let pending = {
-                    let mut guard = b.lock();
+                    let mut guard = b.lock()?;
                     b.lose_locked(&mut guard.0);
                     b.unblock_locked(&mut guard.0, id)
                 };
                 // Released acquires let the channel run out before its free.
                 b.quiesce(pending.as_slice(), Duration::from_secs(5));
             }
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let s = &mut guard.0;
             let queue = s
                 .queues
@@ -2784,12 +2807,12 @@ pub(crate) unsafe extern "C" fn nv_rm_context_fence(
             let b = present(object)?;
             b.core.live()?;
             if b.capture.load(Ordering::Relaxed)
-                && let Some(cap) = b.lock().0.capture.as_mut()
+                && let Some(cap) = b.lock()?.0.capture.as_mut()
             {
                 cap.mark(id, token, 1);
             }
             let fence = {
-                let guard = b.lock();
+                let guard = b.lock()?;
                 let queue = queue_ref(&guard.0, id)?;
                 // SAFETY: nv_rm.h: `drm_fd` is open for the whole call
                 // (non-negative checked above).
@@ -2918,7 +2941,7 @@ pub(crate) unsafe extern "C" fn nv_rm_timestamp(p: *mut Bridge, out: *mut u64) -
     guarded("nv_rm_timestamp", object, move || {
         report((|| {
             let b = present(object)?;
-            let guard = b.lock();
+            let guard = b.lock()?;
             let device = &guard.0.device;
             let mut time = 0u64;
             device
@@ -2951,7 +2974,7 @@ pub(crate) unsafe extern "C" fn nv_rm_export(
             }
             let b = present(object)?;
             b.core.live()?;
-            let guard = b.lock();
+            let guard = b.lock()?;
             let buffer = guard
                 .0
                 .buffers
@@ -2988,7 +3011,7 @@ pub(crate) unsafe extern "C" fn nv_rm_import(
             }
             let b = present(object)?;
             b.core.live()?;
-            let mut guard = b.lock();
+            let mut guard = b.lock()?;
             let s = &mut guard.0;
             b.reclaim_locked(s, false);
             // SAFETY: nv_rm.h: `drm_fd` is open for the whole call
@@ -3368,7 +3391,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_export_fd(
             let b = present(object)?;
             b.core.live()?;
             if b.capture.load(Ordering::Relaxed)
-                && let Some(cap) = b.lock().0.capture.as_mut()
+                && let Some(cap) = b.lock()?.0.capture.as_mut()
             {
                 cap.mark(0, id, 2 + opaque);
             }
@@ -3376,7 +3399,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_export_fd(
                 // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
                 let shared = unsafe { sync_ref(id) }?.share()?;
                 if shared.has_local_work() {
-                    let mut guard = b.lock();
+                    let mut guard = b.lock()?;
                     b.ensure_watcher_host(&mut guard.0)?;
                     drop(guard);
                     b.core.watcher.publish(&b.core, Arc::clone(&shared))?;

@@ -302,12 +302,14 @@ fn slot_lifetime_recycles_under_gpu_retirement() {
     assert_eq!(c::sync_get_value(&bridge, &timeline, &mut value), 0);
     assert_eq!(value, 3000);
     // Retire everything, then confirm a single pool page sufficed.
-    let token = queue_ref(&bridge.lock().0, ctx).unwrap().last_token();
+    let token = queue_ref(&bridge.lock().unwrap().0, ctx)
+        .unwrap()
+        .last_token();
     assert_eq!(c::wait(&bridge, ctx, token, u64::MAX), 0);
     let mut t = 0;
     assert_eq!(c::submit(&bridge, ctx, &[], &mut t), 0);
     assert_eq!(
-        bridge.core.pool.next_page(),
+        bridge.core.pool.next_page().unwrap(),
         Some(1),
         "slots were not recycled"
     );
@@ -384,7 +386,9 @@ fn ring_full_leaves_payloads_untouched() {
     assert!(accepted.len() > 300, "ring filled after {}", accepted.len());
     assert_eq!(c::sync_signal(&bridge, &gate, 1), 0);
     assert_eq!(c::wait(&bridge, ctx, full_token, u64::MAX), 0);
-    let last = queue_ref(&bridge.lock().0, ctx).unwrap().last_token();
+    let last = queue_ref(&bridge.lock().unwrap().0, ctx)
+        .unwrap()
+        .last_token();
     assert_eq!(c::wait(&bridge, ctx, last, u64::MAX), 0);
     let accepted_count = accepted.len();
     for id in accepted {

@@ -661,7 +661,7 @@ mod tests {
         drop(foreign);
         // The descriptor it polled is gone; it must keep serving, not see
         // POLLNVAL and publish loss.
-        let slot = core.pool.try_allocate().unwrap();
+        let slot = core.pool.try_allocate().unwrap().unwrap();
         core.pool.retain(slot);
         let (gated, mut peer) = stand_in();
         core.watcher.gate(&core, Arc::clone(&gated), slot).unwrap();
@@ -689,7 +689,7 @@ mod tests {
         let core = Core::detached(pool).unwrap();
         idle(&core);
         for round in 0..200 {
-            let slot = core.pool.try_allocate().unwrap();
+            let slot = core.pool.try_allocate().unwrap().unwrap();
             core.pool.retain(slot);
             let (foreign, mut peer) = stand_in();
             core.watcher

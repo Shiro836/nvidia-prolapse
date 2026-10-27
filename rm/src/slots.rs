@@ -20,10 +20,11 @@
 //! A slot returns to the free list only when the count reaches zero, so a slot
 //! captured by in-flight GPU work can never be recycled or re-initialized.
 //! Allocation zeroes all 16 bytes before the slot is handed out.
+use crate::diag::diag;
 use crate::rm::{Error, Result};
 use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::sync::{
-    Mutex, OnceLock,
+    Mutex, MutexGuard, OnceLock,
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence},
 };
 
@@ -139,22 +140,24 @@ impl SlotPool {
         }
     }
 
-    /// Next page index to install, or None at the hard limit.
-    pub(crate) fn next_page(&self) -> Option<usize> {
-        let free = self
-            .free
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (free.pages < MAX_PAGES).then_some(free.pages)
+    /// The free list. A poisoned lock (a thread panicked inside it; the FFI
+    /// guard has marked the device lost) is fatal for the pool (RUST.md §8).
+    fn free_list(&self) -> Result<MutexGuard<'_, FreeList>> {
+        self.free.lock().map_err(|error| {
+            Error::DeviceLost(format!(
+                "semaphore pool free list lock: {error} (a thread panicked while holding it)"
+            ))
+        })
     }
 
-    pub(crate) fn has_free(&self) -> bool {
-        !self
-            .free
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .free
-            .is_empty()
+    /// Next page index to install, or None at the hard limit.
+    pub(crate) fn next_page(&self) -> Result<Option<usize>> {
+        let free = self.free_list()?;
+        Ok((free.pages < MAX_PAGES).then_some(free.pages))
+    }
+
+    pub(crate) fn has_free(&self) -> Result<bool> {
+        Ok(!self.free_list()?.free.is_empty())
     }
 
     /// Register a mapped page. `cpu` must stay mapped and `gpu` must stay
@@ -168,10 +171,7 @@ impl SlotPool {
         if cpu == 0 || !cpu.is_multiple_of(4096) || !gpu.is_multiple_of(4096) {
             return Err(Error::Contract("unaligned semaphore pool page".into()));
         }
-        let mut free = self
-            .free
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut free = self.free_list()?;
         let index = free.pages;
         if index >= MAX_PAGES {
             return Err(Error::Contract(
@@ -216,14 +216,11 @@ impl SlotPool {
     }
 
     /// Pop a zeroed slot with one reference, or None if a new page is needed.
-    pub(crate) fn try_allocate(&self) -> Option<Slot> {
-        let slot = Slot(
-            self.free
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .free
-                .pop()?,
-        );
+    pub(crate) fn try_allocate(&self) -> Result<Option<Slot>> {
+        let Some(slot) = self.free_list()?.free.pop() else {
+            return Ok(None);
+        };
+        let slot = Slot(slot);
         let page = self.page(slot);
         let refs = &page.refs[usize_from_u32(slot.0) % SLOTS_PER_PAGE];
         debug_assert_eq!(refs.load(Ordering::Relaxed), 0);
@@ -236,7 +233,7 @@ impl SlotPool {
         page.atomic64(PageOffset::of(slot, Word::High))
             .store(0, Ordering::Relaxed);
         fence(Ordering::SeqCst);
-        Some(slot)
+        Ok(Some(slot))
     }
 
     pub(crate) fn retain(&self, slot: Slot) {
@@ -253,11 +250,12 @@ impl SlotPool {
         if previous == 1 {
             // Synchronize with every other owner's final use (Release above).
             fence(Ordering::Acquire);
-            self.free
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .free
-                .push(slot.0);
+            match self.free_list() {
+                Ok(mut free) => free.free.push(slot.0),
+                // The slot stays out of circulation; allocation fails on
+                // the same lock.
+                Err(error) => diag!("semaphore slot {} not returned: {error}", slot.0),
+            }
         }
     }
 
@@ -455,10 +453,30 @@ pub(crate) mod tests {
         }
     }
 
+    /// RUST.md §8: a poisoned free list fails allocation as device lost; a
+    /// release keeps the slot out of circulation instead of panicking.
+    #[test]
+    fn poisoned_free_list_fails_allocation_as_device_lost() {
+        let (pool, _pages) = HostPages::pool(TimelineView::Native64, 1);
+        let slot = pool.try_allocate().unwrap().unwrap();
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                let _free = pool.free.lock().unwrap();
+                panic!("poison the free list");
+            });
+            assert!(holder.join().is_err());
+        });
+        assert!(matches!(pool.try_allocate(), Err(Error::DeviceLost(_))));
+        assert!(matches!(pool.has_free(), Err(Error::DeviceLost(_))));
+        assert!(matches!(pool.next_page(), Err(Error::DeviceLost(_))));
+        pool.release(slot);
+        assert_eq!(pool.refs(slot), 0);
+    }
+
     #[test]
     fn slot_lifetime_requires_cpu_and_every_gpu_reference() {
         let (pool, _pages) = HostPages::pool(TimelineView::Native64, 1);
-        let a = pool.try_allocate().unwrap();
+        let a = pool.try_allocate().unwrap().unwrap();
         pool.store32(a, 1).unwrap();
         // Two in-flight GPU submissions capture the slot.
         pool.retain(a);
@@ -468,7 +486,7 @@ pub(crate) mod tests {
         // Not recyclable: the next allocations must be different slots.
         let mut seen = vec![];
         for _ in 0..64 {
-            let s = pool.try_allocate().unwrap();
+            let s = pool.try_allocate().unwrap().unwrap();
             assert_ne!(s, a);
             seen.push(s);
         }
@@ -479,7 +497,7 @@ pub(crate) mod tests {
         );
         pool.release(a); // last submission retired → freed
         assert_eq!(pool.refs(a), 0);
-        let again = pool.try_allocate().unwrap();
+        let again = pool.try_allocate().unwrap().unwrap();
         assert_eq!(again, a, "LIFO reuse after final release");
         assert_eq!(pool.read32(again).unwrap(), 0, "zeroed on allocation");
         for s in seen {
@@ -491,11 +509,11 @@ pub(crate) mod tests {
     fn exhaustion_and_close_are_named_errors() {
         let (pool, _pages) = HostPages::pool(TimelineView::Native64, 1);
         let all: Vec<_> = (0..SLOTS_PER_PAGE)
-            .map(|_| pool.try_allocate().unwrap())
+            .map(|_| pool.try_allocate().unwrap().unwrap())
             .collect();
-        assert!(pool.try_allocate().is_none());
+        assert!(pool.try_allocate().unwrap().is_none());
         pool.release(all[7]);
-        assert_eq!(pool.try_allocate(), Some(all[7]));
+        assert_eq!(pool.try_allocate().unwrap(), Some(all[7]));
         pool.close();
         assert!(matches!(pool.read32(all[0]), Err(Error::DeviceLost(_))));
         assert!(pool.store32(all[0], 1).is_err());
@@ -505,7 +523,7 @@ pub(crate) mod tests {
     #[test]
     fn native64_host_signal_is_monotonic_full_width() {
         let (pool, _pages) = HostPages::pool(TimelineView::Native64, 1);
-        let s = pool.try_allocate().unwrap();
+        let s = pool.try_allocate().unwrap().unwrap();
         pool.init_timeline(s, 0xffff_fffe).unwrap();
         assert!(pool.host_signal(s, 0x1_0000_0001).unwrap());
         assert_eq!(pool.timeline_value(s).unwrap(), 0x1_0000_0001);
@@ -518,7 +536,7 @@ pub(crate) mod tests {
     #[test]
     fn split_view_wraps_epochs_and_rejects_out_of_window_waits() {
         let (pool, _pages) = HostPages::pool(TimelineView::Split32, 1);
-        let s = pool.try_allocate().unwrap();
+        let s = pool.try_allocate().unwrap().unwrap();
         pool.init_timeline(s, 0xffff_fff0).unwrap();
         assert_eq!(pool.timeline_value(s).unwrap(), 0xffff_fff0);
         // GPU signal of a wrapped value: shadow raised at encode, then the
@@ -565,7 +583,7 @@ pub(crate) mod tests {
                     let mut live = Vec::new();
                     for i in 0..20_000u32 {
                         if i % 3 != 2 {
-                            let s = pool.try_allocate().unwrap();
+                            let s = pool.try_allocate().unwrap().unwrap();
                             // A live slot's count is exactly ours.
                             assert_eq!(pool.refs(s), 1);
                             pool.store32(s, i).unwrap();

@@ -45,7 +45,7 @@ fn context(b: &Bridge, engines: u32, share: Option<u64>) -> u64 {
     id
 }
 fn subcontext(b: &Bridge, ctx: u64) -> (u32, u32) {
-    queue_ref(&b.lock().0, ctx).unwrap().subcontext()
+    queue_ref(&b.lock().unwrap().0, ctx).unwrap().subcontext()
 }
 
 /// `iters` steps of x = x * 1664525 + 1013904223 (mod 2^32) as one affine map.
@@ -78,7 +78,7 @@ struct Work {
 }
 impl Work {
     fn new(b: &Bridge, program: &crate::compiler::Shader, iters: u32, seed: u32) -> Self {
-        let guard = b.lock();
+        let guard = b.lock().unwrap();
         let inner = &guard.0;
         let (device, space) = (&inner.device, &inner.space);
         let compute = capabilities::query(device).unwrap().compute;
@@ -218,7 +218,7 @@ fn shared_tsg_contexts_run_concurrently() {
         "owner VEID {veid_owner} TSG {tsg_owner:#x}; shared VEID {veid_shared} TSG {tsg_shared:#x}; separate VEID {veid_separate} TSG {tsg_separate:#x}"
     );
     // One ZCULL buffer per TSG, bound by its graphics channel.
-    let zcull = |b: &Bridge, ctx| queue_ref(&b.lock().0, ctx).unwrap().zcull_range();
+    let zcull = |b: &Bridge, ctx| queue_ref(&b.lock().unwrap().0, ctx).unwrap().zcull_range();
     assert!(zcull(b, owner).is_some());
     assert_eq!(zcull(b, shared), zcull(b, owner));
     assert_eq!(zcull(b, separate), None);

@@ -802,7 +802,7 @@ mod tests {
     use std::os::fd::AsFd;
 
     fn fresh(pool: &Arc<SlotPool>) -> Slot {
-        pool.try_allocate().unwrap()
+        pool.try_allocate().unwrap().unwrap()
     }
 
     #[test]

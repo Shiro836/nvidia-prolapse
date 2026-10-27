@@ -187,7 +187,7 @@ impl CopyEngine {
         // pool, the page's only users; nothing else accesses the page.
         unsafe { pool.install_page(page_cpu.cpu_address(), page_gpu.address()) }?;
         let retire = pool
-            .try_allocate()
+            .try_allocate()?
             .ok_or_else(|| VideoError::DeviceLost("empty semaphore slot page".into()))?;
         let events = RmEvents::new(device)?;
         let queue = Queue::new_with_events(device, space, 1, &events, &pool, retire)?;
