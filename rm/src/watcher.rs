@@ -578,6 +578,8 @@ fn service(core: &Arc<Core>, readiness: &Readiness, host: Option<RawFd>) {
         });
     }
     drop(state);
+    // A failed broadcast delays other processes' waiters by at most one
+    // scan period (mesa.rs `Bridge::broadcast`).
     if broadcast && let Err(error) = core.trigger.trigger() {
         diag!("RM shared broadcast: {error}");
     }

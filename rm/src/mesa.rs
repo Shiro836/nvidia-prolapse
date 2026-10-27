@@ -851,6 +851,12 @@ impl Bridge {
         Ok(())
     }
 
+    /// Wake waiters in other processes after a shared payload changed (RM HOST
+    /// event). A failed trigger is logged and not returned: it costs those
+    /// waiters at most one scan period, because every waiting leader leaves
+    /// poll at least once per `waiters::SCAN_PERIOD` and re-reads the shared
+    /// word, and failing the local operation would not deliver the wake
+    /// either. The watcher's broadcasts follow the same rule.
     fn broadcast(&self, changed: bool) {
         if changed && let Err(error) = self.core.trigger.trigger() {
             diag!("RM shared payload broadcast: {error}");
