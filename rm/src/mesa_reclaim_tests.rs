@@ -189,8 +189,7 @@ fn pending_sync_file(
 /// VK_ERROR_DEVICE_LOST to a fence export, and the export publishes the loss:
 /// the C status query and wait-status snapshot then report it to Mesa. No GPU
 /// fault is involved: the channel's work has retired and the channel is then
-/// marked lost on the CPU, as retirement or a failed submission does. (The
-/// work must have retired: teardown treats a lost channel as stopped.)
+/// marked lost on the CPU, as retirement or a failed submission does.
 #[test]
 #[ignore = "local NVIDIA GPU: fence export from a lost channel reports and publishes device loss"]
 fn lost_channel_fence_export_reports_device_lost() {
@@ -216,6 +215,64 @@ fn lost_channel_fence_export_reports_device_lost() {
     assert_eq!(c::check_status(&bridge), -4);
     assert_eq!(c::sync_destroy(&bridge, sem), 0);
     assert_eq!(c::context_destroy(&bridge, ctx), 0);
+}
+
+/// A loss latched on the CPU while batches are blocked on a timeline acquire
+/// (no GPU fault: the channels are healthy and stay blocked). As the stock
+/// driver does: every wait reports VK_ERROR_DEVICE_LOST at once, nothing
+/// signals the acquire on the CPU, and teardown RM-frees the blocked channels
+/// (one through nv_rm_context_destroy, one through nv_rm_close) without
+/// waiting and before any memory or semaphore slot they can read is freed.
+/// Releasing the acquires instead let a batch run into freed memory (Xid 31).
+#[test]
+#[ignore = "local NVIDIA GPU: teardown after a CPU-latched loss with batches blocked on an acquire"]
+fn latched_loss_frees_channels_blocked_on_an_acquire() {
+    let pci = selected_pci();
+    let bridge = open(pci);
+    let first = context(&bridge);
+    let second = context(&bridge);
+    let gate = create(&bridge, true, 0);
+    let done = create(&bridge, false, 0);
+    let blocked = [
+        submit(&bridge, first, &[], &[point(&gate, 1)], &[point(&done, 0)]),
+        submit(&bridge, second, &[], &[point(&gate, 2)], &[]),
+    ];
+    for (ctx, token) in [(first, blocked[0]), (second, blocked[1])] {
+        assert_eq!(
+            c::wait(&bridge, ctx, token, 50_000_000),
+            2,
+            "blocked on the gate"
+        );
+    }
+    queue_slot(&mut bridge.lock().unwrap().0.queues, first)
+        .unwrap()
+        .mark_lost_for_test();
+    let start = Instant::now();
+    assert_eq!(c::wait(&bridge, first, blocked[0], u64::MAX), -4);
+    assert_eq!(c::check_status(&bridge), -4);
+    assert_eq!(c::wait(&bridge, second, blocked[1], u64::MAX), -4);
+    assert!(
+        start.elapsed() < Duration::from_millis(100),
+        "{:?}",
+        start.elapsed()
+    );
+    let (gate_open, _) = gate.obj().unwrap().ready(1, false).unwrap();
+    assert!(!gate_open, "the acquire is not signalled on the CPU");
+    assert_eq!(c::context_destroy(&bridge, first), 0);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(c::sync_destroy(&bridge, gate), 0);
+    assert_eq!(c::sync_destroy(&bridge, done), 0);
+    // nv_rm_close with the second channel still blocked.
+    drop(Arc::into_inner(bridge).expect("the test holds the only reference"));
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 /// 5a. The Android cycle: GPU work gated on a foreign sync_file whose producer

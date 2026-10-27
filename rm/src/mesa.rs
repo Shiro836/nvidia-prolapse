@@ -36,7 +36,7 @@ use crate::{
 };
 use nv_rm_core::conv::{high_u32, low_u32, u64_from_usize, usize_from_u32};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     ffi::c_void,
     os::fd::{AsRawFd, BorrowedFd, IntoRawFd, OwnedFd, RawFd},
     rc::Rc,
@@ -222,19 +222,6 @@ struct SubmitScratch {
     allocated: Vec<Slot>,
     actions: Vec<Action>,
     shadows: Vec<(Slot, u64)>,
-    /// What each GPU acquire of this batch waits for (parallel to `waits`).
-    acquires: Vec<Acquire>,
-}
-/// A GPU semaphore acquire of an accepted batch, as the CPU value that
-/// satisfies it. Kept per context until the batch retires; the slot stays
-/// alive meanwhile because the batch holds it (`held`, released only through
-/// retired tokens).
-#[derive(Clone, Copy)]
-enum Acquire {
-    /// Binary payload or gate slot: passes on 1.
-    Binary(Slot),
-    /// Timeline slot: passes at >= value (full-width value).
-    Timeline(Slot, u64),
 }
 /// Post-acceptance state changes, applied only after the batch is accepted.
 enum Action {
@@ -253,9 +240,6 @@ enum Action {
 /// pages, the address space and finally the device/client.
 struct Inner {
     queues: Vec<Option<Queue>>,
-    /// Per context (same index as `queues`): acquires of accepted batches
-    /// that may not have retired yet, oldest first (`unblock_locked`).
-    acquires: Vec<VecDeque<(u64, Acquire)>>,
     export_queue: Option<u64>,
     maps: HashMap<u64, GpuMapping>,
     buffers: HashMap<u64, Buffer>,
@@ -402,7 +386,6 @@ impl Bridge {
                 .map_err(|e| Error::Io("register the fork handler", e))?,
             inner: Mutex::new(Confined(Inner {
                 queues: Vec::new(),
-                acquires: Vec::new(),
                 export_queue: None,
                 maps: HashMap::new(),
                 buffers: HashMap::new(),
@@ -626,100 +609,22 @@ impl Bridge {
         Ok(())
     }
 
-    // ---- loss teardown: never free a channel blocked on our semaphore ----
-    /// Device loss or an expired bounded drain, before RM-freeing channels.
-    /// Satisfy every GPU acquire of the context's unretired batches (gates of
-    /// failed/pending foreign or shared producers, native binary/timeline
-    /// payloads nobody will signal any more) so the channel runs to its
-    /// completion release instead of being freed while blocked in a semaphore
-    /// ACQUIRE: pre-Volta RM then preempts the channel and logs Xid 45. The
-    /// device is already lost: results of the released work are undefined, and
-    /// every CPU wait/status path already reports loss. Returns the context's
-    /// last token and retirement view for `quiesce`.
-    fn unblock_locked(&self, inner: &mut Inner, context: u64) -> Option<(u64, Arc<QueueShared>)> {
-        let index = context_index(context)?;
-        let queue = inner.queues.get(index)?.as_ref()?;
-        let shared = Arc::clone(queue.shared());
-        let token = queue.last_token();
-        // Entries newer than `completed` are still held by their batch (held
-        // slots are released only through retired tokens <= completed).
-        // Unreadable completion (the device is lost) releases every entry:
-        // releasing an acquire the GPU already passed is harmless, keeping
-        // one it is blocked on frees a blocked channel.
-        let completed = shared.completed().unwrap_or(FenceValue::new(0));
-        let pool = &self.core.pool;
-        for &(batch, acquire) in &inner.acquires[index] {
-            if batch <= completed.get() {
-                continue;
-            }
-            let result = match acquire {
-                Acquire::Binary(slot) => pool.store32(slot, 1),
-                Acquire::Timeline(slot, value) => pool.host_signal(slot, value).map(|_| ()),
-            };
-            if let Err(error) = result {
-                diag!("nvk Rust RM teardown acquire release (context {context}): {error}");
-            }
+    // ---- teardown --------------------------------------------------------
+    /// Invariant at every channel free of a healthy device: no unretired work.
+    /// A device whose loss is latched frees its channels without waiting,
+    /// blocked or not, as the stock driver does (libnvidia-eglcore 615.78.08:
+    /// after a latched loss vkQueueWaitIdle/vkDeviceWaitIdle return
+    /// VK_ERROR_DEVICE_LOST at once and vkDestroyDevice frees the channels;
+    /// their RM free stops them). Memory such a channel can still read stays
+    /// allocated until its free: deferred frees wait for it (`reclaim_begin`
+    /// counts a lost queue as unretired), and the semaphore slot pool and the
+    /// address space outlive every channel (`Inner` field order).
+    fn check_idle_before_free(&self, context: u64, queue: &Queue) {
+        if self.core.is_lost() {
+            return;
         }
-        inner.acquires[index].clear();
-        Some((token.get(), shared))
-    }
-    /// Bounded wait, ignoring the device loss flag, until every listed channel
-    /// retired its last token or reported a channel error (an RC'd channel
-    /// never retires and is no longer running). Woken by the completion
-    /// interrupt; channel error notifiers are rechecked on RC readiness.
-    fn quiesce(&self, pending: &[(u64, Arc<QueueShared>)], timeout: Duration) -> bool {
-        let start = Instant::now();
-        let core = &self.core;
-        let result = core.waiters.wait(
-            Some(start + timeout),
-            Some(core.devices),
-            || {
-                for (token, shared) in pending {
-                    match shared.retired(FenceValue::new(*token)) {
-                        Ok(true) => {}
-                        Err(error) if error.is_device_lost() => {}
-                        Ok(false) => return Ok(false),
-                        Err(error) => return Err(error),
-                    }
-                }
-                Ok(true)
-            },
-            |_| {
-                let mut guard = self.lock()?;
-                // Refresh every channel's error notifier: an RC'd channel no
-                // longer runs, which the predicate above accepts. Its error is
-                // logged here; the device is already lost.
-                for queue in guard.0.queues.iter_mut().flatten() {
-                    if let Err(error) = queue.check_error() {
-                        diag!("nvk Rust RM teardown: channel error: {error}");
-                    }
-                }
-                Ok(())
-            },
-        );
-        match result {
-            Ok(true) => true,
-            Ok(false) => {
-                diag!(
-                    "nvk Rust RM teardown: channels did not retire within {timeout:?} after releasing their acquires"
-                );
-                false
-            }
-            Err(error) => {
-                diag!("nvk Rust RM teardown quiesce: {error}");
-                false
-            }
-        }
-    }
-    /// Invariant at every channel free: no unretired work (a running or
-    /// blocked channel). A channel that reported its own error is exempt.
-    fn check_idle_before_free(context: u64, queue: &Queue) {
         let token = queue.last_token();
-        let blocked = match queue.shared().retired(token) {
-            Ok(retired) => !retired,
-            Err(error) => !error.is_device_lost(),
-        };
-        if blocked {
+        if !matches!(queue.shared().retired(token), Ok(true)) {
             diag!(
                 "nvk Rust RM: freeing channel of context {context} with unretired work (last token {token})"
             );
@@ -996,7 +901,6 @@ impl Bridge {
         scratch.allocated.clear();
         scratch.actions.clear();
         scratch.shadows.clear();
-        scratch.acquires.clear();
         // SAFETY: same ids as this function's, under its contract.
         let result = unsafe {
             self.submit_locked(
@@ -1025,7 +929,6 @@ impl Bridge {
                         token.get(),
                     );
                 }
-                record_acquires(inner, context, token.get(), scratch.acquires.drain(..));
                 let mut notify = !scratch.signals.is_empty();
                 for action in scratch.actions.drain(..) {
                     match action {
@@ -1125,7 +1028,6 @@ impl Bridge {
                 s.allocated.push(gate);
                 s.held.push(gate);
                 s.waits.push(SemaphoreOp::AcquireBinary(pool.gpu(gate)));
-                s.acquires.push(Acquire::Binary(gate));
                 s.actions.push(Action::ForeignGate(Arc::clone(f), gate));
             }
         }
@@ -1153,12 +1055,10 @@ impl Bridge {
                     s.allocated.push(fresh);
                     s.held.push(slot);
                     s.waits.push(SemaphoreOp::AcquireBinary(pool.gpu(slot)));
-                    s.acquires.push(Acquire::Binary(slot));
                     s.actions.push(Action::Consume(sync, slot, fresh));
                 }
                 WaitPlan::Timeline(slot, value) => {
                     s.held.push(slot);
-                    s.acquires.push(Acquire::Timeline(slot, value));
                     let value = if pool.view == TimelineView::Native64 {
                         value
                     } else {
@@ -1174,7 +1074,6 @@ impl Bridge {
                     s.allocated.push(fresh);
                     s.held.push(gate);
                     s.waits.push(SemaphoreOp::AcquireBinary(pool.gpu(gate)));
-                    s.acquires.push(Acquire::Binary(gate));
                     s.actions.push(Action::ForeignGate(f, gate));
                     s.actions.push(Action::Rebind(sync, fresh));
                 }
@@ -1183,7 +1082,6 @@ impl Bridge {
                     s.allocated.push(gate);
                     s.held.push(gate);
                     s.waits.push(SemaphoreOp::AcquireBinary(pool.gpu(gate)));
-                    s.acquires.push(Acquire::Binary(gate));
                     s.actions.push(Action::SharedGate(shared, target, gate));
                 }
             }
@@ -1397,7 +1295,6 @@ impl Bridge {
                     }
                     Err(error) => return Err(self.submit_failed(inner, &error)),
                 };
-                record_acquires(inner, context, token.get(), [Acquire::Binary(slot)]);
                 let queue = queue_ref(inner, context)?;
                 // SAFETY: `drm_fd` is this function's, under its contract.
                 unsafe { queue.context_fence(drm_fd, token.get()) }.map(Some)
@@ -1421,10 +1318,7 @@ impl Bridge {
                 let queue = queue_slot(&mut inner.queues, context)?;
                 let status = queue.submit(&[], space, &waits, &[], &[gate], |_| Ok(()));
                 let token = match status {
-                    Ok(SubmitStatus::Submitted(token)) => {
-                        record_acquires(inner, context, token.get(), [Acquire::Binary(gate)]);
-                        token
-                    }
+                    Ok(SubmitStatus::Submitted(token)) => token,
                     other => {
                         pool.release(gate);
                         return match other {
@@ -1552,7 +1446,6 @@ impl Bridge {
                     );
                 }
                 inner.queues.push(Some(queue));
-                inner.acquires.push(VecDeque::new());
                 inner.context_engines.push(engines);
                 Ok(u64_from_usize(inner.queues.len()))
             }
@@ -1685,26 +1578,6 @@ fn check_planned(state: &crate::syncobj::SyncState, planned: Slot, what: &str) {
         );
     }
 }
-/// Append an accepted batch's acquires; drop entries of batches the GPU has
-/// already completed (one mapped-word read, only when something can go).
-fn record_acquires(
-    inner: &mut Inner,
-    context: u64,
-    token: u64,
-    acquires: impl IntoIterator<Item = Acquire>,
-) {
-    let index = context_index(context)
-        .expect("the context was resolved by the submit that accepted the batch");
-    let list = &mut inner.acquires[index];
-    if list.front().is_some()
-        && let Some(Ok(completed)) = inner.queues[index].as_ref().map(|q| q.shared().completed())
-    {
-        while list.front().is_some_and(|(t, _)| *t <= completed.get()) {
-            list.pop_front();
-        }
-    }
-    list.extend(acquires.into_iter().map(|a| (token, a)));
-}
 /// Test hook (fixtures set it in the probe child): a channel freed while it
 /// still has unretired work aborts the process instead of only logging, so
 /// the violation is observable on bionic too (diagnostics go to logcat).
@@ -1760,32 +1633,23 @@ impl Drop for Bridge {
         // Bounded drain (5 s) on the closing thread, then stop the only other
         // thread, then RM teardown. Nothing continues after this returns:
         // callers may dlclose the DSO immediately.
-        let drained = self.drain_timeout(5_000_000_000);
-        if let Err(e) = &drained {
-            diag!("RM close drain failed; tearing down lost channels: {e}");
+        //
+        // A healthy device drains every queue first, as stock vkDestroyDevice
+        // does before its first RM call (libnvidia-eglcore 615.78.08 ELF 0xca3558
+        // -> vkDeviceWaitIdle core ELF 0xca3e40). Stock's drain is unbounded;
+        // this one is bounded (RUST.md section 7) and a drain that runs out
+        // latches the loss. A latched loss fails the drain at once (stock
+        // returns VK_ERROR_DEVICE_LOST from the wait without waiting). Nothing
+        // releases the acquires of a batch that is still blocked: stock never
+        // signals them on the CPU; the channel's RM free below stops it.
+        if let Err(e) = self.drain_timeout(5_000_000_000) {
+            diag!("RM close drain failed; freeing the lost device's channels: {e}");
             match self.lock() {
                 Ok(mut guard) => self.lose_locked(&mut guard.0),
                 Err(error) => diag!("RM close: {error}"),
             }
         }
         self.core.watcher.stop(&self.core);
-        if drained.is_err() {
-            // Release what the lost channels wait on, then let them run out
-            // (bounded): never free a channel blocked in an acquire.
-            let pending: Vec<_> = match self.lock() {
-                Ok(mut guard) => {
-                    let inner = &mut guard.0;
-                    (1..=u64_from_usize(inner.queues.len()))
-                        .filter_map(|context| self.unblock_locked(inner, context))
-                        .collect()
-                }
-                Err(error) => {
-                    diag!("RM close: {error}");
-                    Vec::new()
-                }
-            };
-            self.quiesce(&pending, Duration::from_secs(5));
-        }
         let mut guard = match self.lock() {
             Ok(guard) => guard,
             Err(error) => {
@@ -1800,7 +1664,7 @@ impl Drop for Bridge {
         let inner = &mut guard.0;
         for (index, queue) in inner.queues.iter().enumerate() {
             if let Some(queue) = queue {
-                Self::check_idle_before_free(u64_from_usize(index) + 1, queue);
+                self.check_idle_before_free(u64_from_usize(index) + 1, queue);
             }
         }
         // Leaked payloads (API misuse) must not touch unmapped pages.
@@ -2861,11 +2725,14 @@ pub(crate) unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -
         report((|| {
             let b = present(object)?;
             let token = queue_ref(&b.lock()?.0, id)?.last_token();
-            // Bounded quiesce: an unsignaled (e.g. foreign-gated) batch is lost
-            // after 5 s; its acquires are then released so the channel runs
-            // out, and only the idle channel is RM-freed (no schedule-off
-            // first, as stock) before memory is released.
-            // A wait that fails (device lost) is handled like one that ran out.
+            // Drain the queue while the device is healthy (bounded, 5 s; stock
+            // waits without bound, ELF 0xd68170). A drain that runs out latches
+            // the loss; a latched loss fails it at once. The channel is then
+            // RM-freed as it is, with no schedule-off first and nothing
+            // signalled on the CPU for a batch still blocked in an acquire:
+            // the stock driver frees a lost device's channels the same way
+            // (vkDestroyDevice ELF 0xca3690 -> 0xa8d4c0), and their RM free
+            // stops them. Memory is released only after the free.
             let drained = b
                 .wait_token(id, token.get(), 5_000_000_000)
                 .unwrap_or_else(|error| {
@@ -2873,13 +2740,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -
                     false
                 });
             if !drained {
-                let pending = {
-                    let mut guard = b.lock()?;
-                    b.lose_locked(&mut guard.0);
-                    b.unblock_locked(&mut guard.0, id)
-                };
-                // Released acquires let the channel run out before its free.
-                b.quiesce(pending.as_slice(), Duration::from_secs(5));
+                b.lose_locked(&mut b.lock()?.0);
             }
             let mut guard = b.lock()?;
             let s = &mut guard.0;
@@ -2891,8 +2752,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -
                 )
                 .and_then(Option::take)
                 .ok_or_else(|| Error::Contract("destroy unknown context".into()))?;
-            Bridge::check_idle_before_free(id, &queue);
-            s.acquires[context_index(id).expect("the queue of this id was just taken")].clear();
+            b.check_idle_before_free(id, &queue);
             drop(queue);
             // Groups that waited only on this queue can go now.
             b.reclaim_locked(s, false);
