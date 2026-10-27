@@ -441,38 +441,84 @@ mod tests {
         }
     }
 
-    #[test]
-    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
-    fn two_waiters_on_one_value_both_wake_promptly() {
-        // CPU path of the two-waiter latency gate: both waiters (one leader,
-        // one follower) must observe the signal well under 1 ms (p99).
+    /// Two waiters on one value (one leader in poll, one follower on the
+    /// condvar), signalled through notify: `rounds` rounds. Returns each wake's
+    /// lag behind the signal and how often a leader's poll ran into the
+    /// `SCAN_PERIOD` rescue, which is the only way a lost wake still returns.
+    fn two_waiters(rounds: u64) -> (Vec<Duration>, u64) {
         let fixture = Fixture::new();
+        let rescues = Arc::new(AtomicU64::new(0));
         let mut lags = Vec::new();
-        for round in 1..=200u64 {
+        for round in 1..=rounds {
             let ready = Arc::new(Barrier::new(3));
             let threads: Vec<_> = (0..2)
                 .map(|_| {
-                    let f = Arc::clone(&fixture);
-                    let r = Arc::clone(&ready);
+                    let (f, r, rescues) = (
+                        Arc::clone(&fixture),
+                        Arc::clone(&ready),
+                        Arc::clone(&rescues),
+                    );
                     std::thread::spawn(move || {
                         r.wait();
-                        assert!(f.wait(round, None).unwrap());
+                        let woke = f.waiters.wait(
+                            None,
+                            None,
+                            || Ok(f.value.load(Ordering::SeqCst) >= round),
+                            |_| {
+                                rescues.fetch_add(1, Ordering::SeqCst);
+                                Ok(())
+                            },
+                        );
+                        assert!(woke.unwrap(), "no deadline: only the value ends the wait");
                         Instant::now()
                     })
                 })
                 .collect();
             ready.wait();
-            while fixture.waiters.registered() < 2 {
+            // Both parked: one leads (in or entering poll), one follows.
+            let parking = Instant::now();
+            while fixture.waiters.registered() < 2
+                || !fixture.waiters.leader.load(Ordering::SeqCst)
+                || fixture.waiters.followers.load(Ordering::SeqCst) < 1
+            {
+                assert!(
+                    parking.elapsed() < Duration::from_secs(10),
+                    "waiters never parked"
+                );
                 std::thread::yield_now();
             }
-            // Let both reach their blocking point (leader poll / follower cv).
-            std::thread::sleep(Duration::from_micros(200));
-            let start = Instant::now();
+            let signalled = Instant::now();
             fixture.signal(round);
             for t in threads {
-                lags.push(t.join().unwrap().saturating_duration_since(start));
+                let woke = t.join().unwrap();
+                // Causality: a waiter returns only after the store it waits for.
+                assert!(woke >= signalled, "round {round}: woke before the signal");
+                lags.push(woke.duration_since(signalled));
             }
         }
+        assert_eq!(fixture.waiters.registered(), 0);
+        (lags, rescues.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "ppoll on real descriptors")]
+    fn two_waiters_on_one_value_are_both_woken_by_the_signal() {
+        // Every round both waiters return true after the signal, and none was
+        // rescued by the 1 s scan period: no wake was lost. How fast they wake
+        // is scheduler latency, measured on an idle machine by the test below.
+        let (lags, rescues) = two_waiters(200);
+        assert_eq!(lags.len(), 400);
+        assert_eq!(
+            rescues, 0,
+            "a leader's wake was lost and only the scan period ended its poll"
+        );
+    }
+
+    #[test]
+    #[ignore = "latency gate: run alone on an idle machine (cargo test -- --ignored two_waiters_wake_latency)"]
+    fn two_waiters_wake_latency_p99_under_1ms_on_an_idle_machine() {
+        let (mut lags, rescues) = two_waiters(200);
+        assert_eq!(rescues, 0);
         lags.sort();
         let p99 = lags[lags.len() * 99 / 100];
         assert!(p99 < Duration::from_millis(1), "two-waiter p99 {p99:?}");
