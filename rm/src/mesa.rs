@@ -2016,6 +2016,7 @@ fn present(bridge: Option<&Bridge>) -> Result<&Bridge> {
 /// `VkResult`); `nvkmd_rm.c` passes them to Mesa as they are.
 mod vk {
     pub(super) const ERROR_OUT_OF_HOST_MEMORY: i32 = -1;
+    pub(super) const ERROR_OUT_OF_DEVICE_MEMORY: i32 = -2;
     pub(super) const ERROR_INITIALIZATION_FAILED: i32 = -3;
     pub(super) const ERROR_DEVICE_LOST: i32 = -4;
 }
@@ -2025,26 +2026,34 @@ mod vk {
 enum Failure {
     /// A host allocation failed (a syscall returned `ENOMEM`).
     HostMemory,
+    /// RM ran out of memory (`Error::is_out_of_device_memory`).
+    DeviceMemory,
     /// The device is lost (`Error::is_device_lost`).
     Lost,
-    /// Any other failure.
-    Other,
+    /// The kernel or RM refused the request.
+    Refused,
+    /// A broken interface contract (`Error::Contract`): the caller's, or an
+    /// answer from the kernel or RM outside its contract.
+    Contract,
 }
 impl Failure {
     fn of(error: &Error) -> Self {
         if error.is_device_lost() {
             return Self::Lost;
         }
+        if error.is_out_of_device_memory() {
+            return Self::DeviceMemory;
+        }
         match error {
             Error::Io(_, error) if error.raw_os_error() == Some(12) => Self::HostMemory,
+            Error::Contract(_) => Self::Contract,
             Error::Io(..)
             | Error::Rm { .. }
-            | Error::Contract(_)
             | Error::Wait(_)
             | Error::DeviceLost(_)
             | Error::Sync(_)
             | Error::Channel(_)
-            | Error::Memory(_) => Self::Other,
+            | Error::Memory(_) => Self::Refused,
         }
     }
 }
@@ -2061,6 +2070,14 @@ enum Entry {
     /// cannot open as `INITIALIZATION_FAILED` (nvkmd_nouveau_dev.c:44 at Mesa
     /// 26.2.5).
     Open,
+    /// `nv_rm_alloc`: `vkAllocateMemory`, and every command that allocates
+    /// driver memory (object creation, command buffer recording, queue
+    /// submission). Their common codes are `OUT_OF_HOST_MEMORY` and
+    /// `OUT_OF_DEVICE_MEMORY`; `vkAllocateMemory` has no `DEVICE_LOST`. NVK
+    /// reports every failed allocation as `OUT_OF_DEVICE_MEMORY`
+    /// (nvkmd_nouveau_mem.c:169 at Mesa 26.2.5); a broken bridge contract
+    /// stays the generic failure.
+    Alloc,
     /// Every other entry point: paths of a created device, where a lost device
     /// is `VK_ERROR_DEVICE_LOST` (spec "Lost Device").
     Device,
@@ -2072,10 +2089,14 @@ impl Entry {
     }
     fn result(self, failure: Failure) -> i32 {
         match (self, failure) {
-            (Self::Open | Self::Device, Failure::HostMemory) => vk::ERROR_OUT_OF_HOST_MEMORY,
-            (Self::Open, Failure::Lost | Failure::Other) | (Self::Device, Failure::Other) => {
-                vk::ERROR_INITIALIZATION_FAILED
+            (Self::Open | Self::Alloc | Self::Device, Failure::HostMemory) => {
+                vk::ERROR_OUT_OF_HOST_MEMORY
             }
+            (Self::Open | Self::Alloc | Self::Device, Failure::DeviceMemory)
+            | (Self::Alloc, Failure::Lost | Failure::Refused) => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+            (Self::Open, Failure::Lost | Failure::Refused | Failure::Contract)
+            | (Self::Alloc | Self::Device, Failure::Contract)
+            | (Self::Device, Failure::Refused) => vk::ERROR_INITIALIZATION_FAILED,
             (Self::Device, Failure::Lost) => vk::ERROR_DEVICE_LOST,
         }
     }
@@ -2265,78 +2286,81 @@ pub(crate) unsafe extern "C" fn nv_rm_alloc(
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_alloc", object, move || {
-        report((|| {
-            if out.is_null() {
-                return Err(Error::Contract("null allocation output".into()));
-            }
-            let b = present(object)?;
-            b.core.live()?;
-            // `tile` (nouveau's per-BO tile mode for legacy GL importers) has
-            // no RM memory attribute: the block height travels in the DRM
-            // modifier. A kind is only meaningful for an uncompressed
-            // block-linear VRAM/GART allocation (Device::allocate_block_linear).
-            let placement = Placement::try_from(placement)?;
-            if tile != 0
-                || (kind != 0
-                    && matches!(
-                        placement,
-                        Placement::VramCompressible | Placement::VramPoolBlock
-                    ))
-            {
-                return Err(Error::Contract(
+    guarded_as(Entry::Alloc, "nv_rm_alloc", object, move || {
+        if out.is_null() {
+            return Err(Error::Contract("null allocation output".into()));
+        }
+        let b = present(object)?;
+        b.core.live()?;
+        // `tile` (nouveau's per-BO tile mode for legacy GL importers) has
+        // no RM memory attribute: the block height travels in the DRM
+        // modifier. A kind is only meaningful for an uncompressed
+        // block-linear VRAM/GART allocation (Device::allocate_block_linear).
+        let placement = Placement::try_from(placement)?;
+        if tile != 0
+            || (kind != 0
+                && matches!(
+                    placement,
+                    Placement::VramCompressible | Placement::VramPoolBlock
+                ))
+        {
+            return Err(Error::Contract(
                     "unsupported memory placement/tiled allocation (tile mode, or a kind on compressible or pool-block memory)".into(),
                 ));
+        }
+        let mut guard = b.lock()?;
+        let s = &mut guard.0;
+        // Retired frees first: their memory may be what this needs.
+        b.reclaim_locked(s, false);
+        // A size or alignment beyond the address space is a request no memory
+        // can satisfy (VK_ERROR_OUT_OF_DEVICE_MEMORY), not a broken contract.
+        let size = usize::try_from(size).map_err(|_overflow| crate::rm::MemoryError::Invalid {
+            operation: "allocate memory",
+            reason: "size exceeds the address space",
+        })?;
+        let alignment = usize::try_from(alignment.max(4096)).map_err(|_overflow| {
+            crate::rm::MemoryError::Invalid {
+                operation: "allocate memory",
+                reason: "alignment exceeds the address space",
             }
-            let mut guard = b.lock()?;
-            let s = &mut guard.0;
-            // Retired frees first: their memory may be what this needs.
-            b.reclaim_locked(s, false);
-            let size = usize::try_from(size)
-                .map_err(|error| Error::Contract(format!("memory size {size}: {error}")))?;
-            let alignment = usize::try_from(alignment.max(4096)).map_err(|error| {
-                Error::Contract(format!("memory alignment {alignment}: {error}"))
-            })?;
-            let memory = match placement {
-                Placement::VramCompressible => s.device.allocate_compressible(size, alignment)?,
-                Placement::VramPoolBlock => {
-                    if size != crate::rm::POOL_BLOCK_SIZE {
-                        return Err(Error::Contract(format!(
-                            "a pool block is {:#x} bytes, not {size:#x}",
-                            crate::rm::POOL_BLOCK_SIZE
-                        )));
-                    }
-                    s.device.allocate_pool_block()?
+        })?;
+        let memory = match placement {
+            Placement::VramCompressible => s.device.allocate_compressible(size, alignment)?,
+            Placement::VramPoolBlock => {
+                if size != crate::rm::POOL_BLOCK_SIZE {
+                    return Err(Error::Contract(format!(
+                        "a pool block is {:#x} bytes, not {size:#x}",
+                        crate::rm::POOL_BLOCK_SIZE
+                    )));
                 }
-                Placement::Vram | Placement::Gart if kind != 0 => s.device.allocate_block_linear(
-                    size,
-                    alignment,
-                    placement == Placement::Gart,
-                    kind,
-                )?,
-                Placement::Vram | Placement::Gart => s.device.allocate_aligned(
-                    size,
-                    alignment,
-                    false,
-                    placement == Placement::Gart,
-                )?,
-            };
-            let id = next_id(s)?;
-            let a = Allocation {
-                id,
-                size: u64_from_usize(memory.size),
-                cpu_address: 0,
-            };
-            s.buffers.insert(
-                id,
-                Buffer {
-                    cpu: s.device.cpu_mapping_slot(),
-                    memory,
-                },
-            );
-            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-            unsafe { output(out, a) }
-        })())
+                s.device.allocate_pool_block()?
+            }
+            Placement::Vram | Placement::Gart if kind != 0 => s.device.allocate_block_linear(
+                size,
+                alignment,
+                placement == Placement::Gart,
+                kind,
+            )?,
+            Placement::Vram | Placement::Gart => {
+                s.device
+                    .allocate_aligned(size, alignment, false, placement == Placement::Gart)?
+            }
+        };
+        let id = next_id(s)?;
+        let a = Allocation {
+            id,
+            size: u64_from_usize(memory.size),
+            cpu_address: 0,
+        };
+        s.buffers.insert(
+            id,
+            Buffer {
+                cpu: s.device.cpu_mapping_slot(),
+                memory,
+            },
+        );
+        // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
+        unsafe { output(out, a) }
     })
 }
 fn next_id(s: &mut Inner) -> Result<u64> {
@@ -3722,6 +3746,18 @@ mod tests {
             elapsed: Duration::ZERO,
         };
         assert_eq!(vk_status(&wait.into()), -3);
+        // RM out of memory or of another resource it allocates from:
+        // VK_ERROR_OUT_OF_DEVICE_MEMORY (nvstatuscodes.h 0x51, 0x1a).
+        for status in [0x51, 0x1a] {
+            assert_eq!(
+                vk_status(&Error::Rm {
+                    operation: "op",
+                    status
+                }),
+                -2,
+                "{status:#x}"
+            );
+        }
         // RM reporting a GPU off the bus, in or needing a reset, or a channel
         // killed by robust channel recovery: device loss (nvstatuscodes.h).
         for status in [0x0f, 0x10, 0x60, 0x62] {
@@ -3786,7 +3822,7 @@ mod tests {
                         status: 0x51,
                     }),
                 },
-                -3,
+                -2,
             ),
             (ChannelError::ClassList { reason: "x" }, -3),
             (
@@ -3981,6 +4017,42 @@ mod tests {
         assert_eq!(offset_of!(Info, name), 88);
         assert_eq!(offset_of!(Allocation, cpu_address), 16);
         assert_eq!(size_of::<SyncPoint>(), 16);
+    }
+    #[test]
+    fn allocation_failures_are_out_of_device_memory() {
+        // vkAllocateMemory may return OUT_OF_HOST_MEMORY or OUT_OF_DEVICE_MEMORY
+        // (not DEVICE_LOST); NVK reports every failed allocation as
+        // OUT_OF_DEVICE_MEMORY (nvkmd_nouveau_mem.c:169).
+        let alloc = |error: Error| Entry::Alloc.status(&error);
+        let rm = |status| Error::Rm {
+            operation: "op",
+            status,
+        };
+        assert_eq!(alloc(rm(0x51)), -2);
+        assert_eq!(alloc(rm(0x1a)), -2);
+        assert_eq!(alloc(rm(0x1f)), -2);
+        assert_eq!(alloc(rm(0x0f)), -2);
+        assert_eq!(alloc(Error::DeviceLost("x".into())), -2);
+        assert_eq!(
+            alloc(
+                MemoryError::Invalid {
+                    operation: "allocate memory",
+                    reason: "size exceeds the address space",
+                }
+                .into()
+            ),
+            -2
+        );
+        assert_eq!(
+            alloc(Error::Io("op", std::io::Error::from_raw_os_error(12))),
+            -1
+        );
+        assert_eq!(alloc(Error::Contract("null allocation output".into())), -3);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let status = guarded_as(Entry::Alloc, "test_entry", None, || panic!("injected"));
+        std::panic::set_hook(hook);
+        assert_eq!(status, -2);
     }
     #[test]
     fn probing_reports_no_device_loss() {

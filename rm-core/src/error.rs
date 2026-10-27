@@ -77,6 +77,27 @@ impl Error {
             Self::Io(..) | Self::Contract(_) | Self::Wait(_) => false,
         }
     }
+
+    /// RM ran out of memory or of another resource it allocates objects from
+    /// ([`status::NO_MEMORY`], [`status::INSUFFICIENT_RESOURCES`]): what the C ABI reports
+    /// as `VK_ERROR_OUT_OF_DEVICE_MEMORY`. An RM allocation follows the failure it wraps.
+    pub fn is_out_of_device_memory(&self) -> bool {
+        match self {
+            Self::Rm { status, .. } => {
+                matches!(*status, status::NO_MEMORY | status::INSUFFICIENT_RESOURCES)
+            }
+            Self::Channel(ChannelError::Allocate { source, .. }) => {
+                source.is_out_of_device_memory()
+            }
+            Self::Io(..)
+            | Self::Contract(_)
+            | Self::DeviceLost(_)
+            | Self::Wait(_)
+            | Self::Sync(_)
+            | Self::Channel(_)
+            | Self::Memory(_) => false,
+        }
+    }
 }
 
 /// Why a synchronization operation failed: the subsystem of payloads (binary, timeline,
@@ -601,6 +622,26 @@ mod tests {
             status::INSUFFICIENT_RESOURCES,
         ] {
             assert!(!rm(refused).is_device_lost(), "{refused:#x}");
+        }
+    }
+
+    #[test]
+    fn rm_out_of_memory_statuses_are_out_of_device_memory() {
+        let rm = |status| Error::Rm {
+            operation: "op",
+            status,
+        };
+        for status in [status::NO_MEMORY, status::INSUFFICIENT_RESOURCES] {
+            assert!(rm(status).is_out_of_device_memory(), "{status:#x}");
+            let allocate: Error = super::ChannelError::Allocate {
+                class: crate::ClassId::new(0xc96f),
+                source: Box::new(rm(status)),
+            }
+            .into();
+            assert!(allocate.is_out_of_device_memory(), "{status:#x}");
+        }
+        for status in [0x1f, 0x1b, status::GPU_IS_LOST] {
+            assert!(!rm(status).is_out_of_device_memory(), "{status:#x}");
         }
     }
 }

@@ -1156,8 +1156,8 @@ fn map_pressure(error: &Error) -> bool {
         Error::Io("mmap NVIDIA allocation", error) => error.raw_os_error() == Some(12),
         Error::Rm {
             operation: "RM map memory",
-            status: 0x51 | 0x1a,
-        } => true,
+            ..
+        } => error.is_out_of_device_memory(),
         _ => false,
     }
 }
