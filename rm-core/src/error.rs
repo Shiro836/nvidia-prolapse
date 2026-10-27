@@ -533,6 +533,14 @@ pub enum MemoryError {
         /// The returned address.
         address: GpuVa,
     },
+    /// An external memory handle (a dma-buf) that is not memory this device can import.
+    #[error("external memory handle: {reason} ({value:#x})")]
+    ExternalHandle {
+        /// What is wrong with it.
+        reason: &'static str,
+        /// The offending value (descriptor, size or object type).
+        value: u64,
+    },
     /// Before Turing RM chose a PTE kind for a typed VA other than the requested one.
     #[error(
         "RM chose PTE kind {chosen:#x} for a typed VA that requested kind {requested:#x} \
@@ -564,6 +572,7 @@ impl MemoryError {
             | Self::PatternMismatch { .. }
             | Self::GpuMappingLimits { .. }
             | Self::GpuVa { .. }
+            | Self::ExternalHandle { .. }
             | Self::KindMismatch { .. } => false,
         }
     }

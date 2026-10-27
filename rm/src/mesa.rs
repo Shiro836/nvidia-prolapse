@@ -2019,6 +2019,7 @@ mod vk {
     pub(super) const ERROR_OUT_OF_DEVICE_MEMORY: i32 = -2;
     pub(super) const ERROR_INITIALIZATION_FAILED: i32 = -3;
     pub(super) const ERROR_DEVICE_LOST: i32 = -4;
+    pub(super) const ERROR_INVALID_EXTERNAL_HANDLE: i32 = -1_000_072_003;
 }
 /// What a failed entry point's error means to the application, before the
 /// entry point picks the `VkResult` its Vulkan commands may return.
@@ -2078,6 +2079,12 @@ enum Entry {
     /// (nvkmd_nouveau_mem.c:169 at Mesa 26.2.5); a broken bridge contract
     /// stays the generic failure.
     Alloc,
+    /// `nv_rm_import`: `vkAllocateMemory` importing a dma-buf (codes as
+    /// [`Entry::Alloc`], plus `INVALID_EXTERNAL_HANDLE`). NVK reports a dma-buf
+    /// the kernel does not import as `INVALID_EXTERNAL_HANDLE`
+    /// (nvkmd_nouveau_mem.c:188 at Mesa 26.2.5); running out of memory and a
+    /// lost device are `OUT_OF_DEVICE_MEMORY`, as for [`Entry::Alloc`].
+    Import,
     /// Every other entry point: paths of a created device, where a lost device
     /// is `VK_ERROR_DEVICE_LOST` (spec "Lost Device").
     Device,
@@ -2089,13 +2096,15 @@ impl Entry {
     }
     fn result(self, failure: Failure) -> i32 {
         match (self, failure) {
-            (Self::Open | Self::Alloc | Self::Device, Failure::HostMemory) => {
+            (Self::Open | Self::Alloc | Self::Import | Self::Device, Failure::HostMemory) => {
                 vk::ERROR_OUT_OF_HOST_MEMORY
             }
-            (Self::Open | Self::Alloc | Self::Device, Failure::DeviceMemory)
-            | (Self::Alloc, Failure::Lost | Failure::Refused) => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+            (Self::Open | Self::Alloc | Self::Import | Self::Device, Failure::DeviceMemory)
+            | (Self::Alloc, Failure::Lost | Failure::Refused)
+            | (Self::Import, Failure::Lost) => vk::ERROR_OUT_OF_DEVICE_MEMORY,
+            (Self::Import, Failure::Refused) => vk::ERROR_INVALID_EXTERNAL_HANDLE,
             (Self::Open, Failure::Lost | Failure::Refused | Failure::Contract)
-            | (Self::Alloc | Self::Device, Failure::Contract)
+            | (Self::Alloc | Self::Import | Self::Device, Failure::Contract)
             | (Self::Device, Failure::Refused) => vk::ERROR_INITIALIZATION_FAILED,
             (Self::Device, Failure::Lost) => vk::ERROR_DEVICE_LOST,
         }
@@ -3153,38 +3162,44 @@ pub(crate) unsafe extern "C" fn nv_rm_import(
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_import", object, move || {
-        report((|| {
-            if drm_fd < 0 || dma_fd < 0 || out.is_null() {
-                return Err(Error::Contract("invalid dma-buf import arguments".into()));
+    guarded_as(Entry::Import, "nv_rm_import", object, move || {
+        if drm_fd < 0 || out.is_null() {
+            return Err(Error::Contract("invalid dma-buf import arguments".into()));
+        }
+        // The application's handle (VkImportMemoryFdInfoKHR::fd).
+        if dma_fd < 0 {
+            return Err(crate::rm::MemoryError::ExternalHandle {
+                reason: "negative dma-buf descriptor",
+                value: u64::from(dma_fd.unsigned_abs()),
             }
-            let b = present(object)?;
-            b.core.live()?;
-            let mut guard = b.lock()?;
-            let s = &mut guard.0;
-            b.reclaim_locked(s, false);
-            // SAFETY: nv_rm.h: `drm_fd` is open for the whole call
-            // (non-negative checked above); the borrow ends with it.
-            let drm = unsafe { BorrowedFd::borrow_raw(drm_fd) };
-            // SAFETY: as `drm_fd`, for the dma-buf.
-            let dma_buf = unsafe { BorrowedFd::borrow_raw(dma_fd) };
-            let memory = crate::external::import(&s.device, drm, dma_buf)?;
-            let id = next_id(s)?;
-            let result = Allocation {
-                id,
-                size: u64_from_usize(memory.size),
-                cpu_address: 0,
-            };
-            s.buffers.insert(
-                id,
-                Buffer {
-                    cpu: s.device.cpu_mapping_slot(),
-                    memory,
-                },
-            );
-            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-            unsafe { output(out, result) }
-        })())
+            .into());
+        }
+        let b = present(object)?;
+        b.core.live()?;
+        let mut guard = b.lock()?;
+        let s = &mut guard.0;
+        b.reclaim_locked(s, false);
+        // SAFETY: nv_rm.h: `drm_fd` is open for the whole call
+        // (non-negative checked above); the borrow ends with it.
+        let drm = unsafe { BorrowedFd::borrow_raw(drm_fd) };
+        // SAFETY: as `drm_fd`, for the dma-buf.
+        let dma_buf = unsafe { BorrowedFd::borrow_raw(dma_fd) };
+        let memory = crate::external::import(&s.device, drm, dma_buf)?;
+        let id = next_id(s)?;
+        let result = Allocation {
+            id,
+            size: u64_from_usize(memory.size),
+            cpu_address: 0,
+        };
+        s.buffers.insert(
+            id,
+            Buffer {
+                cpu: s.device.cpu_mapping_slot(),
+                memory,
+            },
+        );
+        // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
+        unsafe { output(out, result) }
     })
 }
 
@@ -4053,6 +4068,46 @@ mod tests {
         let status = guarded_as(Entry::Alloc, "test_entry", None, || panic!("injected"));
         std::panic::set_hook(hook);
         assert_eq!(status, -2);
+    }
+    #[test]
+    fn import_failures_follow_nvk() {
+        // A dma-buf the kernel or RM does not import is INVALID_EXTERNAL_HANDLE
+        // (nvkmd_nouveau_mem.c:188); vkAllocateMemory has no DEVICE_LOST.
+        let import = |error: Error| Entry::Import.status(&error);
+        let handle = || {
+            Error::from(MemoryError::ExternalHandle {
+                reason: "x",
+                value: 1,
+            })
+        };
+        assert_eq!(import(handle()), -1_000_072_003);
+        assert_eq!(
+            import(Error::Rm {
+                operation: "op",
+                status: 0x1f
+            }),
+            -1_000_072_003
+        );
+        assert_eq!(
+            import(Error::Io("op", std::io::Error::from_raw_os_error(9))),
+            -1_000_072_003
+        );
+        assert_eq!(
+            import(Error::Io("op", std::io::Error::from_raw_os_error(12))),
+            -1
+        );
+        assert_eq!(
+            import(Error::Rm {
+                operation: "op",
+                status: 0x51
+            }),
+            -2
+        );
+        assert_eq!(import(Error::DeviceLost("x".into())), -2);
+        assert_eq!(import(Error::Contract("x".into())), -3);
+        // SAFETY: a NULL device is rejected before any pointer is used.
+        let status = unsafe { nv_rm_import(std::ptr::null_mut(), 0, -1, std::ptr::null_mut()) };
+        assert_eq!(status, -3, "a NULL output is a broken bridge contract");
     }
     #[test]
     fn probing_reports_no_device_loss() {

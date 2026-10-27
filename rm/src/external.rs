@@ -12,7 +12,7 @@
 use crate::diag::diag;
 use crate::{
     platform,
-    rm::{Device, Error, Memory, Result, RmHandle},
+    rm::{Device, Error, Memory, MemoryError, Result, RmHandle},
 };
 use nv_rm_core::conv::u64_from_usize;
 use std::{
@@ -255,19 +255,15 @@ pub(crate) fn import(
     validate(device)?;
     // SAFETY: fd is borrowed and live; dma-bufs define SEEK_END as buffer size.
     let size = unsafe { platform::lseek(dma_buf.as_raw_fd(), 0, 2) };
-    if size < 0 {
-        return Err(Error::Io("query dma-buf size", io::Error::last_os_error()));
-    }
+    // lseek returns -1 with errno set on failure; nothing in between touches errno.
+    let size = u64::try_from(size)
+        .map_err(|_negative| Error::Io("query dma-buf size", io::Error::last_os_error()))?;
+    let invalid = |reason, value| MemoryError::ExternalHandle { reason, value };
     if size == 0 || size % 4096 != 0 {
-        return Err(Error::Contract(
-            "dma-buf size must be nonzero and page-aligned".into(),
-        ));
+        return Err(invalid("dma-buf size must be nonzero and page-aligned", size).into());
     }
-    let size = usize::try_from(size).map_err(|error| {
-        Error::Contract(format!(
-            "dma-buf does not fit process address space: {error}"
-        ))
-    })?;
+    let size = usize::try_from(size)
+        .map_err(|_overflow| invalid("dma-buf does not fit the process address space", size))?;
     let drm = isolated_drm(drm_fd)?;
     let mut prime = Prime {
         handle: 0,
@@ -295,9 +291,7 @@ pub(crate) fn import(
                 0x4d
             }
             other => {
-                return Err(Error::Contract(format!(
-                    "unsupported external DRM GEM type {other}"
-                )));
+                return Err(invalid("unsupported external DRM GEM type", u64::from(other)).into());
             }
         }
     } else {
@@ -337,10 +331,11 @@ pub(crate) fn import(
                 diag!("external RM import cleanup: {cleanup}");
             }
             other?;
-            return Err(Error::Contract(format!(
-                "unsupported imported address space {}",
-                address_space[2]
-            )));
+            return Err(invalid(
+                "unsupported imported address space",
+                u64::from(address_space[2]),
+            )
+            .into());
         }
     };
     Ok(Memory::from_imported(
