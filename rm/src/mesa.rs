@@ -1249,8 +1249,8 @@ impl Bridge {
                 fd
             }
         };
-        if !self.core.watcher.has_host() {
-            self.core.watcher.set_host(fd);
+        if !self.core.watcher.has_host()? {
+            self.core.watcher.set_host(fd)?;
         }
         Ok(())
     }

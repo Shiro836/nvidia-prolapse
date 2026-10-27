@@ -18,18 +18,24 @@
 //! either the waiter's predicate sees the new value or the signaller sees the
 //! registration and wakes it. No RM trigger ioctl is needed for local waiters.
 //!
+//! `lock` guards no data; it orders a follower's generation check before its
+//! sleep against the notify in `bump`. A poisoned `lock` (a thread panicked
+//! while holding it, and the FFI guard marked the device lost) is fatal for
+//! the waiters (RUST.md §8): `bump` still wakes every sleeper, and each one
+//! fails with `Error::DeviceLost` when it re-locks.
+//!
 //! The only deadline is the caller's. The leader additionally returns from poll
 //! at least once per second so the device-level loss scan runs (stock splits
 //! fence waits into <= 1 s chunks with a forced fault check for the same reason).
 use crate::diag::diag;
 use crate::{
     reactor::{Readiness, WakeFd},
-    rm::Result,
+    rm::{Error, Result},
 };
 use std::{
     os::fd::{AsRawFd, RawFd},
     sync::{
-        Condvar, Mutex,
+        Condvar, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence},
     },
     time::{Duration, Instant},
@@ -55,10 +61,23 @@ pub(crate) enum DeviceEvent {
     Scan,
 }
 
+/// The error a poisoned `lock` turns into (module doc).
+fn poisoned<T>(error: &PoisonError<T>) -> Error {
+    Error::DeviceLost(format!(
+        "RM waiter lock: {error} (a thread panicked while holding it)"
+    ))
+}
+
 struct Registration<'a>(&'a Waiters);
 impl Drop for Registration<'_> {
     fn drop(&mut self) {
         self.0.registered.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+struct Following<'a>(&'a Waiters);
+impl Drop for Following<'_> {
+    fn drop(&mut self) {
+        self.0.followers.fetch_sub(1, Ordering::SeqCst);
     }
 }
 struct Leadership<'a>(&'a Waiters);
@@ -94,8 +113,14 @@ impl Waiters {
         if self.followers.load(Ordering::SeqCst) != 0 {
             // A follower checks the generation while holding this lock and
             // only then sleeps; taking it orders our notify after that check.
-            let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
-            self.changed.notify_all();
+            match self.lock.lock() {
+                Ok(_guard) => self.changed.notify_all(),
+                // Sleepers still wake; their re-lock fails (module doc).
+                Err(error) => {
+                    diag!("{}", poisoned(&error));
+                    self.changed.notify_all();
+                }
+            }
         }
     }
 
@@ -188,7 +213,8 @@ impl Waiters {
                 drop(leadership);
             } else {
                 self.followers.fetch_add(1, Ordering::SeqCst);
-                let mut guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+                let following = Following(self);
+                let mut guard = self.lock.lock().map_err(|error| poisoned(&error))?;
                 loop {
                     if self.generation.load(Ordering::SeqCst) != generation
                         || !self.leader.load(Ordering::SeqCst)
@@ -197,7 +223,7 @@ impl Waiters {
                     }
                     match deadline {
                         None => {
-                            guard = self.changed.wait(guard).unwrap_or_else(|p| p.into_inner());
+                            guard = self.changed.wait(guard).map_err(|error| poisoned(&error))?;
                         }
                         Some(d) => {
                             let remaining = d.saturating_duration_since(Instant::now());
@@ -207,13 +233,13 @@ impl Waiters {
                             guard = self
                                 .changed
                                 .wait_timeout(guard, remaining)
-                                .unwrap_or_else(|p| p.into_inner())
+                                .map_err(|error| poisoned(&error))?
                                 .0;
                         }
                     }
                 }
                 drop(guard);
-                self.followers.fetch_sub(1, Ordering::SeqCst);
+                drop(following);
             }
         }
     }
@@ -522,5 +548,27 @@ mod tests {
         lags.sort();
         let p99 = lags[lags.len() * 99 / 100];
         assert!(p99 < Duration::from_millis(1), "two-waiter p99 {p99:?}");
+    }
+
+    /// RUST.md §8: a poisoned lock fails the waiter as device lost instead of
+    /// continuing on it, and a notify still wakes (and does not panic).
+    #[test]
+    fn poisoned_lock_fails_followers_as_device_lost() {
+        let waiters = Waiters::new().unwrap();
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                let _guard = waiters.lock.lock().unwrap();
+                panic!("poison the waiter lock");
+            });
+            assert!(holder.join().is_err());
+        });
+        assert!(waiters.lock.is_poisoned());
+        // Another waiter leads, so this one takes the follower path.
+        waiters.leader.store(true, Ordering::SeqCst);
+        let result = waiters.wait(None, None, || Ok(false), |_| Ok(()));
+        assert!(matches!(result, Err(Error::DeviceLost(_))), "{result:?}");
+        assert_eq!(waiters.followers.load(Ordering::SeqCst), 0);
+        waiters.followers.store(1, Ordering::SeqCst);
+        waiters.bump();
     }
 }

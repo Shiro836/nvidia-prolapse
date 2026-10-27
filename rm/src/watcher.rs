@@ -5,8 +5,7 @@
 //! sync_file still active at submission or CPU wait) or shared opaque payload
 //! that needs publication. Idle otherwise: blocked in poll with no timeout.
 //!
-//! Divergence from stock 615 (documented, see state timeout-policy and
-//! fence-notification-trace): stock hands an imported sync_file to the kernel
+//! Divergence from NVIDIA's driver 615: it hands an imported sync_file to the kernel
 //! with DRM_IOCTL_NVIDIA_SEMSURF_FENCE_WAIT, whose public implementation
 //! (nvidia-drm-fence.c:1639-1750) returns success even when callback setup
 //! fails, advances the semaphore on a producer *error*, and (774-784) makes
@@ -28,7 +27,11 @@
 //! descriptor reuse its number.
 //!
 //! Locking: `state` is the only lock; it is never held across poll, and the
-//! `left_poll` condition variable waits on it.
+//! `left_poll` condition variable waits on it. A poisoned `state` or `thread`
+//! lock (a thread panicked while holding it, and the FFI guard marked the
+//! device lost) is fatal for the watcher (RUST.md §8): entry points return
+//! `Error::DeviceLost`, the thread marks the device lost and exits, and
+//! teardown skips the state it can no longer trust.
 use crate::diag::diag;
 use crate::{
     mesa::Core,
@@ -42,6 +45,13 @@ use std::{
     sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     thread::JoinHandle,
 };
+
+/// The error a poisoned watcher lock turns into (module doc: locking).
+fn poisoned<T>(lock: &'static str, error: &PoisonError<T>) -> Error {
+    Error::DeviceLost(format!(
+        "{lock} lock: {error} (a thread panicked while holding it)"
+    ))
+}
 
 #[derive(Default)]
 struct WatchState {
@@ -93,8 +103,10 @@ impl Watcher {
             thread: Mutex::new(None),
         })
     }
-    fn lock(&self) -> MutexGuard<'_, WatchState> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    fn lock(&self) -> Result<MutexGuard<'_, WatchState>> {
+        self.state
+            .lock()
+            .map_err(|error| poisoned("RM foreign watcher state", &error))
     }
     pub(crate) fn wake(&self) {
         if let Err(error) = self.wake.notify() {
@@ -102,9 +114,12 @@ impl Watcher {
         }
     }
     fn ensure_started(&self, core: &Arc<Core>) -> Result<()> {
-        let mut thread = self.thread.lock().unwrap_or_else(|p| p.into_inner());
+        let mut thread = self
+            .thread
+            .lock()
+            .map_err(|error| poisoned("RM foreign watcher thread handle", &error))?;
         if thread.is_none() {
-            if self.lock().stop {
+            if self.lock()?.stop {
                 return Err(Error::DeviceLost("RM foreign watcher stopped".into()));
             }
             let owner = Arc::clone(core);
@@ -127,19 +142,24 @@ impl Watcher {
         Ok(())
     }
     /// The watcher's own HOST listener descriptor (owned by the Bridge).
-    pub(crate) fn has_host(&self) -> bool {
-        self.lock().host_fd.is_some()
+    pub(crate) fn has_host(&self) -> Result<bool> {
+        Ok(self.lock()?.host_fd.is_some())
     }
-    pub(crate) fn set_host(&self, fd: RawFd) {
-        self.lock().host_fd = Some(fd);
+    pub(crate) fn set_host(&self, fd: RawFd) -> Result<()> {
+        self.lock()?.host_fd = Some(fd);
+        Ok(())
     }
     /// Takes ownership of one reference to `slot`.
     pub(crate) fn gate(&self, core: &Arc<Core>, foreign: Arc<Foreign>, slot: Slot) -> Result<()> {
-        if let Err(error) = self.ensure_started(core) {
-            core.pool.release(slot);
-            return Err(error);
-        }
-        self.lock().gates.push((foreign, slot));
+        let mut state = match self.ensure_started(core).and_then(|()| self.lock()) {
+            Ok(state) => state,
+            Err(error) => {
+                core.pool.release(slot);
+                return Err(error);
+            }
+        };
+        state.gates.push((foreign, slot));
+        drop(state);
         self.wake();
         Ok(())
     }
@@ -151,7 +171,7 @@ impl Watcher {
         foreign: Arc<Foreign>,
     ) -> Result<CpuWatch<'_>> {
         self.ensure_started(core)?;
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         if let Some(wait) = state
             .waits
             .iter_mut()
@@ -174,7 +194,13 @@ impl Watcher {
     /// The last guard of a payload removes its entry; the watcher's reference
     /// ends before this returns.
     fn unwatch_cpu(&self, foreign: &Arc<Foreign>) {
-        let mut state = self.lock();
+        let mut state = match self.lock() {
+            Ok(state) => state,
+            Err(error) => {
+                diag!("RM CPU watch removal: {error}");
+                return;
+            }
+        };
         // Absent: the watcher already retired it (terminal status or loss).
         let Some(index) = state
             .waits
@@ -197,17 +223,30 @@ impl Watcher {
             // path, unwinding included (`Polling`).
             let snapshot = state.snapshot;
             self.wake();
-            state = self
+            match self
                 .left_poll
                 .wait_while(state, |s| s.polling && s.snapshot == snapshot)
-                .unwrap_or_else(PoisonError::into_inner);
+            {
+                Ok(left) => state = left,
+                Err(error) => {
+                    // Closing a descriptor the watcher may still poll is safe
+                    // here: poll never consumes readiness, and the watcher
+                    // ends at its next lock of the poisoned state.
+                    diag!(
+                        "RM CPU watch removal: {}",
+                        poisoned("RM foreign watcher state", &error)
+                    );
+                    drop(retired);
+                    return;
+                }
+            }
         }
         drop(state);
         drop(retired);
     }
     pub(crate) fn publish(&self, core: &Arc<Core>, shared: Arc<Shared>) -> Result<()> {
         self.ensure_started(core)?;
-        let mut state = self.lock();
+        let mut state = self.lock()?;
         if !state.publish.iter().any(|s| Arc::ptr_eq(s, &shared)) {
             state.publish.push(shared);
             drop(state);
@@ -223,11 +262,15 @@ impl Watcher {
         target: u64,
         slot: Slot,
     ) -> Result<()> {
-        if let Err(error) = self.ensure_started(core) {
-            core.pool.release(slot);
-            return Err(error);
-        }
-        self.lock().shared_gates.push((shared, target, slot));
+        let mut state = match self.ensure_started(core).and_then(|()| self.lock()) {
+            Ok(state) => state,
+            Err(error) => {
+                core.pool.release(slot);
+                return Err(error);
+            }
+        };
+        state.shared_gates.push((shared, target, slot));
+        drop(state);
         self.wake();
         Ok(())
     }
@@ -236,14 +279,31 @@ impl Watcher {
     /// Remaining gates are dropped without release (never success); shared
     /// payloads with unpublished local points are failed and broadcast.
     pub(crate) fn stop(&self, core: &Core) {
-        self.lock().stop = true;
-        self.wake();
-        if let Some(thread) = self.thread.lock().unwrap_or_else(|p| p.into_inner()).take()
-            && thread.join().is_err()
-        {
-            diag!("RM foreign watcher thread panicked");
+        match self.lock() {
+            Ok(mut state) => state.stop = true,
+            Err(error) => diag!("RM foreign watcher stop: {error}"),
         }
-        let mut state = self.lock();
+        self.wake();
+        match self.thread.lock() {
+            Ok(mut thread) => {
+                if let Some(thread) = thread.take()
+                    && thread.join().is_err()
+                {
+                    diag!("RM foreign watcher thread panicked");
+                }
+            }
+            Err(error) => diag!(
+                "RM foreign watcher stop: {}",
+                poisoned("RM foreign watcher thread handle", &error)
+            ),
+        }
+        let mut state = match self.lock() {
+            Ok(state) => state,
+            Err(error) => {
+                diag!("RM foreign watcher teardown skipped: {error}");
+                return;
+            }
+        };
         for (foreign, slot) in state.gates.drain(..) {
             drop(foreign);
             core.pool.release(slot);
@@ -273,7 +333,13 @@ impl Watcher {
     /// Device loss: fail shared payloads still awaiting local completion and
     /// drop gates (their dependent work must never run as successful).
     pub(crate) fn fail_all(&self, core: &Core) {
-        let mut state = self.lock();
+        let mut state = match self.lock() {
+            Ok(state) => state,
+            Err(error) => {
+                diag!("RM foreign watcher loss publication: {error}");
+                return;
+            }
+        };
         let mut changed = false;
         for shared in &state.publish {
             if shared.has_local_work() {
@@ -308,7 +374,11 @@ impl Watcher {
 struct Polling<'a>(&'a Watcher);
 impl Drop for Polling<'_> {
     fn drop(&mut self) {
-        self.0.lock().polling = false;
+        match self.0.lock() {
+            Ok(mut state) => state.polling = false,
+            // Waiters woken below re-lock and fail with the same error.
+            Err(error) => diag!("RM foreign watcher poll end: {error}"),
+        }
         self.0.left_poll.notify_all();
     }
 }
@@ -330,7 +400,14 @@ fn run(core: &Arc<Core>) {
     let mut fds: Vec<RawFd> = Vec::new();
     loop {
         let host = {
-            let mut state = watcher.lock();
+            let mut state = match watcher.lock() {
+                Ok(state) => state,
+                Err(error) => {
+                    diag!("RM foreign watcher: {error}");
+                    core.mark_lost();
+                    return;
+                }
+            };
             if state.stop {
                 return;
             }
@@ -358,7 +435,10 @@ fn run(core: &Arc<Core>) {
         if let Err(error) = polled {
             diag!("RM foreign watcher: {error}");
             core.mark_lost();
-            watcher.lock().stop = true;
+            match watcher.lock() {
+                Ok(mut state) => state.stop = true,
+                Err(error) => diag!("RM foreign watcher: {error}"),
+            }
             return;
         }
         if readiness.observed(watcher.wake.as_raw_fd()) {
@@ -389,7 +469,14 @@ fn service(core: &Arc<Core>, readiness: &Readiness, host: Option<RawFd>) {
         watcher.fail_all(core);
         return;
     }
-    let mut state = watcher.lock();
+    let mut state = match watcher.lock() {
+        Ok(state) => state,
+        Err(error) => {
+            diag!("RM foreign watcher: {error}");
+            core.mark_lost();
+            return;
+        }
+    };
     let mut changed = false;
     let mut lost = core.is_lost();
     // Foreign gates: decode authoritative status only for readable fds. A
@@ -426,8 +513,11 @@ fn service(core: &Arc<Core>, readiness: &Readiness, host: Option<RawFd>) {
         drop(foreign);
         if outcome == GateOutcome::Released {
             // Success only: release the GPU acquire, then drop our slot ref.
+            // A release that does not reach the slot leaves the dependent
+            // work blocked: device lost, never a logged hang.
             if let Err(error) = core.pool.store32(slot, 1) {
-                diag!("RM foreign gate release: {error}");
+                diag!("RM foreign gate release failed; device lost: {error}");
+                lost = true;
             }
         }
         core.pool.release(slot);
@@ -468,11 +558,16 @@ fn service(core: &Arc<Core>, readiness: &Readiness, host: Option<RawFd>) {
         state.shared_gates.retain(|(shared, target, slot)| {
             match shared.refresh() {
                 Ok(published) => broadcast |= published,
-                Err(error) => diag!("RM shared gate refresh: {error}"),
+                Err(error) => {
+                    // The gate could only complete through a later refresh.
+                    diag!("RM shared gate refresh failed; device lost: {error}");
+                    lost = true;
+                }
             }
             if shared.completed() >= *target {
                 if let Err(error) = core.pool.store32(*slot, 1) {
-                    diag!("RM shared gate release: {error}");
+                    diag!("RM shared gate release failed; device lost: {error}");
+                    lost = true;
                 }
                 core.pool.release(*slot);
                 false
@@ -523,7 +618,7 @@ mod tests {
         let start = Instant::now();
         loop {
             {
-                let state = watcher.lock();
+                let state = watcher.lock().unwrap();
                 if state.polling && state.snapshot != after {
                     return state.snapshot;
                 }
@@ -624,6 +719,27 @@ mod tests {
             core.pool.release(slot);
         }
         assert!(!core.is_lost());
+        core.watcher.stop(&core);
+    }
+
+    /// RUST.md §8: a poisoned watcher state fails new dependencies as device
+    /// lost, and teardown does not panic on it.
+    #[test]
+    #[cfg_attr(miri, ignore = "eventfd on a real descriptor")]
+    fn poisoned_state_fails_new_watches_as_device_lost() {
+        let (pool, _pages) = HostPages::pool(TimelineView::Native64, 1);
+        let core = Core::detached(pool).unwrap();
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                let _state = core.watcher.state.lock().unwrap();
+                panic!("poison the watcher state");
+            });
+            assert!(holder.join().is_err());
+        });
+        let (foreign, _peer) = stand_in();
+        let result = core.watcher.watch_cpu(&core, foreign).map(|_| ());
+        assert!(matches!(result, Err(Error::DeviceLost(_))), "{result:?}");
+        assert!(matches!(core.watcher.has_host(), Err(Error::DeviceLost(_))));
         core.watcher.stop(&core);
     }
 }
