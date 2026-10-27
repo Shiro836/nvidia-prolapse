@@ -57,7 +57,6 @@
     )
 )]
 pub use nv_rm_sys::abi;
-pub mod backend;
 pub mod capabilities;
 mod capture;
 pub mod compat;
