@@ -381,6 +381,18 @@ pub(crate) struct ControlPort {
     compat: Compat,
 }
 impl ControlPort {
+    /// Test stand-in for logic that holds a port but never controls through
+    /// it: no descriptor, so a control fails with EBADF.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self {
+            fd: -1,
+            root: 0,
+            compat: crate::compat::measured_versions()
+                .next()
+                .expect("the compat table lists at least one release"),
+        }
+    }
     pub(crate) fn control<T: FromBytes + IntoBytes + Immutable>(
         &self,
         object: u32,

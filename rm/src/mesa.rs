@@ -124,6 +124,23 @@ pub(crate) struct Core {
     devices: (RawFd, RawFd),
 }
 impl Core {
+    /// Device-free core over a CPU slot pool for watcher and waiter tests:
+    /// no RM events (descriptors -1), a trigger port that is never used.
+    #[cfg(test)]
+    pub(crate) fn detached(pool: Arc<SlotPool>) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            pool,
+            waiters: Waiters::new()?,
+            watcher: Watcher::new()?,
+            trigger: TriggerPort::detached(),
+            lost: AtomicBool::new(false),
+            pending_waiters: std::sync::atomic::AtomicU32::new(0),
+            last_scan: AtomicU64::new(0),
+            reclaim_pending: AtomicUsize::new(0),
+            epoch: Instant::now(),
+            devices: (-1, -1),
+        }))
+    }
     pub(crate) fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
     }
@@ -893,17 +910,23 @@ impl Bridge {
             Pending(&self.core.pending_waiters)
         });
         // Pending foreign sync_files wake us through the watcher; everything
-        // else is a mapped word (HOST interrupt or CPU notify).
+        // else is a mapped word (HOST interrupt or CPU notify). The watches
+        // end before this returns, so the watcher holds no reference to the
+        // caller's sync_files once the wait is over (watcher.rs). No
+        // allocation unless a foreign payload is pending.
+        let mut watches = Vec::new();
         for point in points {
             // SAFETY: the ids come from this function's arguments, live for the call (# Safety).
             if let Some(foreign) = unsafe { sync_ref(point.sync) }?.foreign() {
-                self.core.watcher.watch_cpu(&self.core, foreign)?;
+                watches.push(self.core.watcher.watch_cpu(&self.core, foreign)?);
             }
         }
-        self.wait_until(deadline(start, timeout_ns), || {
+        let result = self.wait_until(deadline(start, timeout_ns), || {
             // SAFETY: same ids as this function's; the wait ends within the call.
             unsafe { self.points_ready(points, flags) }
-        })
+        });
+        drop(watches);
+        result
     }
 
     // ---- submission ------------------------------------------------------

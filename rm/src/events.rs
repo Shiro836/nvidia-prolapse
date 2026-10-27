@@ -368,6 +368,14 @@ pub(crate) struct TriggerPort {
     subdevice: u32,
 }
 impl TriggerPort {
+    /// Test stand-in with no RM client behind it (`ControlPort::detached`).
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self {
+            port: rm::ControlPort::detached(),
+            subdevice: 0,
+        }
+    }
     pub(crate) fn trigger(&self) -> Result<()> {
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         self.port.control(

@@ -79,6 +79,12 @@ impl Foreign {
     pub(crate) fn cached(&self) -> i32 {
         self.terminal.load(Ordering::Acquire)
     }
+    /// Test stand-in for the kernel reporting a terminal status: later
+    /// `status` calls return it without the `sync_file` ioctl.
+    #[cfg(test)]
+    pub(crate) fn settle(&self, status: i32) {
+        self.terminal.store(status, Ordering::Release);
+    }
     pub(crate) fn raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
