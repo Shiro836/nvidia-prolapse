@@ -2019,6 +2019,7 @@ mod vk {
     pub(super) const ERROR_OUT_OF_DEVICE_MEMORY: i32 = -2;
     pub(super) const ERROR_INITIALIZATION_FAILED: i32 = -3;
     pub(super) const ERROR_DEVICE_LOST: i32 = -4;
+    pub(super) const ERROR_TOO_MANY_OBJECTS: i32 = -10;
     pub(super) const ERROR_INVALID_EXTERNAL_HANDLE: i32 = -1_000_072_003;
 }
 /// What a failed entry point's error means to the application, before the
@@ -2085,6 +2086,11 @@ enum Entry {
     /// (nvkmd_nouveau_mem.c:188 at Mesa 26.2.5); running out of memory and a
     /// lost device are `OUT_OF_DEVICE_MEMORY`, as for [`Entry::Alloc`].
     Import,
+    /// `nv_rm_export`: `vkGetMemoryFdKHR` (and the Android hardware buffer
+    /// export over it), whose codes are `TOO_MANY_OBJECTS` and
+    /// `OUT_OF_HOST_MEMORY`. NVK reports every failed dma-buf export as
+    /// `TOO_MANY_OBJECTS` (nvkmd_nouveau_mem.c:293 at Mesa 26.2.5).
+    Export,
     /// Every other entry point: paths of a created device, where a lost device
     /// is `VK_ERROR_DEVICE_LOST` (spec "Lost Device").
     Device,
@@ -2096,15 +2102,19 @@ impl Entry {
     }
     fn result(self, failure: Failure) -> i32 {
         match (self, failure) {
-            (Self::Open | Self::Alloc | Self::Import | Self::Device, Failure::HostMemory) => {
-                vk::ERROR_OUT_OF_HOST_MEMORY
+            (
+                Self::Open | Self::Alloc | Self::Import | Self::Export | Self::Device,
+                Failure::HostMemory,
+            ) => vk::ERROR_OUT_OF_HOST_MEMORY,
+            (Self::Export, Failure::DeviceMemory | Failure::Lost | Failure::Refused) => {
+                vk::ERROR_TOO_MANY_OBJECTS
             }
             (Self::Open | Self::Alloc | Self::Import | Self::Device, Failure::DeviceMemory)
             | (Self::Alloc, Failure::Lost | Failure::Refused)
             | (Self::Import, Failure::Lost) => vk::ERROR_OUT_OF_DEVICE_MEMORY,
             (Self::Import, Failure::Refused) => vk::ERROR_INVALID_EXTERNAL_HANDLE,
             (Self::Open, Failure::Lost | Failure::Refused | Failure::Contract)
-            | (Self::Alloc | Self::Import | Self::Device, Failure::Contract)
+            | (Self::Alloc | Self::Import | Self::Export | Self::Device, Failure::Contract)
             | (Self::Device, Failure::Refused) => vk::ERROR_INITIALIZATION_FAILED,
             (Self::Device, Failure::Lost) => vk::ERROR_DEVICE_LOST,
         }
@@ -3125,26 +3135,24 @@ pub(crate) unsafe extern "C" fn nv_rm_export(
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
-    guarded("nv_rm_export", object, move || {
-        report((|| {
-            if drm_fd < 0 || out.is_null() {
-                return Err(Error::Contract("invalid external-memory output/fd".into()));
-            }
-            let b = present(object)?;
-            b.core.live()?;
-            let guard = b.lock()?;
-            let buffer = guard
-                .0
-                .buffers
-                .get(&memory)
-                .ok_or_else(|| Error::Contract("export unknown allocation".into()))?;
-            // Caller retains fd for the duration of this synchronous call.
-            let fd =
+    guarded_as(Entry::Export, "nv_rm_export", object, move || {
+        if drm_fd < 0 || out.is_null() {
+            return Err(Error::Contract("invalid external-memory output/fd".into()));
+        }
+        let b = present(object)?;
+        b.core.live()?;
+        let guard = b.lock()?;
+        let buffer = guard
+            .0
+            .buffers
+            .get(&memory)
+            .ok_or_else(|| Error::Contract("export unknown allocation".into()))?;
+        // Caller retains fd for the duration of this synchronous call.
+        let fd =
                 // SAFETY: nv_rm.h: a descriptor argument is open for the whole call; the borrow ends with it.
                 crate::external::export(&buffer.memory, unsafe { BorrowedFd::borrow_raw(drm_fd) })?;
-            // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-            unsafe { output(out, fd.into_raw_fd()) }
-        })())
+        // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
+        unsafe { output(out, fd.into_raw_fd()) }
     })
 }
 /// # Safety
@@ -4108,6 +4116,32 @@ mod tests {
         // SAFETY: a NULL device is rejected before any pointer is used.
         let status = unsafe { nv_rm_import(std::ptr::null_mut(), 0, -1, std::ptr::null_mut()) };
         assert_eq!(status, -3, "a NULL output is a broken bridge contract");
+    }
+    #[test]
+    fn export_failures_follow_nvk() {
+        // vkGetMemoryFdKHR may return TOO_MANY_OBJECTS or OUT_OF_HOST_MEMORY;
+        // NVK reports every failed export as TOO_MANY_OBJECTS
+        // (nvkmd_nouveau_mem.c:293).
+        let export = |error: Error| Entry::Export.status(&error);
+        for error in [
+            Error::Rm {
+                operation: "op",
+                status: 0x1f,
+            },
+            Error::Rm {
+                operation: "op",
+                status: 0x51,
+            },
+            Error::Io("op", std::io::Error::from_raw_os_error(24)),
+            Error::DeviceLost("x".into()),
+        ] {
+            assert_eq!(export(error), -10);
+        }
+        assert_eq!(
+            export(Error::Io("op", std::io::Error::from_raw_os_error(12))),
+            -1
+        );
+        assert_eq!(export(Error::Contract("x".into())), -3);
     }
     #[test]
     fn probing_reports_no_device_loss() {
