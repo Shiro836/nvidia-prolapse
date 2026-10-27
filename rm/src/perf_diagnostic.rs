@@ -20,6 +20,12 @@ pub struct PerformanceVote {
 }
 
 impl PerformanceVote {
+    /// Place a performance-boost vote on `device` (`NV2080_CTRL_CMD_PERF_BOOST`, flags 2,
+    /// duration 10 s; `ctrl2080perf.h`).
+    ///
+    /// # Errors
+    /// The running driver is not the one release whose wire layout was verified, or the RM
+    /// control fails.
     pub fn acquire(device: Rc<rm::Device>) -> rm::Result<Self> {
         if device.client.version != "610.57.04" {
             return Err(rm::Error::Contract(
@@ -60,6 +66,10 @@ impl PerformanceVote {
         rm::status("PERF_BOOST diagnostic", call.status)
     }
 
+    /// Withdraw the vote now instead of at drop.
+    ///
+    /// # Errors
+    /// The RM control fails; the vote then stays armed and expires within ten seconds.
     pub fn clear(&mut self) -> rm::Result<()> {
         if self.armed {
             self.request(0, 0)?;

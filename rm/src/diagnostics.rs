@@ -13,14 +13,23 @@ use crate::{
 /// plus the payload mode `fences::payload_mode` derives from it.
 #[derive(Debug, Clone)]
 pub struct SemaphoreLayout {
+    /// Byte offset of the `maxSubmittedValue` word in each semaphore.
     pub max_submitted_offset: u64,
+    /// Byte offset of the monitored-fence word in each semaphore.
     pub monitored_offset: u64,
+    /// Bytes per semaphore.
     pub stride: u64,
+    /// `LAYOUT_CAPS_*` bits (1 monitored fence, 2 64-bit semaphores).
     pub caps: u32,
-    /// "native64", "tracked32@<offset>", or the named contract error.
+    /// `native64`, `tracked32@<offset>`, or the named contract error.
     pub mode: std::result::Result<String, String>,
 }
 
+/// Query the semaphore-surface layout of `device` and derive its payload mode.
+///
+/// # Errors
+/// The RM control's failure. A layout the backend refuses is not an error here: it is
+/// reported in [`SemaphoreLayout::mode`].
 pub fn semaphore_layout(device: &Device) -> Result<SemaphoreLayout> {
     let raw = crate::fences::query_layout(device)?;
     Ok(SemaphoreLayout {
@@ -34,12 +43,19 @@ pub fn semaphore_layout(device: &Device) -> Result<SemaphoreLayout> {
 
 /// Every exact release compiled into this backend with its static predicates.
 pub struct VersionFacts {
+    /// The driver release, as `/proc/driver/nvidia/version` names it.
     pub version: &'static str,
+    /// Whether the backend opens a client on it, or why not.
     pub client_abi: std::result::Result<(), String>,
+    /// Whether semaphore-surface fences are usable, or why not.
     pub semsurf_fences: std::result::Result<(), String>,
+    /// Semaphore surfaces can bind channels for their notifications.
     pub semsurf_bind: bool,
+    /// GPU mappings take a PTE kind override (`NVOS46` `kindOverride`).
     pub kind_override: bool,
+    /// Memory exports and imports through nvidia-drm are available.
     pub external_memory: bool,
+    /// Exported objects can be identified across processes.
     pub identify_object: bool,
 }
 
@@ -55,11 +71,15 @@ fn facts(compat: Compat) -> VersionFacts {
     }
 }
 
+/// The facts of every release compiled into the backend, oldest first.
 pub fn recognized_versions() -> Vec<VersionFacts> {
     crate::compat::measured_versions().map(facts).collect()
 }
 
 /// Static facts for one version string, or the exact refusal Client::open gives.
+///
+/// # Errors
+/// The refusal message for a release without an exact profile.
 pub fn version_facts(version: &str) -> std::result::Result<VersionFacts, String> {
     Compat::for_version(version)
         .map(facts)

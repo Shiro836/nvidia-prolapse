@@ -26,7 +26,6 @@
     clippy::items_after_statements,
     clippy::many_single_char_names,
     clippy::mem_forget,
-    clippy::missing_errors_doc,
     clippy::needless_continue,
     clippy::needless_pass_by_value,
     clippy::similar_names,
@@ -38,7 +37,6 @@
     clippy::used_underscore_binding,
     clippy::wildcard_enum_match_arm,
     missing_debug_implementations,
-    missing_docs,
     reason = "pre-standard code; cleanup tracked"
 )]
 #![cfg_attr(

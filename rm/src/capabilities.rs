@@ -12,22 +12,38 @@ use crate::{
 };
 use nv_rm_core::conv::{u64_from_usize, usize_from_u32};
 
+/// How a channel learns about new GPFIFO entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Submission {
+    /// `GP_PUT` written to the channel's USERD (host classes before `c36f`).
     PreVolta,
+    /// `GP_PUT` in USERD plus a doorbell write of the work-submit token to the usermode
+    /// class (`clc361.h` `NVC361_NOTIFY_CHANNEL_PENDING`).
     Volta,
 }
+/// The classes and parameters this backend uses on one GPU, chosen from RM's class list and
+/// SM version by [`select`]. Every class is one the GPU advertises; nothing is extrapolated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities {
+    /// SM version as `major * 10 + minor` (e.g. 120 for SM120).
     pub sm: u32,
+    /// Host (GPFIFO channel) class.
     pub channel: u32,
+    /// Usermode (doorbell) class, from Volta on.
     pub usermode: Option<u32>,
+    /// Copy engine class.
     pub copy: u32,
+    /// 2D engine class.
     pub eng2d: u32,
+    /// 3D engine class.
     pub eng3d: u32,
+    /// Inline-to-memory (M2MF) class.
     pub m2mf: u32,
+    /// Compute engine class.
     pub compute: u32,
+    /// The generic (pitch and block-linear, uncompressed) PTE kind of the architecture.
     pub generic_kind: u32,
+    /// How submissions reach the channel.
     pub submission: Submission,
 }
 
@@ -102,6 +118,10 @@ fn advertised(classes: &[u32], known: &[u32], name: &str) -> Result<u32> {
 /// In particular GA100 uses 8_02 for SM80 and GB20x's transition spelling
 /// 10_04 and final 12_00 both describe SM120 (ctrl2080gr.h Bug 4333440).
 /// Unknown encodings are rejected instead of extrapolating future hardware.
+///
+/// # Errors
+/// [`Error::Contract`] for an SM encoding this backend does not know, or when RM advertises
+/// none of the implemented classes of an engine.
 pub fn select(classes: &[u32], rm_sm: u32) -> Result<Capabilities> {
     let (sm, eng3d, compute) = match rm_sm {
         0x500 => (50, 0xb097, 0xb0c0),

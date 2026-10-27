@@ -380,12 +380,18 @@ fn mapping_plan_paged(
     })
 }
 
+/// A GPU virtual address space (`FERMI_VASPACE_A` with a full-range `NV01_MEMORY_VIRTUAL`)
+/// whose page tables kernel RM owns. Mappings made in it are [`GpuMapping`]s.
 pub struct AddressSpace {
     device: Rc<Device>,
     pub(crate) vaspace: Rc<Object>,
     dma: Rc<Object>,
 }
 impl AddressSpace {
+    /// A 40-bit address space on `device`.
+    ///
+    /// # Errors
+    /// RM's refusal to allocate the VA space or its virtual memory object.
     pub fn new(device: &Rc<Device>) -> Result<Self> {
         // Kernel RM owns its page tables. No external owner and no faulting.
         let mut parameters = abi::VaSpace {
@@ -417,6 +423,11 @@ impl AddressSpace {
             dma,
         })
     }
+    /// Map all of `memory` at an address RM chooses, without a PTE kind.
+    ///
+    /// # Errors
+    /// [`MemoryError`] for memory this space cannot map (another device, a size beyond the
+    /// limits), RM's refusal, or an address RM returned outside the request.
     pub fn map(&self, memory: &Rc<Memory>) -> Result<GpuMapping> {
         self.map_internal(
             memory,
@@ -550,6 +561,8 @@ fn typed_kind_check(generic_kind: u32, requested: u32, chosen: u32) -> Result<()
     }
     Ok(())
 }
+/// A live GPU mapping of a memory object. Dropping it unmaps the range; the memory stays
+/// alive at least as long as the mapping.
 pub struct GpuMapping {
     memory: Rc<Memory>,
     dma: Rc<Object>,
@@ -558,6 +571,7 @@ pub struct GpuMapping {
     active: bool,
 }
 impl GpuMapping {
+    /// The GPU virtual address RM mapped the memory at.
     pub fn address(&self) -> GpuVa {
         self.pub_address
     }
@@ -611,9 +625,19 @@ fn gp_put(put: usize) -> u32 {
 }
 /// One isolated hardware-copy smoke operation. It owns every object and mapping
 /// through completion or channel teardown. No shader compiler or Vulkan API yet.
+/// Returns the number of words verified.
+///
+/// # Errors
+/// A missing class, a failed allocation, a check channel that did not complete in time, or
+/// a word the copy did not write as expected.
 pub fn copy_check(device: &Rc<Device>) -> Result<usize> {
     run_check(device, false)
 }
+/// One isolated compute-shader smoke dispatch, owning its objects like [`copy_check`].
+/// Returns the number of results verified.
+///
+/// # Errors
+/// As [`copy_check`], for the compute channel and its results.
 pub fn compute_check(device: &Rc<Device>) -> Result<usize> {
     run_check(device, true)
 }

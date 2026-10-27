@@ -35,10 +35,12 @@ use std::rc::Rc;
 /// thread-confined `Rc`s).
 #[derive(Clone, Debug)]
 pub struct VideoDevice {
+    /// PCI domain, bus, device and function of the GPU.
     pub pci: [u32; 4],
-    pub info: NvVideoDeviceInfo,
-    /// BSP caps of NVDEC0, the engine sessions submit to, and the raw capsTbl they were read from.
-    pub engine0: NvdecEngineCaps,
+    pub(crate) info: NvVideoDeviceInfo,
+    /// BSP caps of NVDEC0, the engine sessions submit to.
+    pub(crate) engine0: NvdecEngineCaps,
+    /// The raw BSP capsTbl NVDEC0's caps were decoded from, for diagnostics.
     pub engine0_caps_tbl: [u8; 8],
 }
 
@@ -81,6 +83,11 @@ fn parse_pci(s: &str) -> VResult<[u32; 4]> {
 }
 
 impl VideoDevice {
+    /// Open the GPU `NV_VIDEO_PCI` names, or else the first one this process may open
+    /// (`nv_video_device_open` in `nv_video.h`), and read its NVDEC class and caps.
+    ///
+    /// # Errors
+    /// No accessible NVIDIA GPU (with the reason for each candidate), or a failed RM query.
     pub fn open() -> VResult<Self> {
         let (device, pci) = open_rm(None)?;
         let classes = device.classes()?;
@@ -176,12 +183,17 @@ pub(crate) fn open_render_node(pci: [u32; 4]) -> VResult<std::fs::File> {
 /// Test support: a dma-buf exported by nvidia-drm from our own VRAM
 /// allocation, readable through the CPU, standing in for a gralloc buffer.
 pub struct TestDmaBuf {
+    /// The exported dma-buf.
     pub fd: std::os::fd::OwnedFd,
     memory: Rc<rm::Memory>,
     _device: Rc<rm::Device>,
 }
 
 impl TestDmaBuf {
+    /// A dma-buf of at least `size` bytes (rounded up to 64 KiB) on `dev`'s GPU.
+    ///
+    /// # Errors
+    /// No DRM render node for the GPU, or a failed allocation or export.
     pub fn new(dev: &VideoDevice, size: usize) -> VResult<Self> {
         use std::os::fd::AsFd;
         let (device, _) = open_rm(Some(dev.pci))?;
@@ -194,11 +206,20 @@ impl TestDmaBuf {
             _device: device,
         })
     }
+    /// Copy `out.len()` bytes at `offset` out of the buffer, once every GPU write to it
+    /// has completed.
+    ///
+    /// # Errors
+    /// The CPU mapping fails or the range is outside the buffer.
     pub fn read(&self, offset: usize, out: &mut [u8]) -> VResult<()> {
         // Sound only after the GPU handoff: test helper: the caller waited for every copy into this dma-buf.
         self.memory.map()?.read_bytes(offset, out)?;
         Ok(())
     }
+    /// Set every byte of the buffer to `byte`, before any GPU work references it.
+    ///
+    /// # Errors
+    /// The CPU mapping fails.
     pub fn fill(&self, byte: u8) -> VResult<()> {
         let v = vec![byte; self.memory.size];
         // Sound only after the GPU handoff: test helper: called before any GPU work references the buffer.

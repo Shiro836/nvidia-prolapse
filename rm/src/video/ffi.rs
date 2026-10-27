@@ -103,34 +103,62 @@ impl NvVideoSession {
     }
 }
 
+/// `struct NvVideoSessionInfo` of `nv_video.h`: what `nv_video_session_create` sizes a
+/// session for.
 #[repr(C)]
 pub struct NvVideoSessionInfo {
+    /// `enum NvVideoCodec`.
     pub codec: u32,
+    /// Largest coded width the session's resources are sized for.
     pub max_width: u32,
+    /// Largest coded height the session's resources are sized for.
     pub max_height: u32,
+    /// Expected luma bit depth (8 or 10).
     pub bit_depth: u32,
+    /// Decoded pictures the caller may hold beyond the DPB.
     pub extra_output_slots: u32,
+    /// Optional out-of-band configuration (avcC, hvcC, av1C or Annex-B parameter sets), or
+    /// NULL.
     pub codec_config: *const u8,
+    /// Bytes at `codec_config`.
     pub codec_config_len: usize,
+    /// Zero.
     pub reserved: [u32; 8],
 }
 
+/// `struct NvVideoPicture` of `nv_video.h`: a decoded picture ready for display, valid until
+/// `nv_video_picture_release`.
 #[repr(C)]
 pub struct NvVideoPicture {
+    /// Opaque id for `nv_video_copy_out`, `nv_video_picture_hdr` and the release.
     pub id: u64,
+    /// The timestamp passed with the unit that produced the picture.
     pub timestamp: u64,
+    /// Coded width.
     pub width: u32,
+    /// Coded height.
     pub height: u32,
+    /// Display window: left edge.
     pub crop_left: u32,
+    /// Display window: top edge.
     pub crop_top: u32,
+    /// Display window: width.
     pub crop_width: u32,
+    /// Display window: height.
     pub crop_height: u32,
+    /// Luma bit depth (8 or 10).
     pub bit_depth: u32,
+    /// Colour primaries, ISO/IEC 23091-2 code point.
     pub color_primaries: u32,
+    /// Transfer characteristics, ISO/IEC 23091-2 code point.
     pub transfer: u32,
+    /// Matrix coefficients, ISO/IEC 23091-2 code point.
     pub matrix: u32,
+    /// 1 for full-range samples.
     pub full_range: u32,
+    /// 1 for an IDR, IRAP or key frame.
     pub keyframe: u32,
+    /// Zero.
     pub reserved: [u32; 5],
 }
 
@@ -138,11 +166,17 @@ pub struct NvVideoPicture {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NvVideoMasteringDisplay {
+    /// x chromaticity of the three primaries, in the codec's coded order.
     pub display_primaries_x: [u16; 3],
+    /// y chromaticity of the three primaries.
     pub display_primaries_y: [u16; 3],
+    /// White point x chromaticity.
     pub white_point_x: u16,
+    /// White point y chromaticity.
     pub white_point_y: u16,
+    /// Maximum display luminance.
     pub max_luminance: u32,
+    /// Minimum display luminance.
     pub min_luminance: u32,
 }
 
@@ -151,11 +185,17 @@ pub struct NvVideoMasteringDisplay {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NvVideoHdrMetadata {
+    /// 1 when `mastering_display` carries values.
     pub has_mastering_display: u32,
+    /// The mastering display colour volume.
     pub mastering_display: NvVideoMasteringDisplay,
+    /// 1 when the two light levels carry values.
     pub has_content_light_level: u32,
+    /// MaxCLL in cd/m2.
     pub max_content_light_level: u32,
+    /// MaxFALL in cd/m2.
     pub max_pic_average_light_level: u32,
+    /// Zero.
     pub reserved: [u32; 6],
 }
 
@@ -182,19 +222,32 @@ impl From<HdrStaticMetadata> for NvVideoHdrMetadata {
     }
 }
 
+/// `struct NvVideoTarget` of `nv_video.h`: the destination buffer of `nv_video_copy_out`.
 #[repr(C)]
 pub struct NvVideoTarget {
+    /// dma-buf of plane 0 (Y) and plane 1 (CbCr, or Cb for YUV420P); they may be the same.
     pub dmabuf_fd: [i32; 2],
+    /// Byte offset of each plane in its dma-buf.
     pub offset: [u64; 2],
+    /// Bytes per row of each plane (LINEAR; ignored for block-linear).
     pub pitch: [u32; 2],
+    /// DRM format modifier: LINEAR or an NVIDIA block-linear modifier.
     pub modifier: u64,
+    /// `enum NvVideoFormat`.
     pub format: u32,
+    /// Buffer width; the display window is written at (0,0).
     pub width: u32,
+    /// Buffer height.
     pub height: u32,
+    /// -1, or a sync_file the copy waits for (the buffer is free).
     pub acquire_fence_fd: i32,
+    /// YUV420P only: dma-buf of the Cr plane.
     pub cr_dmabuf_fd: i32,
+    /// YUV420P only: bytes per row of the Cr plane.
     pub cr_pitch: u32,
+    /// YUV420P only: byte offset of the Cr plane.
     pub cr_offset: u64,
+    /// Zero.
     pub reserved: [u32; 2],
 }
 

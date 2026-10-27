@@ -50,22 +50,34 @@ const fn round_up(v: usize, a: usize) -> usize {
 
 pub use nv_video::nvdec_hevc::HevcFrame;
 
+/// An HEVC stream prepared for [`decode_hevc`]: the slice data and one picture descriptor
+/// per frame, as the parser produced them.
 pub struct HevcStream<'a> {
+    /// Slice data of every frame, back to back.
     pub bitstream: &'a [u8],
     /// 0x300-byte descriptors, one per frame.
     pub descriptors: &'a [u8],
+    /// Each frame's slice range and reference state.
     pub frames: &'a [HevcFrame],
+    /// Coded luma width in pixels.
     pub luma_w: usize,
+    /// Coded luma height in pixels.
     pub luma_h: usize,
 }
 
+/// What [`decode_hevc`] produced.
 pub struct DecodeReport {
+    /// The NVDEC class the frames were decoded with.
     pub decoder_class: u32,
     /// Raw block-linear NV12 surfaces, one per decoded frame.
     pub surfaces: Vec<Vec<u8>>,
+    /// Byte offset of the chroma plane in each surface.
     pub chroma_offset: usize,
+    /// Bytes per surface row.
     pub stride: usize,
+    /// First 8 NVDEC status words per decoded frame.
     pub status_words: Vec<[u32; 8]>,
+    /// Submit-to-completion time of every frame.
     pub frame_times: Vec<Duration>,
 }
 
@@ -323,6 +335,10 @@ impl Drop for VideoChannel {
 
 /// Decode `stream` frame by frame (one submission per frame). Returns the
 /// raw output surfaces.
+///
+/// # Errors
+/// The device has no NVDEC class, an allocation or submission fails, or a frame does not
+/// complete in time.
 pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeReport> {
     let mut ch = VideoChannel::new(device)?;
     let decoder_class = ch.decoder_class;
@@ -442,18 +458,27 @@ pub fn decode_hevc(device: &Rc<Device>, stream: &HevcStream) -> Result<DecodeRep
 
 /// One shown VP9 frame: raw block-linear NV12 surface plus geometry.
 pub struct Vp9Output {
+    /// The surface bytes.
     pub surface: Vec<u8>,
+    /// Frame width in pixels.
     pub width: usize,
+    /// Frame height in pixels.
     pub height: usize,
+    /// Bytes per surface row.
     pub stride: usize,
+    /// Byte offset of the chroma plane.
     pub chroma_offset: usize,
 }
 
+/// What [`decode_vp9`] produced.
 pub struct Vp9Report {
+    /// The NVDEC class the frames were decoded with.
     pub decoder_class: u32,
+    /// Every shown frame, in display order.
     pub outputs: Vec<Vp9Output>,
     /// Submit-to-completion time of every decoded (not show-existing) frame.
     pub frame_times: Vec<Duration>,
+    /// Frames the engine decoded (show-existing frames are not decoded again).
     pub decoded: usize,
     /// First 8 NVDEC status words per decoded frame.
     pub status_words: Vec<[u32; 8]>,
@@ -579,6 +604,9 @@ pub(crate) fn vp9_pic(
 /// Decode IVF packets of a VP9 profile-0 stream through NVDEC: CPU parses
 /// headers and maintains probability contexts, the engine decodes, its
 /// symbol counts drive backward adaptation for the next frame.
+///
+/// # Errors
+/// As [`decode_hevc`], plus a packet the VP9 front end cannot parse.
 pub fn decode_vp9(device: &Rc<Device>, packets: &[&[u8]]) -> Result<Vp9Report> {
     use crate::nvdec_drv::{Pod, Vp9EntropyCounts};
     use crate::vp9::{Vp9State, split_superframe, tile_sizes};

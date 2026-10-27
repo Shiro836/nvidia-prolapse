@@ -76,6 +76,11 @@ fn exchange_wire<T: FromBytes + IntoBytes + Immutable>(
     wire.unpack(value)
 }
 
+/// The running kernel module's version (`NVRM version:` line of
+/// `/proc/driver/nvidia/version`); the RM version check sends exactly this string.
+///
+/// # Errors
+/// The file cannot be read, or has no `NVRM version:` line with a dotted version.
 pub fn runtime_version() -> Result<String> {
     let text = std::fs::read_to_string("/proc/driver/nvidia/version")
         .map_err(|e| Error::Io("read running NVIDIA version", e))?;
@@ -94,14 +99,23 @@ fn parse_runtime_version(text: &str) -> Result<String> {
         .ok_or_else(|| Error::Contract("unrecognized /proc/driver/nvidia/version".into()))
 }
 
+/// An RM client: the process's `/dev/nvidiactl` descriptor, the root client object
+/// allocated on it, and the exact ABI profile of the running driver release. Freeing the
+/// root on drop releases every object the client still owns.
 pub struct Client {
     pub(crate) control: File,
     pub(crate) root: RmHandle,
+    /// The driver release the client was opened against ([`runtime_version`]).
     pub version: String,
     pub(crate) compat: Compat,
     pub(crate) cpu_page_size: usize,
 }
 impl Client {
+    /// Open `/dev/nvidiactl`, pass RM's strict version check and allocate the root client.
+    ///
+    /// # Errors
+    /// The driver release has no exact ABI profile in this build, the version check fails
+    /// (kernel module and userspace disagree), or opening or allocating fails.
     pub fn open() -> Result<Rc<Self>> {
         let cpu_page_size =
             platform::validate_runtime().map_err(|e| Error::Io("validate CPU mapping ABI", e))?;
@@ -153,6 +167,10 @@ impl Client {
             cpu_page_size,
         }))
     }
+    /// The NVIDIA GPUs RM enumerates (`NV_ESC_CARD_INFO`), valid entries only.
+    ///
+    /// # Errors
+    /// The card-info ioctl fails or its layout differs from this build's.
     pub fn cards(&self) -> Result<Vec<abi::Card>> {
         self.compat.require_same_layout("nv_ioctl_card_info_t")?;
         let mut cards = [abi::Card::default(); 64];
@@ -327,6 +345,11 @@ impl Client {
         )?;
         Ok(gpu)
     }
+    /// Open `card`'s `/dev/nvidiaN` and allocate its device and subdevice objects.
+    ///
+    /// # Errors
+    /// `card` is not a valid NVIDIA entry of [`Client::cards`], its node cannot be opened,
+    /// or RM refuses an allocation or control.
     pub fn device(self: &Rc<Self>, card: abi::Card) -> Result<Rc<Device>> {
         if card.valid == 0 || card.pci.vendor != 0x10de {
             return Err(Error::Contract(
@@ -432,6 +455,9 @@ impl Drop for Client {
     }
 }
 
+/// One GPU opened on a [`Client`]: its device and subdevice objects, the open
+/// `/dev/nvidiaN`, and the CPU mappings and BAR budget of memory allocated on it.
+/// Single-threaded (`Rc`); objects allocated on the device keep it alive.
 pub struct Device {
     pub(crate) client: Rc<Client>,
     pub(crate) handle: RmHandle,
@@ -439,7 +465,7 @@ pub struct Device {
     pub(crate) subdevice_instance: u32,
     pub(crate) events: RefCell<Weak<crate::events::EventSource>>,
     _gpu: File,
-    pub card: abi::Card,
+    pub(crate) card: abi::Card,
     bar_budget: Rc<BarBudget>,
     generic_kind: Cell<Option<u32>>,
     cpu_maps: Rc<crate::cpu_map_cache::Registry<Mapping>>,
@@ -452,6 +478,10 @@ impl Device {
     pub(crate) fn cpu_mapping_slot(&self) -> Rc<crate::cpu_map_cache::Slot<Mapping>> {
         self.cpu_maps.slot()
     }
+    /// RM's SM version encoding (`NV2080_CTRL_GR_INFO_INDEX_SM_VERSION`, e.g. `0x1200`).
+    ///
+    /// # Errors
+    /// The RM control fails.
     pub fn sm_version(&self) -> Result<u32> {
         let mut entry = [0xcu32, 0]; // NV2080_CTRL_GR_INFO_INDEX_SM_VERSION
         let mut query = abi::GrInfo {
@@ -463,6 +493,10 @@ impl Device {
             .control(self.subdevice, 0x20801201, &mut query)?;
         Ok(entry[1])
     }
+    /// The classes the GPU supports (`NV0080_CTRL_CMD_GPU_GET_CLASSLIST`).
+    ///
+    /// # Errors
+    /// The RM control fails, or its count is implausible or grows between the two calls.
     pub fn classes(&self) -> Result<Vec<u32>> {
         let mut query = abi::ClassList::default();
         self.client.control(self.handle, 0x800201, &mut query)?;
@@ -478,6 +512,10 @@ impl Device {
         classes.truncate(usize_from_u32(query.count));
         Ok(classes)
     }
+    /// Allocate `requested_size` bytes of video memory (rounded up to CPU pages).
+    ///
+    /// # Errors
+    /// [`MemoryError`] for a zero size, or RM's refusal.
     pub fn allocate_vram(self: &Rc<Self>, requested_size: usize) -> Result<Rc<Memory>> {
         self.allocate_memory(requested_size, false)
     }
@@ -880,11 +918,13 @@ impl Drop for Device {
         }
     }
 }
+/// An RM memory object (video or system memory) and the device it belongs to. Freed on
+/// drop, after every CPU and GPU mapping of it is gone (they hold an `Rc`).
 pub struct Memory {
     pub(crate) device: Rc<Device>,
     pub(crate) handle: RmHandle,
     parent: RmHandle,
-    pub size: usize,
+    pub(crate) size: usize,
     system: bool,
     owned: bool,
     charge_bar: bool,
@@ -920,6 +960,12 @@ impl Memory {
             pages: PhysicalPages::Small4K,
         })
     }
+    /// Map the memory into this process (`NV_ESC_RM_MAP_MEMORY` + `mmap` of the device
+    /// node), charged against the device's BAR budget; idle mappings are evicted to make room.
+    ///
+    /// # Errors
+    /// [`MemoryError`] for memory that is never CPU-mapped, an exhausted BAR budget, an
+    /// earlier failed cleanup, or RM's or `mmap`'s refusal.
     pub fn map(self: &Rc<Self>) -> Result<Mapping> {
         if self.pages == PhysicalPages::Huge2M {
             return Err(MemoryError::Invalid {
@@ -1357,6 +1403,9 @@ fn cpu_mapping_extent(
     }
     Ok((within_page, rounded))
 }
+/// A CPU mapping of a [`Memory`]. The GPU and other processes may write the memory at any
+/// time, so every access is a bounds-checked volatile read or write, or atomic through an
+/// `&AtomicU64` (RUST.md §3). Unmapped on drop.
 pub struct Mapping {
     pointer: NonNull<u32>,
     size: usize,
@@ -1502,6 +1551,10 @@ impl Mapping {
     }
 
     /// CPU-only allocation smoke check; deliberately does not claim GPU execution.
+    /// Returns the number of words verified.
+    ///
+    /// # Errors
+    /// The mapping is no longer live, or a word reads back differently.
     pub fn check_pattern(&mut self) -> Result<usize> {
         self.live()?;
         let count = self.size / 4;
