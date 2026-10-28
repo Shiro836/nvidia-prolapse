@@ -854,7 +854,7 @@ nvrm_get_name(struct pipe_screen *pscreen)
 static const char *
 nvrm_get_vendor(struct pipe_screen *pscreen)
 {
-   return "waydroid-nvidia-prolapse (nvrm)";
+   return "nvidia-prolapse (nvrm)";
 }
 
 static const char *

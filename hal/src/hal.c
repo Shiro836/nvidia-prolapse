@@ -681,8 +681,8 @@ __attribute__((visibility("default"))) hwvulkan_module_t HAL_MODULE_INFO_SYM = {
         .module_api_version = HWVULKAN_MODULE_API_VERSION_0_1,
         .hal_api_version = HARDWARE_HAL_API_VERSION,
         .id = HWVULKAN_HARDWARE_MODULE_ID,
-        .name = "NVIDIA Vulkan HAL (waydroid-nvidia-prolapse)",
-        .author = "waydroid-nvidia-prolapse",
+        .name = "NVIDIA Vulkan HAL (nvidia-prolapse)",
+        .author = "nvidia-prolapse",
         .methods = &hal_module_methods,
     },
 };
