@@ -140,9 +140,10 @@ Destroy order is written out: dev `destroy` clears `notify_lost`/`notify_lost_da
 the `VaRelease` callback, whose data pointer is the heap's `Arc`), closes the fd, then finishes
 the heap (as 563-583). Mesa's inline-only helpers (`simple_mtx_init/destroy`, `list_inithead`) get three
 small non-inline functions in `nvkmd.c` next to the existing `nvkmd_mem_init`:
-`nvkmd_dev_init`, `nvkmd_dev_finish`, `nvkmd_mem_finish` (~20 C lines in
-`rm-integration.patch`; forcing interface: Mesa's `static inline` mutex/list API in
-`util/simple_mtx.h`, `util/list.h`).
+`nvkmd_dev_init`, `nvkmd_dev_finish`, `nvkmd_mem_finish`, and
+`nvkmd_dev_info_init_shared_mem_sizes` for `nv_device_info.h`'s inline shared-memory table
+(~25 C lines in `rm-integration.patch`; forcing interface: Mesa's `static inline` mutex/list API in
+`util/simple_mtx.h`, `util/list.h` and `nv_device_info.h`).
 
 Calls into Mesa C from Rust: `__vk_errorf`, `_vk_device_set_lost` (variadic, always with a
 literal `"%s"` format), `nvkmd_mem_init`, `nvkmd_dev_alloc_va`, `nvkmd_va_bind_mem`,
@@ -235,17 +236,32 @@ it builds `rm` today in `mesa/build.py:344-357`); meson only links the archive:
 
 ### 4.1 Differential, entry level: the offline fake-RM harness
 
-`mesa/tests/run-pdev-preflight.py` compiles the production `nvkmd_rm.c` with pinned Mesa
-runtime sources against fake DRM/RM functions with exact argument expectations (pdev probing,
-partial-init cleanup, wait deadlines/ANY/ALL/pending, loss publication, ring retries, sync
-reset/move, fd forwarding, memory and cleanup, submit fusion with 0/1/1000/1001/2000 pushes,
-THREADED_ON_DEMAND). The harness gets `--backend rust`: the same objects and `.inc` suites,
-with `nvkmd_rm.o` replaced by the `nvkmd-rm` staticlib, linked against the same fake `nv_rm_*`
-functions. Gate per step: every suite passes on both
-backends, and the fake's recorded call log (entry, arguments, returned status, in order) is
-byte-identical between them. Injected failures (`rm_error`, `rm_lost`, `calloc_fail`) make
-this the coverage for error paths no GPU run reaches. Diagnostics are compared by content
-class, not text (`vk_errorf` carries the source file:line; stderr becomes `log`).
+`nvkmd-harness` (workspace crate, binary behind its `mesa` feature) drives a backend only through
+Mesa's public nvkmd interface: `nvkmd_try_create_pdev_for_drm`, the ops tables, the `vk_sync_type`s
+and the hooks a backend installs in a `vk_device`. Static-inline Mesa helpers it needs have Rust
+equivalents in `nvkmd-harness/src/mesa.rs` (`vk_device_is_lost_no_report` as an atomic load,
+`list_inithead` of the stand-in device's queue list). `mesa/tests/run-nvkmd-harness.py` links it
+once per backend against that backend's host NVK build (`build/nvk-host`, `build/nvk-host-rust`),
+with libc's render-node and `calloc`/`free` calls, libdrm and Mesa's diagnostic sinks replaced
+through `--wrap` (C variadic definitions are stable Rust) and the `nv_rm_*` entries defined by a
+fake RM that records every call. Injected failures (`open`, `fstat`, the version query, a chosen
+`calloc`, RM statuses, values wider than Mesa's fields) cover error paths no GPU run reaches;
+diagnostics are compared by content class (the harness checks a word of Mesa's message).
+
+Gate per step: every suite passes on both backends and the call log (every RM, render-node and
+libdrm call with arguments and result, plus each case's outcome and the filled device info and
+sync type shapes) is byte-identical between them, suite by suite. Suites: `pdev`, `info`, `loss`.
+
+The C preflight harness (`mesa/tests/pdev-preflight.c`, which includes `nvkmd_rm.c`) has no call
+log and builds backend-private objects directly (`nvkmd_rm_mem`, `nvkmd_rm_ctx`, `nvkmd_rm_sync`
+with chosen ids, the pending push array), so its scenarios are re-expressed through the public
+interface rather than replayed: objects come from `alloc_mem`/`create_ctx`/`vk_sync_init`, state
+is observed through later calls. Its backend suites move into the Rust harness with the steps
+that port their entries (`memory-api`, `memory-cleanup`: 6; `sync-api`, `wait-loss`: 7;
+`submit-fusion`: 8); its tests of Mesa's runtime and our patches to it, which reach no backend
+entry (`submit-on-demand`, `sync-properties`, the queue part of `loss-notification`, the
+`nvk_mem_stream` and sync-provider checks), stay a C test of the Mesa build. The C backend's part
+of it is deleted once the last backend suite has moved.
 
 ### 4.2 Differential, system level: capture
 
@@ -306,10 +322,10 @@ suites on the C backend, and the checks named. Estimates are focused working hou
 | 2 | `nvkmd-sys`: generator script, committed bindings for 3 targets, stale check in `build.py` | layout asserts on 3 targets, regen is a no-op | 3 h |
 | 3 | build plumbing: meson option, `build.py --nvkmd`, link spike with an archive holding only the guard (three Rust staticlibs in one `.so`, `--exclude-libs`) | both Android targets link, `nm -D` unchanged | 2 h |
 | 4 | `nvkmd-rm-logic` | unit tables, full Miri | 4 h |
-| 5 | `nvkmd-rm`: pdev + dev entries, panic guard, `try_box`, harness `--backend rust` | pdev-preflight pdev/loss suites on both, call logs identical | 5 h |
-| 6 | memory + VA entries (heap via `util_vma_heap`, `VaRelease`) | memory-api, memory-cleanup suites; call logs | 5 h |
-| 7 | sync types + `check_status`/`notify_lost` | sync-api, sync-properties, wait-loss, loss-notification suites | 5 h |
-| 8 | ctx entries (hot path) | submit-fusion, submit-on-demand suites | 5 h |
+| 5 | `nvkmd-rm`: pdev + dev entries, panic guard, `try_box`; `nvkmd-harness` | harness `pdev`/`info`/`loss` on both, call logs identical | 5 h |
+| 6 | memory + VA entries (heap via `util_vma_heap`, `VaRelease`) | memory-api, memory-cleanup scenarios ported to the harness; call logs | 5 h |
+| 7 | sync types | sync-api, wait-loss scenarios ported; call logs | 5 h |
+| 8 | ctx entries (hot path) | submit-fusion scenarios ported; call logs | 5 h |
 | 9 | switch gate: both backends on 3 targets | capture 0/42, run.py all, `nm -D`, submit-cost bench (idle GPU), Miri, then dEQP sample + live | 4 h + regression run |
 | 10 | after the gate: delete `nvkmd_rm.c`/`nvkmd_rm.h` and the `c` option; every `nv_rm_*` entry stays (gallium-nvrm, Codec2's library); the harness keeps the C fake (or a Rust one) | gate, capture 0/42 | 2 h |
 | 11 | separate later commits, each with its own test: Rust VA heap (differential vs `util_vma_heap` on recorded alloc/free sequences), DRM version query by ioctl in Rust, bugs found during 1–8 | own tests | — |
