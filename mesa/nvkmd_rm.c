@@ -42,7 +42,17 @@ struct nvkmd_rm_dev {
    int fd;
    simple_mtx_t va_mutex;
    struct util_vma_heap heap;
+   /* Capture/replay addresses (NVKMD_VA_REPLAY) come from their own range,
+    * so no other allocation can take an address an application captured
+    * and replays later; nvkmd_nouveau keeps the same split
+    * (nvkmd_nouveau_dev.c:51-58, nvkmd_nouveau_va.c:20-60). */
+   struct util_vma_heap replay_heap;
 };
+/* Upper half of the caller's VA window: replayable addresses. */
+#define NVKMD_RM_REPLAY_HEAP_START (1ull << 39)
+static_assert(NV_RM_VA_START < NVKMD_RM_REPLAY_HEAP_START &&
+              NVKMD_RM_REPLAY_HEAP_START < NV_RM_VA_END,
+              "replay heap inside the caller's VA window");
 struct nvkmd_rm_mem {
    struct nvkmd_mem base;
    struct NvRmAllocation allocation;
@@ -390,7 +400,9 @@ rm_dev_create(struct nvkmd_pdev* base, struct vk_object_base* log, struct nvkmd_
    list_inithead(&dev->base.mems);
    simple_mtx_init(&dev->base.mems_mutex, mtx_plain);
    simple_mtx_init(&dev->va_mutex, mtx_plain);
-   util_vma_heap_init(&dev->heap, NV_RM_VA_START, NV_RM_VA_END - NV_RM_VA_START);
+   util_vma_heap_init(&dev->heap, NV_RM_VA_START, NVKMD_RM_REPLAY_HEAP_START - NV_RM_VA_START);
+   util_vma_heap_init(&dev->replay_heap, NVKMD_RM_REPLAY_HEAP_START,
+                      NV_RM_VA_END - NVKMD_RM_REPLAY_HEAP_START);
    *out = &dev->base;
    /* Physical-device probing also opens a temporary KMD device; its log
     * object has no logical device or Vulkan status hook. */
@@ -594,6 +606,7 @@ rm_dev_destroy(struct nvkmd_dev* base)
    nv_rm_close(dev->rm);
    close(dev->fd);
    util_vma_heap_finish(&dev->heap);
+   util_vma_heap_finish(&dev->replay_heap);
    simple_mtx_destroy(&dev->va_mutex);
    simple_mtx_destroy(&dev->base.mems_mutex);
    free(dev);
@@ -634,18 +647,31 @@ rm_va_alloc(struct nvkmd_dev* base,
    struct nvkmd_rm_va* va = calloc(1, sizeof(*va));
    if (!va)
       return vk_error(log, VK_ERROR_OUT_OF_HOST_MEMORY);
+   /* Fixed addresses are replayed capture addresses only (nvkmd.h
+    * NVKMD_VA_ALLOC_FIXED); an address outside the replay range or taken
+    * is an invalid capture address, as in nvkmd_nouveau_va.c:23-42. */
+   if ((flags & NVKMD_VA_ALLOC_FIXED) && !(flags & NVKMD_VA_REPLAY)) {
+      free(va);
+      return unsupported(log, "fixed VA outside capture/replay");
+   }
+   struct util_vma_heap* heap = (flags & NVKMD_VA_REPLAY) ? &dev->replay_heap : &dev->heap;
    simple_mtx_lock(&dev->va_mutex);
    uint64_t address;
    if (flags & NVKMD_VA_ALLOC_FIXED) {
-      bool valid = fixed >= NV_RM_VA_START && fixed < NV_RM_VA_END &&
+      bool valid = fixed >= NVKMD_RM_REPLAY_HEAP_START && fixed < NV_RM_VA_END &&
                    size <= NV_RM_VA_END - fixed && !(fixed & (alignment - 1));
-      address = valid && util_vma_heap_alloc_addr(&dev->heap, fixed, size) ? fixed : 0;
+      address = valid && util_vma_heap_alloc_addr(heap, fixed, size) ? fixed : 0;
    } else {
-      address = util_vma_heap_alloc(&dev->heap, size, alignment);
+      address = util_vma_heap_alloc(heap, size, alignment);
    }
    simple_mtx_unlock(&dev->va_mutex);
    if (!address) {
       free(va);
+      if (flags & NVKMD_VA_ALLOC_FIXED)
+         return vk_errorf(log, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                          "Capture address 0x%" PRIx64 " outside [0x%" PRIx64 ", 0x%" PRIx64
+                          ") or already in use",
+                          fixed, (uint64_t)NVKMD_RM_REPLAY_HEAP_START, (uint64_t)NV_RM_VA_END);
       return vk_error(log, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
    va->base = (struct nvkmd_va){ .ops = &nvkmd_rm_va_ops,
@@ -738,7 +764,8 @@ rm_va_release(void* data, uint64_t address, uint64_t size)
 {
    struct nvkmd_rm_dev* dev = data;
    simple_mtx_lock(&dev->va_mutex);
-   util_vma_heap_free(&dev->heap, address, size);
+   util_vma_heap_free(address >= NVKMD_RM_REPLAY_HEAP_START ? &dev->replay_heap : &dev->heap,
+                      address, size);
    simple_mtx_unlock(&dev->va_mutex);
 }
 /* NVK frees driver-internal memory that queued work may still use (e.g. the
