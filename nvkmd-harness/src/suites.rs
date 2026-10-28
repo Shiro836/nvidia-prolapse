@@ -17,7 +17,7 @@ use crate::mesa::{self, Pdev, VkDevice};
 pub(crate) type Suite = (&'static str, fn());
 
 /// Every suite, in run order.
-pub(crate) const SUITES: &[Suite] = &[("pdev", pdev), ("loss", loss)];
+pub(crate) const SUITES: &[Suite] = &[("pdev", pdev), ("info", info), ("loss", loss)];
 
 fn refused(case: &str, expected: VkResult) {
     let result = mesa::try_create_pdev().map(Pdev::destroy);
@@ -201,6 +201,41 @@ fn kmd_devices(pdev: &Pdev) {
     let dev = pdev.create_dev(None).expect("the KMD device opens");
     note("create_dev = Ok");
     dev.destroy();
+}
+
+/// A change to what the fake RM reports.
+type Report = fn(&mut nv_rm_abi::NvRmInfo);
+
+/// RM values wider than the `nv_device_info` field they are reported in:
+/// the device is refused as one this driver cannot describe (NVK's answer to
+/// devices it cannot drive, `nvk_physical_device.c`), never reported with a
+/// truncated value.
+fn info() {
+    let cases: [(&str, Report); 3] = [
+        ("3D class wider than 16 bits", |info| {
+            info.cls_eng3d = 0x1_c797;
+        }),
+        ("PCI domain wider than 16 bits", |info| {
+            info.pci_domain = 0x1_0000;
+        }),
+        ("SM version wider than 8 bits", |info| {
+            info.sm = 0x100;
+        }),
+    ];
+    for (case, report) in cases {
+        reset();
+        state().report = report;
+        refused(case, VK_ERROR_INCOMPATIBLE_DRIVER);
+        assert!(
+            state().diagnostic.contains("not representable"),
+            "{case}: the refusal is named"
+        );
+        let state = state();
+        assert_eq!(
+            state.rm_opens, state.rm_closes,
+            "{case}: the RM device is closed"
+        );
+    }
 }
 
 /// Loss publication between Mesa and the RM: a logical device's loss reaches

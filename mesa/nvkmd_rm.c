@@ -465,6 +465,23 @@ nvkmd_rm_try_create_pdev(struct _drmDevice* drm,
    }
    nv_rm_close(rm);
    const struct NvRmInfo* info = &pdev->info;
+   /* nv_device_info's fields are narrower than the RM's. A value that does
+    * not fit would describe another device than the RM opened, so the device
+    * is refused the way NVK refuses devices it cannot drive
+    * (nvk_create_drm_physical_device): VK_ERROR_INCOMPATIBLE_DRIVER, which
+    * Mesa's enumeration skips (enumerate_drm_physical_devices_locked). */
+   if (info->device_id > UINT16_MAX || info->chipset > UINT16_MAX ||
+       info->pci_domain > UINT16_MAX || info->pci_bus > UINT8_MAX ||
+       info->pci_device > UINT8_MAX || info->pci_function > UINT8_MAX ||
+       info->sm > UINT8_MAX || info->gpc_count > UINT8_MAX ||
+       info->tpc_count > UINT16_MAX || info->mp_per_tpc > UINT8_MAX ||
+       info->max_warps_per_mp > UINT8_MAX || info->cls_copy > UINT16_MAX ||
+       info->cls_eng2d > UINT16_MAX || info->cls_eng3d > UINT16_MAX ||
+       info->cls_m2mf > UINT16_MAX || info->cls_compute > UINT16_MAX) {
+      result = vk_errorf(log, VK_ERROR_INCOMPATIBLE_DRIVER,
+                         "Native Rust RM device not representable in nv_device_info");
+      goto fail_pdev;
+   }
    pdev->base.ops = &nvkmd_rm_pdev_ops;
    pdev->base.debug_flags = debug;
    pdev->base.bind_align_B = 4096;

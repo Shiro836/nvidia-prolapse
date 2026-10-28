@@ -86,6 +86,8 @@ pub(crate) struct State {
     pub(crate) stat_error: bool,
     pub(crate) rm_error: bool,
     pub(crate) rm_partial: bool,
+    /// Applied to what `nv_rm_open` reports.
+    pub(crate) report: fn(&mut NvRmInfo),
     pub(crate) opens: u32,
     pub(crate) failed_opens: u32,
     pub(crate) closes: u32,
@@ -113,6 +115,7 @@ impl State {
             stat_error: false,
             rm_error: false,
             rm_partial: false,
+            report: |_| {},
             opens: 0,
             failed_opens: 0,
             closes: 0,
@@ -605,8 +608,10 @@ pub(crate) unsafe extern "C" fn nv_rm_open(
         // SAFETY: nv_rm_open's contract: `out` is writable.
         unsafe { out.write(rm_device()) };
     }
+    let mut report = info();
+    (state.report)(&mut report);
     // SAFETY: nv_rm_open's contract: `info_out` is writable.
-    unsafe { info_out.write(info()) };
+    unsafe { info_out.write(report) };
     let status = if state.rm_error {
         VK_ERROR_INITIALIZATION_FAILED
     } else {
