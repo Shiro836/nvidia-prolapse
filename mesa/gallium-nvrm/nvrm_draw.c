@@ -312,23 +312,15 @@ nvrm_shader_upload(struct nvrm_screen *screen, struct nvrm_shader *shader,
          abort();
       }
    }
-   if (screen->bar_full) {
-      /* CPU copy into the BAR1-mapped arena (reads shader_mem[], which a
-       * concurrent grow appends to: under the mutex). */
-      if (hdr_size)
-         nvrm_shader_heap_write(screen, heap_addr + hdr_offset, bin->info.hdr, hdr_size);
-      nvrm_shader_heap_write(screen, heap_addr + code_offset, bin->code, bin->code_size);
-   } else {
-      /* Small BAR: the copy-engine upload waits for the GPU. The range is
-       * ours alone once allocated, so the copy runs outside the mutex and
-       * another thread's allocation or a context flush (which takes the
-       * mutex to recycle freed ranges) never waits for this GPU copy. */
-      simple_mtx_unlock(&screen->shader_mutex);
-      if (hdr_size)
-         nvrm_shader_heap_write(screen, heap_addr + hdr_offset, bin->info.hdr, hdr_size);
-      nvrm_shader_heap_write(screen, heap_addr + code_offset, bin->code, bin->code_size);
-      simple_mtx_lock(&screen->shader_mutex);
-   }
+   /* The copy-engine upload waits for the GPU (nvrm_shader_heap_write).
+    * The range is ours alone once allocated, so the copy runs outside the
+    * mutex and another thread's allocation or a context flush (which takes
+    * the mutex to recycle freed ranges) never waits for this GPU copy. */
+   simple_mtx_unlock(&screen->shader_mutex);
+   if (hdr_size)
+      nvrm_shader_heap_write(screen, heap_addr + hdr_offset, bin->info.hdr, hdr_size);
+   nvrm_shader_heap_write(screen, heap_addr + code_offset, bin->code, bin->code_size);
+   simple_mtx_lock(&screen->shader_mutex);
    /* Every context's next draw invalidates the instruction cache once
     * (nvrm_emit_invalidates; nvc0 after each upload, nvc0_program.c:944).
     * Bumped after the code is in place and before the shader's fence
