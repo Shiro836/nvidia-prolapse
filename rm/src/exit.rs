@@ -16,12 +16,14 @@
 //! Bionic's `atexit` (crtbegin_so.c) and glibc's bind it to this library's `__dso_handle`, so
 //! `dlclose` runs it (with every client closed: a no-op) and removes it. A client inherited
 //! across `fork` belongs to the parent and is never freed by the child's handler. The handler
-//! frees only the RM objects: the control fds stay with their [`crate::rm::Client`]s, and a
-//! call on a handle the program still holds fails with RM's invalid-client status. CPU mappings
-//! are not unmapped here (their owners may still hold pointers); the process's address space
-//! goes with it.
+//! releases only RM state: the control fds stay with their [`crate::rm::Client`]s, and a call
+//! on a handle the program still holds fails with RM's invalid-client status. Each client's
+//! free first RM-unmaps (NVOS34) its live CPU mappings ([`crate::live_maps`]), as the NVIDIA
+//! driver does before its frees; the VMAs stay mapped (their owners may still hold pointers)
+//! and go with the process's address space.
 //!
-//! One mutex over the live list, never held across an ioctl; callable from any thread.
+//! One mutex over the live list, never held across an ioctl and never held while a client's
+//! mapping list is locked; callable from any thread.
 use crate::{
     diag::diag,
     process::ProcessBound,

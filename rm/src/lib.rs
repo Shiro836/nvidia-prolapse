@@ -67,6 +67,7 @@ mod external;
 mod fences;
 mod ffi;
 pub mod gpu;
+mod live_maps;
 pub mod nvdec;
 pub use nv_rm_sys::nvdec_drv;
 pub use nv_video::nvdec_hevc;

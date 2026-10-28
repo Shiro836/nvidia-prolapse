@@ -4,6 +4,7 @@
 //! setup cross-checked against tinygrad NVKIface at 37132d7553a831fdaf900e2334d80380702c5564.
 //! CPU mapping is here; gpu.rs owns GPU VA and actual channel submission.
 use crate::diag::diag;
+use crate::live_maps::{LiveMaps, MapId};
 use crate::{abi, compat::Compat, platform};
 use nv_rm_core::conv::{low_u32, u64_from_usize, usize_from_u32};
 use std::{
@@ -112,6 +113,9 @@ pub struct Client {
     pub(crate) cpu_page_size: usize,
     /// The client's entry in the list the exit handler frees ([`crate::exit`]).
     exit: crate::exit::Registration,
+    /// Its live RM CPU mappings, shared with the exit handler, which unmaps them before it
+    /// frees the client.
+    live_maps: Arc<LiveMaps>,
 }
 impl Client {
     /// Open `/dev/nvidiactl`, pass RM's strict version check and allocate the root client.
@@ -164,10 +168,15 @@ impl Client {
         }
         let root = RmHandle::new(alloc.object);
         let control = Arc::new(control);
+        let live_maps = Arc::new(LiveMaps::default());
         let exit_control = Arc::clone(&control);
+        let exit_maps = Arc::clone(&live_maps);
         let exit = crate::exit::Registration::new(
             root,
-            Box::new(move || free_object(&exit_control, compat, root, RmHandle::new(0), root)),
+            Box::new(move || {
+                unmap_at_exit(&exit_control, compat, &exit_maps);
+                free_object(&exit_control, compat, root, RmHandle::new(0), root)
+            }),
         );
         let exit = match exit {
             Ok(exit) => exit,
@@ -185,6 +194,7 @@ impl Client {
             compat,
             cpu_page_size,
             exit,
+            live_maps,
         }))
     }
     /// The NVIDIA GPUs RM enumerates (`NV_ESC_CARD_INFO`), valid entries only.
@@ -337,7 +347,10 @@ impl Client {
         )?;
         status("unmap GPU VA", parameters.status)
     }
+    /// RM free of `object` under `parent`, refused while a live CPU mapping depends on it
+    /// ([`LiveMaps::check_free`]).
     pub(crate) fn free(&self, parent: RmHandle, object: RmHandle) -> Result<()> {
+        self.live_maps.check_free(self.root, object)?;
         free_object(&self.control, self.compat, self.root, parent, object)
     }
     /// Where RM placed `object` for a CPU mapping with NVOS33 `map_flags`
@@ -545,6 +558,39 @@ impl Drop for Client {
             diag!("RM client cleanup: {error}");
         }
     }
+}
+/// The exit handler's half of [`LiveMaps`]: NVOS34 of every CPU mapping still live, before the
+/// client is freed. Unlike the NVIDIA driver's exit handler this leaves the VMAs mapped: their
+/// owners may still hold pointers into them, and they go with the process.
+fn unmap_at_exit(control: &File, compat: Compat, maps: &LiveMaps) {
+    match maps.close() {
+        Ok(live) => {
+            for map in live {
+                if let Err(error) = rm_unmap(control, compat, map.unmap) {
+                    diag!(
+                        "RM exit teardown: unmap CPU mapping of {:#x}: {error}",
+                        map.unmap.memory
+                    );
+                }
+            }
+        }
+        // The client is freed anyway: its live mappings are unknown, and leaving the free to
+        // the control file's last close would hit the same mappings later, possibly in another
+        // process's context (exit.rs).
+        Err(error) => diag!("RM exit teardown: CPU mappings unknown, freeing the client: {error}"),
+    }
+}
+/// NV_ESC_RM_UNMAP_MEMORY (NVOS34, nvos.h) of one RM CPU mapping.
+fn rm_unmap(control: &File, compat: Compat, mut request: abi::UnmapMemory) -> Result<()> {
+    exchange_wire(
+        control.as_raw_fd(),
+        0x4f,
+        compat,
+        "NVOS34_PARAMETERS",
+        &mut request,
+        "RM unmap memory",
+    )?;
+    status("RM unmap memory", request.status)
 }
 /// NV_ESC_RM_FREE of `object` under `parent` in client `root` (NVOS00, nvos.h).
 fn free_object(
@@ -1534,30 +1580,33 @@ impl Memory {
             fd: fd.as_raw_fd(),
             padding: 0,
         };
-        exchange_wire(
-            device.client.control.as_raw_fd(),
-            0x4e,
-            device.client.compat,
-            "nv_ioctl_nvos33_parameters_with_fd",
-            &mut request,
-            "RM map memory",
-        )?;
-        status("RM map memory", request.parameters.status)?;
-        // RM returns an aperture/mapping cookie, NOT mmap's CPU virtual address.
-        // Preserve all 64 bits (also on ILP32), and the returned mapping flags.
-        // escape.c uses precisely these fields for its own mmap-context rollback.
+        let live = device.client.live_maps.map(self.parent, || {
+            exchange_wire(
+                device.client.control.as_raw_fd(),
+                0x4e,
+                device.client.compat,
+                "nv_ioctl_nvos33_parameters_with_fd",
+                &mut request,
+                "RM map memory",
+            )?;
+            status("RM map memory", request.parameters.status)?;
+            // RM returns an aperture/mapping cookie, NOT mmap's CPU virtual address.
+            // Preserve all 64 bits (also on ILP32), and the returned mapping flags.
+            // escape.c uses precisely these fields for its own mmap-context rollback.
+            Ok(abi::UnmapMemory {
+                client: request.parameters.client,
+                device: request.parameters.device,
+                memory: request.parameters.memory,
+                linear_address: request.parameters.linear_address,
+                flags: request.parameters.flags,
+                ..Default::default()
+            })
+        })?;
         let mut lease = CpuMappingLease {
             resources: Some(CpuMappingResources {
                 memory: Rc::clone(self),
                 bar: reservation,
-                unmap: abi::UnmapMemory {
-                    client: request.parameters.client,
-                    device: request.parameters.device,
-                    memory: request.parameters.memory,
-                    linear_address: request.parameters.linear_address,
-                    flags: request.parameters.flags,
-                    ..Default::default()
-                },
+                live,
             }),
             state: CpuMappingState {
                 rm: true,
@@ -1615,18 +1664,14 @@ impl Memory {
             let start = unsafe { base.add(within_page) };
             if space == AddressSpace::Video {
                 let address = u64_from_usize(start.as_ptr().addr());
-                device.client.update_device_mapping(
-                    request.parameters.device,
-                    request.parameters.memory,
-                    request.parameters.linear_address,
-                    address,
-                )?;
-                lease
-                    .resources
-                    .as_mut()
-                    .expect("a new lease holds its resources until it is released")
-                    .unmap
-                    .linear_address = address;
+                device.client.live_maps.rekey(live, address, |unmap| {
+                    device.client.update_device_mapping(
+                        unmap.device,
+                        unmap.memory,
+                        unmap.linear_address,
+                        address,
+                    )
+                })?;
             }
             Ok((start.cast::<u32>(), retain_idle))
         })();
@@ -1767,7 +1812,7 @@ struct CpuMappingState {
 }
 impl CpuMappingState {
     /// RM unmap (NVOS34) first, then munmap of the VMA: the order the NVIDIA driver releases
-    /// a host-visible mapping in before the memory's RM free.
+    /// a host-visible mapping in before the memory's RM free ([`crate::live_maps`]).
     fn cleanup(&mut self, mut release: impl FnMut(CpuCleanupStage) -> Result<()>) -> Result<()> {
         if self.rm {
             release(CpuCleanupStage::Rm)?;
@@ -1805,7 +1850,8 @@ impl CpuMappingState {
 struct CpuMappingResources {
     memory: Rc<Memory>,
     bar: BarReservation,
-    unmap: abi::UnmapMemory,
+    /// The mapping's entry in its client's [`LiveMaps`].
+    live: MapId,
 }
 struct CpuMappingLease {
     resources: Option<CpuMappingResources>,
@@ -1836,16 +1882,9 @@ impl CpuMappingLease {
                 }
                 CpuCleanupStage::Rm => {
                     let client = &resources.memory.device.client;
-                    let mut request = resources.unmap;
-                    exchange_wire(
-                        client.control.as_raw_fd(),
-                        0x4f,
-                        client.compat,
-                        "NVOS34_PARAMETERS",
-                        &mut request,
-                        "RM unmap memory",
-                    )?;
-                    status("RM unmap memory", request.status)
+                    client.live_maps.unmap(resources.live, |unmap| {
+                        rm_unmap(&client.control, client.compat, *unmap)
+                    })
                 }
             })?;
         self.vma = None;
@@ -2498,6 +2537,64 @@ mod budget_tests {
             assert_eq!(kernel_used.get(), 0);
             assert_eq!(budget.used.get(), 0);
         }
+    }
+    /// A live CPU mapping of video and of system memory refuses the RM free of the memory, its
+    /// device and the client; once the mapping is released the free check passes.
+    #[test]
+    #[ignore = "needs an accessible NVIDIA GPU"]
+    fn live_cpu_mapping_refuses_free_until_unmapped_on_selected_nvidia() {
+        let client = Client::open().unwrap();
+        let card = client.select_card(None).unwrap();
+        let device = client.device(card).unwrap();
+        let vram = device.allocate_vram(1 << 20).unwrap();
+        let ring = device.allocate_gpfifo_ring(8192).unwrap();
+        for memory in [vram, ring] {
+            let mut map = memory.map().unwrap();
+            map.write_u32(0, 0x5a5a_5a5a).unwrap();
+            for object in [memory.handle, device.handle, client.root] {
+                let error = client.free(memory.parent, object).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        Error::Memory(MemoryError::FreeWhileCpuMapped { mapped, .. })
+                            if mapped == memory.handle
+                    ),
+                    "{error}"
+                );
+            }
+            assert_eq!(map.read_u32(0).unwrap(), 0x5a5a_5a5a, "nothing was freed");
+            map.try_unmap().unwrap();
+            for object in [memory.handle, device.handle, client.root] {
+                client.live_maps.check_free(client.root, object).unwrap();
+            }
+        }
+    }
+    /// The exit path RM-unmaps a live video-memory mapping under the CPU address it was
+    /// re-keyed to (RM then no longer knows that key), the owner's release skips its NVOS34
+    /// and only munmaps, and the client makes no new mapping.
+    #[test]
+    #[ignore = "needs an accessible NVIDIA GPU"]
+    fn exit_unmap_releases_live_mappings_on_selected_nvidia() {
+        let client = Client::open().unwrap();
+        let device = client.device(client.select_card(None).unwrap()).unwrap();
+        let memory = device.allocate_vram(1 << 20).unwrap();
+        let mut map = memory.map().unwrap();
+        map.write_u32(0, 7).unwrap();
+        let taken = client.live_maps.close().unwrap();
+        let [live] = taken.as_slice() else {
+            panic!("one live mapping, got {taken:?}");
+        };
+        assert_eq!(
+            live.unmap.linear_address,
+            u64_from_usize(map.pointer.as_ptr().addr())
+        );
+        rm_unmap(&client.control, client.compat, live.unmap).unwrap();
+        assert!(
+            rm_unmap(&client.control, client.compat, live.unmap).is_err(),
+            "RM released the mapping"
+        );
+        map.try_unmap().unwrap();
+        assert!(memory.map().is_err(), "no mapping after exit teardown");
     }
     #[test]
     #[ignore = "needs an accessible NVIDIA GPU"]

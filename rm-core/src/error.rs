@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Error type of the RM backend: the failure of an ioctl, an RM status, a broken contract,
 //! a lost device or a bounded wait that ran out, with the operation that failed.
-use crate::units::{ByteSize, ClassId, FenceValue, GpuVa};
+use crate::units::{ByteSize, ClassId, FenceValue, GpuVa, RmHandle};
 use std::{io, time::Duration};
 
 /// Why an RM backend operation failed.
@@ -504,6 +504,25 @@ pub enum MemoryError {
         /// The length RM returned.
         length: u64,
     },
+    /// An RM free of an object a live CPU mapping depends on: the mapped object, its parent, its
+    /// device or the client. RM's BAR1 mapping-reuse cache keeps stale entries for video memory
+    /// destroyed while still mapped (open-gpu-kernel-modules
+    /// `src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c` `_kbusDestroyMemdescBar1Cb`),
+    /// so the mapping is released (NVOS34, then `munmap`) first.
+    #[error(
+        "RM free of {object:#x} refused: object {mapped:#x} (parent {parent:#x}, device {device:#x}) \
+         still has a live CPU mapping; unmap it before the free"
+    )]
+    FreeWhileCpuMapped {
+        /// The object whose free was refused.
+        object: RmHandle,
+        /// The mapped object.
+        mapped: RmHandle,
+        /// Its parent.
+        parent: RmHandle,
+        /// The device the mapping was made on.
+        device: RmHandle,
+    },
     /// A CPU mapping, or a reference to one, is used after it was released.
     #[error("{reason}")]
     NotLive {
@@ -586,6 +605,7 @@ impl MemoryError {
             | Self::BarAccounting { .. }
             | Self::CpuMapping { .. }
             | Self::UserdLength { .. }
+            | Self::FreeWhileCpuMapped { .. }
             | Self::NotLive { .. }
             | Self::OutOfBounds { .. }
             | Self::PatternMismatch { .. }
