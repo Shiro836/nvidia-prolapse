@@ -4,7 +4,7 @@
 //! the GR engine at the same time; the same pair in two TSGs is time-sliced.
 //! Run alone (host NAK bridge built by native/compiler):
 //!   NV_NATIVE_COMPILER_PATH=.../libnv_native_nak.so cargo test --offline
-//!   --lib mesa::multiqueue_tests -- --ignored --test-threads=1 --nocapture
+//!   --lib device::multiqueue_tests -- --ignored --test-threads=1 --nocapture
 use super::hardware_tests::test_ffi as c;
 use super::*;
 use crate::{compute::ComputeJob, gpu::GpuMapping, rm::Mapping};

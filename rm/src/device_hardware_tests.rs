@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Local-GPU fixtures for the caller-side bridge (ignored by default).
 //! Run alone: cargo test --offline --no-default-features --lib
-//!   mesa::hardware_tests -- --ignored --test-threads=1 --nocapture
+//!   device::hardware_tests -- --ignored --test-threads=1 --nocapture
 use super::*;
 use std::{
     os::fd::{AsFd, FromRawFd, OwnedFd},
@@ -12,7 +12,7 @@ use std::{
 use test_ffi::{self as c, Point, SyncHandle};
 
 /// Safe calls into the C ABI, shared by the sibling fixture modules.
-#[path = "mesa_test_ffi.rs"]
+#[path = "device_test_ffi.rs"]
 pub(super) mod test_ffi;
 
 fn selected_pci() -> [u32; 4] {

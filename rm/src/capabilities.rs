@@ -133,7 +133,7 @@ pub fn select(classes: &[u32], rm_sm: u32) -> Result<Capabilities> {
         0x700 => (70, 0xc397, 0xc3c0),
         0x702 => (72, 0xc397, 0xc3c0),
         // TU116/TU117 report RM ISA7_03, but use Mesa's Turing SM75 compiler
-        // contract. Keep the real chipset in mesa::Info: NVK separately masks
+        // contract. Keep the real chipset in device::Info: NVK separately masks
         // TU11x features (nvk_physical_device.c::nvk_get_device_features).
         0x703 | 0x705 => (75, 0xc597, 0xc5c0),
         0x802 => (80, 0xc697, 0xc6c0),

@@ -34,7 +34,7 @@
 //! teardown skips the state it can no longer trust.
 use crate::diag::diag;
 use crate::{
-    mesa::Core,
+    device::Core,
     reactor::{Readiness, WakeFd},
     rm::{Error, Result, SyncError},
     slots::Slot,
@@ -579,7 +579,7 @@ fn service(core: &Arc<Core>, readiness: &Readiness, host: Option<RawFd>) {
     }
     drop(state);
     // A failed broadcast delays other processes' waiters by at most one
-    // scan period (mesa.rs `Bridge::broadcast`).
+    // scan period (device.rs `Bridge::broadcast`).
     if broadcast && let Err(error) = core.trigger.trigger() {
         diag!("RM shared broadcast: {error}");
     }

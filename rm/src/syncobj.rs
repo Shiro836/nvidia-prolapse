@@ -912,9 +912,9 @@ mod tests {
         };
         pool.retain(slot);
         let reset = sync.reset(None).unwrap_err();
-        assert!(crate::mesa::needs_slot(&reset), "{reset}");
+        assert!(crate::device::needs_slot(&reset), "{reset}");
         let signal = sync.signal(0, None).unwrap_err();
-        assert!(crate::mesa::needs_slot(&signal), "{signal}");
+        assert!(crate::device::needs_slot(&signal), "{signal}");
         pool.release(slot);
     }
     #[test]

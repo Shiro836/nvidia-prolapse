@@ -7,7 +7,7 @@ through RM ioctls (open-gpu-kernel-modules), with no NVIDIA userspace library. I
 What it provides:
 
 - the C ABI in `../mesa/nv_rm.h` that NVK's kernel-driver adapter (`../mesa/nvkmd_rm.c`) calls: memory, GPU
-  virtual addresses, channels, submission, synchronisation, dma-buf sharing (`src/mesa.rs`, `src/gpu.rs`,
+  virtual addresses, channels, submission, synchronisation, dma-buf sharing (`src/device.rs`, `src/gpu.rs`,
   `src/rm.rs`, `src/external.rs`, `src/syncobj.rs`);
 - the NVDEC video core and its C ABI `video/nv_video.h` for the Codec2 component in `../media` (`src/video/`);
 - release-specific RM ABI adapters for the supported kernel module versions (`src/compat.rs`,

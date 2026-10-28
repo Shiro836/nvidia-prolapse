@@ -68,7 +68,7 @@ reference). The type check used by ctx `wait`/`signal` is `sync->type->init == r
 
 - `rm_result` (73): 0 → `VK_SUCCESS`, else the negative status *is* the `VkResult`, logged with
   `vk_errorf` ("Native Rust RM %s failed"). The mapping from RM errors to statuses lives in
-  `rm/src/mesa.rs` `vk_status` (being reworked per Vulkan's per-command error lists).
+  `rm/src/device/capi.rs` `vk_status` and `Entry` (per Vulkan's per-command error lists).
 - `unsupported` (80): `VK_ERROR_FEATURE_NOT_PRESENT`, named.
 - `rm_mem_lost` (92): void cleanup paths: stderr, then `vk_device_set_lost` when a logical
   device exists, else `nv_rm_mark_lost`; returns `DEVICE_LOST`.
@@ -77,14 +77,14 @@ reference). The type check used by ctx `wait`/`signal` is `sync->type->init == r
   `nv_rm_check_status`. `rm_notify_lost` (353) mirrors Mesa-side loss (`vk_device.c` and
   `vk_queue.c` both call `vk_device_notify_lost`) into `nv_rm_mark_lost`.
 - Since 833571a the RM side publishes loss itself whenever an entry returns
-  `VK_ERROR_DEVICE_LOST` (the `guarded` wrapper in `mesa.rs`), so Mesa sees it on its next
+  `VK_ERROR_DEVICE_LOST` (the `guarded` wrapper in `rm/src/device/capi.rs`), so Mesa sees it on its next
   status or wait query.
 
 ### 1.4 What else uses `nv_rm.h`
 
 `nvkmd_rm.c` uses 30 of the 39 entries. The other nine (`sync_destroy`, `sync_status_many`,
 `submit_sync`, `context_signal`, `submit_waits`, `submit`, `poll`, `context_fence`, `exec`) are
-used by the gallium-nvrm GL driver (18 entries in all) and by tests (`rm/src/mesa_test_ffi.rs`,
+used by the gallium-nvrm GL driver (18 entries in all) and by tests (`rm/src/device_test_ffi.rs`,
 `mesa/bridge-check.c`). The same library exports `nv_video_*` for Codec2. Every entry stays
 exported: the port changes who calls the ABI, not the ABI.
 
@@ -175,11 +175,13 @@ check) keeps the C result; app-sized arrays use `Vec::try_reserve`.
 
 ### 2.4 The RM side of the ABI
 
-`rm/src/mesa.rs` is today both the device logic (`Bridge`, `Core`, `Inner`, submit, sync,
-reclaim) and the `nv_rm_*` entries. It splits into `rm::device` (the logic, a Rust API inside the
-crate: typed handles, `GpuVa`/`ByteSize`, `Result<T, rm::Error>`, sync payloads as references
-instead of `Arc::into_raw` integers, which removes most of the `unsafe` in `sync_ref`/`submit`)
-and `rm/src/capi.rs` (the exported entries over it, implementing the `nv-rm-abi` declarations).
+The RM crate keeps the device logic in `rm::device` (`rm/src/device.rs`: `Bridge`, `Core`,
+`Inner`, submit, sync, reclaim) and the exported entries in its child module `rm::device::capi`
+(`rm/src/device/capi.rs`, implementing the `nv-rm-abi` declarations); as a child, `capi` reads
+the device's private items without widening them. Next, the entry bodies move behind a Rust API
+of the device (typed handles, `GpuVa`/`ByteSize`, `Result<T, rm::Error>`, sync payloads as
+references instead of `Arc::into_raw` integers, which removes most of the `unsafe` in
+`sync_ref`/`submit`), leaving `capi` with pointer validation, the guard and the status mapping.
 The exported symbol list, struct layouts and statuses stay as they are: loss publication stays
 in the entry guard (833571a), the `Error → VkResult` mapping per entry stays in `capi.rs`, and
 the VA release stays the `VaRelease` callback (called once per range, after the RM unmapped it).
@@ -287,9 +289,9 @@ suites on the C backend, and the checks named. Estimates are focused working hou
 
 | # | step | checks | est. |
 |---|---|---|---|
-| 0 | rebase onto the in-flight status-mapping and teardown-after-loss changes in `rm/src/mesa.rs`/`gpu.rs` | — | — |
+| 0 | rebase onto the in-flight status-mapping and teardown-after-loss changes in `rm/src/device.rs`/`gpu.rs` | — | — |
 | 1 | `nv-rm-abi` + generated `nv_rm.h` (cbindgen, typed handles, stale check), replacing the hand-written header; `rm` entries pinned to the declarations (done) | generated header compiles in `nvkmd_rm.c`, gallium-nvrm, `bridge-check.c`, `abi-check.c` on both Android targets; `nm -D` of `libnv_bionic_native.so` identical; capture 0/42 | 3 h |
-| 1b | `rm`: split `mesa.rs` into `rm::device` and `rm/src/capi.rs` (§2.4). Pure refactor | rm tests + Miri on touched unsafe modules, pdev-preflight, capture 0/42, `nm -D` identical | 5 h |
+| 1b | `rm`: split `mesa.rs` into `rm::device` and `rm::device::capi` (§2.4; done as a pure move), then the entry bodies behind a device API. Pure refactor | rm tests + Miri on touched unsafe modules, pdev-preflight, capture 0/42, `nm -D` identical | 5 h |
 | 2 | `nvkmd-sys`: generator script, committed bindings for 3 targets, stale check in `build.py` | layout asserts on 3 targets, regen is a no-op | 3 h |
 | 3 | build plumbing: meson option, `build.py --nvkmd`, link spike with an archive holding only the guard (three Rust staticlibs in one `.so`, `--exclude-libs`) | both Android targets link, `nm -D` unchanged | 2 h |
 | 4 | `nvkmd-rm-logic` | unit tables, full Miri | 4 h |

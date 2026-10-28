@@ -97,7 +97,7 @@ impl VideoDevice {
             .find(|c| classes.contains(c))
             .unwrap_or(0);
         let mut raw = [0u32; 17];
-        // NV2080_CTRL_CMD_GPU_GET_NAME_STRING (ASCII flavour), as mesa.rs query_info.
+        // NV2080_CTRL_CMD_GPU_GET_NAME_STRING (ASCII flavour), as device.rs query_info.
         device
             .client
             .control(device.subdevice, 0x20800110, &mut raw)?;

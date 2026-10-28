@@ -135,7 +135,7 @@ through BAR1. Candidate F2 rang the doorbell through the BAR0 usermode page
 with no flush and lost kicks: with idle gaps between submits the host acted on
 the doorbell before the GP_PUT write was visible, a batch stayed unexecuted for
 > 2.1 s and retired 22 us after the next doorbell
-(`mesa::reclaim_tests::every_submitted_batch_runs_without_a_later_doorbell`,
+(`device::reclaim_tests::every_submitted_batch_runs_without_a_later_doorbell`,
 `build/fence-tracing/deferred-reclaim/kick-test-*`). An idle queue's last batch
 is then stranded forever — the SystemUI/Launcher hangs, where the drained batch
 had no foreign dependency. Fix: on Hopper+ the usermode page is allocated with
@@ -187,7 +187,7 @@ publishes loss on error, and is cancelled and joined at teardown.
 
 ## Resource reclamation: frees never wait for the GPU
 
-`rm-core/src/reclaim.rs`, `mesa.rs` `reclaim_*`. GPU work can legitimately be gated on
+`rm-core/src/reclaim.rs`, `rm/src/device.rs` `reclaim_*`. GPU work can legitimately be gated on
 a foreign sync_file whose producer is the thread that is freeing memory
 (Android: the release fence of a buffer needs the app's next frame). The former
 `nv_rm_free`/`nv_rm_unbind` drained every queue's last token first and so
@@ -273,7 +273,7 @@ NVK's own dependency closure) and to stderr on GNU builds.
 
 ## Threads, ownership and teardown
 
-All Rc/RefCell RM owners live in one `Inner` behind a mutex (`mesa.rs`
+All Rc/RefCell RM owners live in one `Inner` behind a mutex (`rm/src/device.rs`
 `Confined` documents the Send argument: nothing Rc escapes; the mutex orders
 every owner). Lock order: Inner -> payload state -> {shared local, slot free
 list, watcher state, waiter condvar}, and Inner -> the C VA-heap lock (deferred
@@ -291,10 +291,10 @@ userspace wall-clock bound.
 CPU (GNU32/GNU64): slot lifetime and concurrency, split-view wrap/rejection,
 reset/detach/move/import/foreign replacement, shared publication and failure,
 Dekker stress with forced parking, device-event leader/follower wake, loss
-wake, panic guard. Hardware (ignored, `mesa::hardware_tests`): slot recycling
+wake, panic guard. Hardware (ignored, `device::hardware_tests`): slot recycling
 over 3000 frames, ring-full transactionality, exporter close publication,
 bounded owned-gate teardown, two-waiter wake latency (GPU fence and host
-timeline, both waiters and follower lag < 1 ms p99). `mesa::reclaim_tests`:
+timeline, both waiters and follower lag < 1 ms p99). `device::reclaim_tests`:
 free/unbind while foreign-gated returns < 50 ms and reclaims after retirement;
 GPU writes/reads freed memory after the free call; concurrent
 alloc/bind/free + host/foreign-gated submits + waiters (NV_RM_STRESS_SECONDS);

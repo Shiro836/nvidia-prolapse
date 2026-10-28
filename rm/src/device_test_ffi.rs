@@ -33,12 +33,12 @@ use std::ptr;
 /// handle stays valid memory even after the bridge that made it is closed.
 #[must_use = "a sync object is destroyed only by sync_destroy"]
 #[derive(Debug)]
-pub(in crate::mesa) struct SyncHandle {
+pub(in crate::device) struct SyncHandle {
     id: NvRmSyncId,
 }
 impl SyncHandle {
     /// The payload behind the id, for fixtures that inspect bridge state.
-    pub(in crate::mesa) fn obj(&self) -> Result<&SyncObj> {
+    pub(in crate::device) fn obj(&self) -> Result<&SyncObj> {
         // SAFETY: the id came from nv_rm_sync_create and is destroyed only by
         // sync_destroy, which consumes this handle; the returned borrow of
         // `self` ends before that can happen, so the payload is not destroyed
@@ -49,9 +49,9 @@ impl SyncHandle {
 /// A (sync, value) pair of a wait or signal list; borrows the handle, so the
 /// id stays live for as long as the list exists.
 #[derive(Clone, Copy)]
-pub(in crate::mesa) struct Point<'a> {
-    pub(in crate::mesa) sync: &'a SyncHandle,
-    pub(in crate::mesa) value: u64,
+pub(in crate::device) struct Point<'a> {
+    pub(in crate::device) sync: &'a SyncHandle,
+    pub(in crate::device) value: u64,
 }
 /// Longest wait or signal list a fixture passes; lists are lowered into a
 /// stack array of the C `SyncPoint` (no allocation per call).
@@ -81,7 +81,7 @@ impl Lowered {
 }
 
 /// The bridge pointer the C ABI takes. Every `nv_rm_*` entry used here only
-/// forms `&Bridge` from it (mesa.rs `bridge()`), so a pointer derived from a
+/// forms `&Bridge` from it (device.rs `bridge()`), so a pointer derived from a
 /// shared borrow is enough and no `&mut Bridge` is ever created while other
 /// threads use the same bridge.
 fn raw(b: &Bridge) -> *mut Bridge {
@@ -101,7 +101,7 @@ fn fd_or_none(fd: Option<BorrowedFd<'_>>) -> RawFd {
     fd.map_or(-1, |fd| fd.as_raw_fd())
 }
 
-pub(in crate::mesa) fn context_create(b: &Bridge, engines: u32, out: &mut u64) -> i32 {
+pub(in crate::device) fn context_create(b: &Bridge, engines: u32, out: &mut u64) -> i32 {
     let mut id = NvRmContextId::new(*out);
     // SAFETY: `raw(b)` points to a live bridge for the call; `id` is an
     // exclusive local the call writes once.
@@ -109,7 +109,7 @@ pub(in crate::mesa) fn context_create(b: &Bridge, engines: u32, out: &mut u64) -
     *out = id.get();
     status
 }
-pub(in crate::mesa) fn context_create_shared(
+pub(in crate::device) fn context_create_shared(
     b: &Bridge,
     engines: u32,
     share: u64,
@@ -124,18 +124,18 @@ pub(in crate::mesa) fn context_create_shared(
     *out = id.get();
     status
 }
-pub(in crate::mesa) fn context_destroy(b: &Bridge, ctx: u64) -> i32 {
+pub(in crate::device) fn context_destroy(b: &Bridge, ctx: u64) -> i32 {
     // SAFETY: live bridge; context ids are map keys.
     unsafe { nv_rm_context_destroy(raw(b), NvRmContextId::new(ctx)) }
 }
 /// A device made by `nv_rm_open` (the path Mesa takes), given back only by
 /// [`OpenedBridge::close`]. Not Send: one thread opens, uses and closes it.
-pub(in crate::mesa) struct OpenedBridge {
+pub(in crate::device) struct OpenedBridge {
     raw: ptr::NonNull<Bridge>,
 }
 impl OpenedBridge {
     /// The C status and, on success, the device.
-    pub(in crate::mesa) fn open(pci: [u32; 4]) -> (i32, Option<Self>) {
+    pub(in crate::device) fn open(pci: [u32; 4]) -> (i32, Option<Self>) {
         let mut raw = ptr::null_mut();
         let mut info = std::mem::MaybeUninit::<Info>::uninit();
         // SAFETY: both outputs are exclusive and writable for the call; the
@@ -156,7 +156,7 @@ impl OpenedBridge {
             .map(|raw| Self { raw });
         (status, opened)
     }
-    pub(in crate::mesa) fn bridge(&self) -> &Bridge {
+    pub(in crate::device) fn bridge(&self) -> &Bridge {
         // SAFETY: `raw` is the Box nv_rm_open made; only `close` (which
         // consumes self) gives it back, so it is live for the borrow, and the
         // entry points only ever form shared references to it.
@@ -168,24 +168,24 @@ impl OpenedBridge {
     /// Call only in a forked child that never returns into the code holding
     /// `self` (it ends in `_exit`): the child's copy of the address space then
     /// has exactly one owner, the returned value.
-    pub(in crate::mesa) unsafe fn alias_in_forked_child(&self) -> Self {
+    pub(in crate::device) unsafe fn alias_in_forked_child(&self) -> Self {
         Self { raw: self.raw }
     }
-    pub(in crate::mesa) fn close(self) {
+    pub(in crate::device) fn close(self) {
         // SAFETY: `raw` came from nv_rm_open and is given back exactly once
         // (self is consumed); no borrow from `bridge()` outlives self.
         unsafe { nv_rm_close(self.raw.as_ptr()) };
     }
 }
-pub(in crate::mesa) fn is_lost(b: &Bridge) -> i32 {
+pub(in crate::device) fn is_lost(b: &Bridge) -> i32 {
     // SAFETY: live bridge; no other argument.
     unsafe { nv_rm_is_lost(ptr::from_ref(b)) }
 }
-pub(in crate::mesa) fn check_status(b: &Bridge) -> i32 {
+pub(in crate::device) fn check_status(b: &Bridge) -> i32 {
     // SAFETY: live bridge; no other argument.
     unsafe { nv_rm_check_status(raw(b)) }
 }
-pub(in crate::mesa) fn wait(b: &Bridge, ctx: u64, token: u64, timeout_ns: u64) -> i32 {
+pub(in crate::device) fn wait(b: &Bridge, ctx: u64, token: u64, timeout_ns: u64) -> i32 {
     // SAFETY: live bridge; ids and token are plain values.
     unsafe {
         nv_rm_wait(
@@ -196,7 +196,7 @@ pub(in crate::mesa) fn wait(b: &Bridge, ctx: u64, token: u64, timeout_ns: u64) -
         )
     }
 }
-pub(in crate::mesa) fn context_fence(
+pub(in crate::device) fn context_fence(
     b: &Bridge,
     ctx: u64,
     token: u64,
@@ -215,7 +215,7 @@ pub(in crate::mesa) fn context_fence(
         )
     }
 }
-pub(in crate::mesa) fn poll(b: &Bridge, ctx: u64, token: u64, complete: &mut u32) -> i32 {
+pub(in crate::device) fn poll(b: &Bridge, ctx: u64, token: u64, complete: &mut u32) -> i32 {
     // SAFETY: live bridge; `complete` is an exclusive u32 the call writes.
     unsafe {
         nv_rm_poll(
@@ -227,7 +227,7 @@ pub(in crate::mesa) fn poll(b: &Bridge, ctx: u64, token: u64, complete: &mut u32
     }
 }
 
-pub(in crate::mesa) fn alloc(
+pub(in crate::device) fn alloc(
     b: &Bridge,
     size: u64,
     alignment: u64,
@@ -239,7 +239,7 @@ pub(in crate::mesa) fn alloc(
     // SAFETY: live bridge; `out` is an exclusive Allocation the call writes.
     unsafe { nv_rm_alloc(raw(b), size, alignment, placement, kind, tile, out) }
 }
-pub(in crate::mesa) fn bind(
+pub(in crate::device) fn bind(
     b: &Bridge,
     memory: u64,
     offset: u64,
@@ -265,18 +265,18 @@ pub(in crate::mesa) fn bind(
     *out = id.get();
     status
 }
-pub(in crate::mesa) fn unbind(b: &Bridge, mapping: u64) -> i32 {
+pub(in crate::device) fn unbind(b: &Bridge, mapping: u64) -> i32 {
     // SAFETY: live bridge; mapping ids are map keys.
     unsafe { nv_rm_unbind(raw(b), NvRmMappingId::new(mapping)) }
 }
-pub(in crate::mesa) fn free(b: &Bridge, memory: u64) -> i32 {
+pub(in crate::device) fn free(b: &Bridge, memory: u64) -> i32 {
     // SAFETY: live bridge; memory ids are map keys. The call refuses memory
     // that is still CPU-mapped, so no live CpuMap is invalidated by it.
     unsafe { nv_rm_free(raw(b), NvRmMemoryId::new(memory)) }
 }
 
 /// Receiver of deferred VA releases (Mesa's util_vma_heap_free stands here).
-pub(in crate::mesa) trait ReleaseSink: Sync + 'static {
+pub(in crate::device) trait ReleaseSink: Sync + 'static {
     fn release(&self, address: u64, size: u64);
 }
 /// # Safety
@@ -288,7 +288,7 @@ unsafe extern "C" fn release_to<T: ReleaseSink>(data: *mut c_void, address: u64,
     let sink = unsafe { &*data.cast_const().cast::<T>() };
     sink.release(address, size);
 }
-pub(in crate::mesa) fn va_free<T: ReleaseSink>(
+pub(in crate::device) fn va_free<T: ReleaseSink>(
     b: &Bridge,
     mappings: &[u64],
     address: u64,
@@ -318,7 +318,7 @@ pub(in crate::mesa) fn va_free<T: ReleaseSink>(
 /// referenced mapping, cpu_map_cache.rs `evict`), `nv_rm_free` refuses the
 /// memory while it is referenced, and the borrow keeps the bridge open.
 /// GPU-visible memory: every access is volatile, nothing hands out a reference.
-pub(in crate::mesa) struct CpuMap<'b> {
+pub(in crate::device) struct CpuMap<'b> {
     bridge: &'b Bridge,
     memory: u64,
     base: *mut u8,
@@ -326,7 +326,7 @@ pub(in crate::mesa) struct CpuMap<'b> {
 }
 impl<'b> CpuMap<'b> {
     /// Maps `memory`; panics if `nv_rm_map` fails.
-    pub(in crate::mesa) fn new(b: &'b Bridge, memory: u64) -> Self {
+    pub(in crate::device) fn new(b: &'b Bridge, memory: u64) -> Self {
         let mut address = 0usize;
         // SAFETY: live bridge; `address` is an exclusive usize the call writes.
         let status = unsafe { nv_rm_map(raw(b), NvRmMemoryId::new(memory), &raw mut address) };
@@ -365,25 +365,25 @@ impl<'b> CpuMap<'b> {
             .unwrap_or_else(|| panic!("index {index} outside the {}-byte mapping", self.len));
         self.base.wrapping_add(offset).cast()
     }
-    pub(in crate::mesa) fn write_u32(&self, index: usize, value: u32) {
+    pub(in crate::device) fn write_u32(&self, index: usize, value: u32) {
         let p = self.element::<u32>(index);
         // SAFETY: `p` is in bounds (element checks offset + 4 <= len) and 4-aligned (8-aligned base,
         // index * 4); the mapping is live while `self` is (type doc). The GPU
         // may access it, hence volatile and no reference.
         unsafe { p.write_volatile(value) };
     }
-    pub(in crate::mesa) fn write_u64(&self, index: usize, value: u64) {
+    pub(in crate::device) fn write_u64(&self, index: usize, value: u64) {
         let p = self.element::<u64>(index);
         // SAFETY: as write_u32, 8-aligned.
         unsafe { p.write_volatile(value) };
     }
     /// Mapped length in bytes (the allocation size).
-    pub(in crate::mesa) fn len(&self) -> usize {
+    pub(in crate::device) fn len(&self) -> usize {
         self.len
     }
     /// Writes `first`, `first + 1`, ... to every u64 of the mapping in order
     /// (one bounds check for the run; BAR1 write-traffic generator).
-    pub(in crate::mesa) fn fill_u64_counting(&self, first: u64) -> u64 {
+    pub(in crate::device) fn fill_u64_counting(&self, first: u64) -> u64 {
         let count = self.len / size_of::<u64>();
         #[expect(
             clippy::cast_ptr_alignment,
@@ -401,13 +401,13 @@ impl<'b> CpuMap<'b> {
         }
         value
     }
-    pub(in crate::mesa) fn read_u64(&self, index: usize) -> u64 {
+    pub(in crate::device) fn read_u64(&self, index: usize) -> u64 {
         let p = self.element::<u64>(index);
         // SAFETY: as write_u64; the GPU may have written it, hence volatile.
         unsafe { p.read_volatile() }
     }
     /// Drops the map reference; the C status of `nv_rm_unmap`.
-    pub(in crate::mesa) fn unmap(self) -> i32 {
+    pub(in crate::device) fn unmap(self) -> i32 {
         // SAFETY: live bridge; this value is consumed, so no access through
         // `base` follows the unmap.
         unsafe { nv_rm_unmap(raw(self.bridge), NvRmMemoryId::new(self.memory)) }
@@ -415,7 +415,7 @@ impl<'b> CpuMap<'b> {
 }
 
 /// `Ok(handle)` on status 0, else `Err(status)`.
-pub(in crate::mesa) fn sync_create(
+pub(in crate::device) fn sync_create(
     b: &Bridge,
     flags: u32,
     initial: u64,
@@ -429,20 +429,20 @@ pub(in crate::mesa) fn sync_create(
         Err(status)
     }
 }
-pub(in crate::mesa) fn sync_destroy(b: &Bridge, sync: SyncHandle) -> i32 {
+pub(in crate::device) fn sync_destroy(b: &Bridge, sync: SyncHandle) -> i32 {
     // SAFETY: the handle owns a live id (SyncHandle doc); it is consumed
     // here, so nothing can pass the id again.
     unsafe { nv_rm_sync_destroy(raw(b), sync.id) }
 }
-pub(in crate::mesa) fn sync_reset(b: &Bridge, sync: &SyncHandle) -> i32 {
+pub(in crate::device) fn sync_reset(b: &Bridge, sync: &SyncHandle) -> i32 {
     // SAFETY: live bridge; the borrowed handle keeps the id live.
     unsafe { nv_rm_sync_reset(raw(b), sync.id) }
 }
-pub(in crate::mesa) fn sync_signal(b: &Bridge, sync: &SyncHandle, value: u64) -> i32 {
+pub(in crate::device) fn sync_signal(b: &Bridge, sync: &SyncHandle, value: u64) -> i32 {
     // SAFETY: live bridge; the borrowed handle keeps the id live.
     unsafe { nv_rm_sync_signal(raw(b), sync.id, value) }
 }
-pub(in crate::mesa) fn sync_move(
+pub(in crate::device) fn sync_move(
     b: &Bridge,
     dst: &SyncHandle,
     src: &SyncHandle,
@@ -451,11 +451,11 @@ pub(in crate::mesa) fn sync_move(
     // SAFETY: live bridge; both borrowed handles keep their ids live.
     unsafe { nv_rm_sync_move(raw(b), dst.id, src.id, shared_source) }
 }
-pub(in crate::mesa) fn sync_get_value(b: &Bridge, sync: &SyncHandle, out: &mut u64) -> i32 {
+pub(in crate::device) fn sync_get_value(b: &Bridge, sync: &SyncHandle, out: &mut u64) -> i32 {
     // SAFETY: live bridge; borrowed handle; `out` is an exclusive u64.
     unsafe { nv_rm_sync_get_value(raw(b), sync.id, out) }
 }
-pub(in crate::mesa) fn sync_status_many(
+pub(in crate::device) fn sync_status_many(
     b: &Bridge,
     points: &[Point<'_>],
     flags: u32,
@@ -467,7 +467,7 @@ pub(in crate::mesa) fn sync_status_many(
     // id in it borrowed from a live handle; `out` is an exclusive u32.
     unsafe { nv_rm_sync_status_many(raw(b), points, count, flags, out) }
 }
-pub(in crate::mesa) fn sync_wait_many(
+pub(in crate::device) fn sync_wait_many(
     b: &Bridge,
     points: &[Point<'_>],
     flags: u32,
@@ -479,7 +479,7 @@ pub(in crate::mesa) fn sync_wait_many(
     // id in it borrowed from a live handle for the whole (blocking) call.
     unsafe { nv_rm_sync_wait_many(raw(b), points, count, flags, timeout_ns) }
 }
-pub(in crate::mesa) fn sync_import_fd(
+pub(in crate::device) fn sync_import_fd(
     b: &Bridge,
     sync: &SyncHandle,
     fd: BorrowedFd<'_>,
@@ -490,7 +490,7 @@ pub(in crate::mesa) fn sync_import_fd(
 }
 /// `drm` None passes -1 (opaque exports take no DRM fd). The returned
 /// descriptor in `out` (or -1) is the caller's to own.
-pub(in crate::mesa) fn sync_export_fd(
+pub(in crate::device) fn sync_export_fd(
     b: &Bridge,
     sync: &SyncHandle,
     opaque: u32,
@@ -502,7 +502,7 @@ pub(in crate::mesa) fn sync_export_fd(
     unsafe { nv_rm_sync_export_fd(raw(b), sync.id, opaque, fd_or_none(drm), out) }
 }
 
-pub(in crate::mesa) fn submit_batch(
+pub(in crate::device) fn submit_batch(
     b: &Bridge,
     ctx: u64,
     pushes: &[Push],
@@ -534,7 +534,7 @@ pub(in crate::mesa) fn submit_batch(
     *out = token.get();
     status
 }
-pub(in crate::mesa) fn submit_sync(
+pub(in crate::device) fn submit_sync(
     b: &Bridge,
     ctx: u64,
     pushes: &[Push],
@@ -560,7 +560,7 @@ pub(in crate::mesa) fn submit_sync(
     *out = token.get();
     status
 }
-pub(in crate::mesa) fn submit(b: &Bridge, ctx: u64, pushes: &[Push], out: &mut u64) -> i32 {
+pub(in crate::device) fn submit(b: &Bridge, ctx: u64, pushes: &[Push], out: &mut u64) -> i32 {
     let (pushes, count) = array(pushes);
     let mut token = NvRmToken::new(*out);
     // SAFETY: live bridge; `pushes` valid for `count` (or null for 0); `token`
@@ -577,7 +577,7 @@ pub(in crate::mesa) fn submit(b: &Bridge, ctx: u64, pushes: &[Push], out: &mut u
     *out = token.get();
     status
 }
-pub(in crate::mesa) fn context_signal(
+pub(in crate::device) fn context_signal(
     b: &Bridge,
     ctx: u64,
     signals: &[Point<'_>],
@@ -601,7 +601,7 @@ pub(in crate::mesa) fn context_signal(
 }
 /// `waits` are sync_file descriptors, borrowed for the call (the bridge dups
 /// the ones it keeps).
-pub(in crate::mesa) fn submit_waits(
+pub(in crate::device) fn submit_waits(
     b: &Bridge,
     ctx: u64,
     pushes: &[Push],

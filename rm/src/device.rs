@@ -1805,13 +1805,13 @@ pub(crate) fn needs_slot(error: &Error) -> bool {
 }
 
 #[cfg(test)]
-#[path = "mesa_hardware_tests.rs"]
+#[path = "device_hardware_tests.rs"]
 mod hardware_tests;
 
 #[cfg(test)]
-#[path = "mesa_reclaim_tests.rs"]
+#[path = "device_reclaim_tests.rs"]
 mod reclaim_tests;
 
 #[cfg(test)]
-#[path = "mesa_multiqueue_tests.rs"]
+#[path = "device_multiqueue_tests.rs"]
 mod multiqueue_tests;

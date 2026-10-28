@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Liveness fixtures for deferred reclamation and foreign-gate wakeups
 //! (local NVIDIA GPU, ignored by default). Run alone:
-//!   cargo test --offline --no-default-features --lib mesa::reclaim_tests \
+//!   cargo test --offline --no-default-features --lib device::reclaim_tests \
 //!     -- --ignored --test-threads=1 --nocapture
 //! NV_RM_STRESS_SECONDS sets the concurrency stress duration (default 20),
 //! NV_RM_WAKE_ROUNDS the lost-wakeup rounds (default 300).

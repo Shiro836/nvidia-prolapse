@@ -54,6 +54,7 @@ pub(crate) mod compat;
 pub(crate) mod compiler;
 mod compute;
 mod cpu_map_cache;
+pub(crate) mod device;
 pub(crate) mod diag;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
@@ -62,7 +63,6 @@ mod external;
 mod fences;
 mod ffi;
 pub mod gpu;
-pub(crate) mod mesa;
 pub mod nvdec;
 pub use nv_rm_sys::nvdec_drv;
 pub use nv_video::nvdec_hevc;
