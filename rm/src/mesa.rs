@@ -1957,7 +1957,9 @@ enum Entry {
     /// codes are `OUT_OF_HOST_MEMORY` plus `INVALID_EXTERNAL_HANDLE` (import) or
     /// `TOO_MANY_OBJECTS` (export). NVK's payloads report every failed import or
     /// export as `VK_ERROR_UNKNOWN` (vk_drm_syncobj.c:376, :397, :413, :429), RM out of memory
-    /// and a lost device included.
+    /// and a lost device included. An import does not check the device state:
+    /// NVK's is a DRM syncobj ioctl that never looks at it, and NVIDIA's
+    /// driver imports a semaphore fd without a loss check.
     SyncFd,
     /// `nv_rm_context_create`, `nv_rm_context_create_shared`: queue creation
     /// inside `vkCreateDevice`, which lists `INITIALIZATION_FAILED` and
@@ -3279,8 +3281,10 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_move(
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_sync_move", object, move || {
         report((|| {
+            // No liveness check: a payload move is a host payload operation
+            // (see Entry::Sync); NVK's runs as DRM syncobj ioctls
+            // (vk_drm_syncobj.c:437-468 at Mesa 26.2.5).
             let b = present(object)?;
-            b.core.live()?;
             if src == dst {
                 return Err(Error::Contract("invalid binary sync move".into()));
             }
@@ -3461,8 +3465,8 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_import_fd(
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(Entry::SyncFd, "nv_rm_sync_import_fd", object, move || {
-        let b = present(object)?;
-        b.core.live()?;
+        // No liveness check: see Entry::SyncFd.
+        present(object)?;
         if fd < 0 {
             return Err(Error::Contract("invalid synchronization import fd".into()));
         }

@@ -318,6 +318,79 @@ fn host_sync_operations_succeed_after_a_loss() {
     assert_eq!(c::sync_destroy(&bridge, done), 0);
 }
 
+/// Payload moves and fd imports keep working after a device loss, like the
+/// other host payload operations: vkImport{Semaphore,Fence}FdKHR list no
+/// VK_ERROR_DEVICE_LOST, NVK runs them and Mesa's payload move as DRM syncobj
+/// ioctls that never look at the device state (vk_drm_syncobj.c:367-450 at
+/// Mesa 26.2.5), and the stock driver's semaphore fd import does not check
+/// for loss either. The descriptors are exported before the loss: an opaque fd
+/// of a signalled payload and the sync_file of a batch blocked on a host
+/// timeline, which still runs when the host signals it after the loss.
+#[test]
+#[ignore = "local NVIDIA GPU: sync move and fd import after a published loss"]
+fn sync_move_and_import_succeed_after_a_loss() {
+    let pci = selected_pci();
+    let drm = render_node(pci);
+    let bridge = open(pci);
+    let ctx = context(&bridge);
+    let signalled = create(&bridge, false, 0);
+    assert_eq!(c::sync_signal(&bridge, &signalled, 0), 0);
+    let mut opaque = -1;
+    assert_eq!(
+        c::sync_export_fd(&bridge, &signalled, 1, None, &mut opaque),
+        0
+    );
+    assert!(opaque >= 0);
+    // SAFETY: a successful opaque export returns a new open descriptor that
+    // only this test owns, and it is not -1 (asserted above).
+    let opaque = unsafe { OwnedFd::from_raw_fd(opaque) };
+    let gate = create(&bridge, true, 0);
+    let produced = create(&bridge, false, 0);
+    let sync_file = pending_sync_file(&bridge, ctx, &gate, 1, &produced, &drm);
+    bridge.core.mark_lost();
+    assert_eq!(c::check_status(&bridge), -4, "the loss is published");
+
+    let source = create(&bridge, false, 0);
+    let target = create(&bridge, false, 0);
+    assert_eq!(c::sync_signal(&bridge, &source, 0), 0);
+    assert_eq!(
+        c::sync_move(&bridge, &target, &source, 0),
+        0,
+        "payload move"
+    );
+    assert!(target.obj().unwrap().ready(0, false).unwrap().0);
+    assert!(!source.obj().unwrap().ready(0, false).unwrap().0);
+
+    let imported = create(&bridge, false, 0);
+    assert_eq!(
+        c::sync_import_fd(&bridge, &imported, opaque.as_fd(), 1),
+        0,
+        "opaque import"
+    );
+    assert!(imported.obj().unwrap().ready(0, false).unwrap().0);
+    let from_file = create(&bridge, false, 0);
+    assert_eq!(
+        c::sync_import_fd(&bridge, &from_file, sync_file.as_fd(), 0),
+        0,
+        "sync_file import"
+    );
+    assert_eq!(c::sync_signal(&bridge, &gate, 1), 0);
+    let start = Instant::now();
+    while !from_file.obj().unwrap().ready(0, false).unwrap().0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the imported sync_file did not signal after the host signal"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(c::context_destroy(&bridge, ctx), 0);
+    for sync in [
+        signalled, gate, produced, source, target, imported, from_file,
+    ] {
+        assert_eq!(c::sync_destroy(&bridge, sync), 0);
+    }
+}
+
 /// 5a. The Android cycle: GPU work gated on a foreign sync_file whose producer
 /// signal comes from the thread that frees unrelated memory afterwards. The
 /// former synchronous all-queue drain blocked that thread forever (until a
