@@ -1,0 +1,785 @@
+nvk: command memory the GPU reads is GPU-written video memory; CPU-written command memory is system memory.
+
+Follows nvk-cpu-written-memory-placement.patch: after it, the only driver-owned video memory the CPU still
+wrote through BAR1 was command upload memory (root descriptor tables, QMDs, push descriptor sets, and the
+CPU uploads of vkCmdUpdateBuffer/meta), the zero page and, before Maxwell B, the QMD heap.
+
+The stock driver (libnvidia-eglcore 615.71.09) never writes video memory with the CPU: its pushbuffer is
+system memory (write-combined, GPU-uncached) and the per-dispatch constants and descriptor data are written
+into a video-memory arena by the GPU, with inline-to-memory from the pushbuffer (LINE_LENGTH_IN, LINE_COUNT,
+OFFSET_OUT, LAUNCH_DMA = PITCH | FLUSH_DISABLE | SYSMEMBAR_DISABLE, LOAD_INLINE_DATA), immediately followed
+by the QMD and the launch. Do the same:
+
+* VRAM command memory is never CPU-mapped. Root descriptor tables, QMDs and push descriptor sets are
+  allocated there and written with I2M on the subchannel that consumes them. Only the 64-byte chunks of the
+  root table that were written since the last state reset are copied (the others are zero and not
+  referenced by valid commands). When the data is patched by the GPU afterwards (indirect dispatch) or read
+  by a shader (generated commands), the I2M flushes (COMPLETION_TYPE_FLUSH_ONLY, as nvk_CmdUpdateBuffer).
+  I2M is subject to conditional rendering, so these writes are bracketed with
+  SET_RENDER_ENABLE_OVERRIDE = ALWAYS_RENDER, restoring meta's override.
+* The root table is written before the dispatch's dependency links (nvk-cs-join-qmd.patch), the QMD after
+  them and before the launch, where stock loads its dispatch QMD inline. The indirect dispatch that loads
+  its QMD inline (nvk-compute-queue-no-mme.patch) gets the QMD back instead of an I2M copy.
+* CPU uploads (nvk_cmd_buffer_upload_alloc: meta buffers, large vkCmdUpdateBuffer data, SKED counters) and
+  the conditional-rendering scratch (both queue families) are system memory.
+* The zero page is video memory without a CPU mapping, zeroed through the upload queue; the pre-Maxwell-B
+  QMD heap is not CPU-mapped.
+
+Cost: command memory in system memory instead costs 3.4x GPU time on a dispatch-heavy command buffer
+(every QMD and root-table fetch crosses PCIe uncached); I2M into video memory does not.
+
+diff --git a/src/nouveau/vulkan/nvk_cmd_buffer.c b/src/nouveau/vulkan/nvk_cmd_buffer.c
+index 8ad93d814cb..dc56cc1c8b8 100644
+--- a/src/nouveau/vulkan/nvk_cmd_buffer.c
++++ b/src/nouveau/vulkan/nvk_cmd_buffer.c
+@@ -28,6 +28,7 @@
+ #include "nv_push_cla16f.h"
+ #include "nv_push_cl9097.h"
+ #include "nv_push_cl90b5.h"
++#include "nv_push_cla040.h"
+ #include "nv_push_cla097.h"
+ #include "nv_push_cla0c0.h"
+ #include "nv_push_clb06f.h"
+@@ -131,6 +132,7 @@ nvk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
+    nvk_cmd_pool_free_gart_mem_list(pool, &cmd->owned_gart_mem);
+    nvk_cmd_pool_free_qmd_list(pool, &cmd->owned_qmd);
+    cmd->upload_mem = NULL;
++   cmd->gpu_upload_mem = NULL;
+    cmd->push_mem = NULL;
+    cmd->push_mem_limit = NULL;
+    cmd->push = (struct nv_push) {0};
+@@ -295,8 +297,12 @@ nvk_cmd_buffer_upload_alloc(struct nvk_cmd_buffer *cmd,
+       return VK_SUCCESS;
+    }
+ 
++   /* Memory the CPU writes is system memory: the CPU never writes video
++    * memory through BAR1.  Data the GPU reads repeatedly goes through
++    * nvk_cmd_buffer_gpu_upload_data() instead.
++    */
+    struct nvk_cmd_mem *mem;
+-   VkResult result = nvk_cmd_buffer_alloc_mem(cmd, false, &mem);
++   VkResult result = nvk_cmd_buffer_alloc_mem(cmd, true, &mem);
+    if (unlikely(result != VK_SUCCESS))
+       return result;
+ 
+@@ -317,6 +323,139 @@ nvk_cmd_buffer_upload_alloc(struct nvk_cmd_buffer *cmd,
+    return VK_SUCCESS;
+ }
+ 
++VkResult
++nvk_cmd_buffer_gpu_upload_alloc(struct nvk_cmd_buffer *cmd,
++                                uint32_t size, uint32_t alignment,
++                                uint64_t *addr)
++{
++   assert(size % 4 == 0);
++   assert(size <= NVK_CMD_MEM_SIZE);
++
++   uint32_t offset = cmd->gpu_upload_offset;
++   if (alignment > 0)
++      offset = align(offset, alignment);
++
++   assert(offset <= NVK_CMD_MEM_SIZE);
++   if (cmd->gpu_upload_mem != NULL && size <= NVK_CMD_MEM_SIZE - offset) {
++      *addr = cmd->gpu_upload_mem->mem->va->addr + offset;
++      cmd->gpu_upload_offset = offset + size;
++      return VK_SUCCESS;
++   }
++
++   struct nvk_cmd_mem *mem;
++   VkResult result = nvk_cmd_buffer_alloc_mem(cmd, false, &mem);
++   if (unlikely(result != VK_SUCCESS))
++      return result;
++
++   *addr = mem->mem->va->addr;
++
++   /* Same policy as nvk_cmd_buffer_upload_alloc() */
++   if (cmd->gpu_upload_mem == NULL || size < cmd->gpu_upload_offset) {
++      cmd->gpu_upload_mem = mem;
++      cmd->gpu_upload_offset = size;
++   }
++
++   return VK_SUCCESS;
++}
++
++/* Inline-to-memory (I2M) is subject to conditional rendering
++ * (nvk_CmdUpdateBuffer() has the same constraint).  GPU uploads must always
++ * land: their destination may be referenced by later commands which are not
++ * conditional.
++ */
++void
++nvk_cmd_buffer_begin_always_render(struct nvk_cmd_buffer *cmd, uint8_t subc)
++{
++   assert(subc == SUBC_NV9097 || subc == SUBC_NV90C0);
++   struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
++   __push_immd(p, subc, NVA040_SET_RENDER_ENABLE_OVERRIDE,
++               NVA040_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER);
++}
++
++void
++nvk_cmd_buffer_end_always_render(struct nvk_cmd_buffer *cmd, uint8_t subc)
++{
++   const bool always = subc == SUBC_NV9097 ? cmd->state.always_render_3d
++                                           : cmd->state.always_render_cs;
++   struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
++   __push_immd(p, subc, NVA040_SET_RENDER_ENABLE_OVERRIDE,
++               always ? NVA040_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER :
++                        NVA040_SET_RENDER_ENABLE_OVERRIDE_MODE_USE_RENDER_ENABLE);
++}
++
++/* Write data into GPU memory with inline-to-memory (I2M) from the pushbuf,
++ * on the subchannel whose later methods consume it.  Without flush the write
++ * is not flushed before the following methods are processed
++ * (COMPLETION_TYPE_FLUSH_DISABLE, SYSMEMBAR_DISABLE): the stock driver
++ * (libnvidia-eglcore 615.71.09) writes its per-dispatch constants and
++ * descriptor data that way, immediately followed by the QMD and the launch.
++ * With flush, the data is in memory before the following methods run
++ * (COMPLETION_TYPE_FLUSH_ONLY, as nvk_CmdUpdateBuffer()); that is needed when
++ * the GPU patches or reads the data by other means afterwards.
++ */
++void
++nvk_cmd_buffer_write_inline(struct nvk_cmd_buffer *cmd, uint8_t subc,
++                            uint64_t addr, const void *data, uint32_t size,
++                            bool flush)
++{
++   assert(subc == SUBC_NV9097 || subc == SUBC_NV90C0);
++   assert(size % 4 == 0);
++
++   const uint32_t max_dw = NVK_CMD_BUFFER_MAX_PUSH - 8;
++   const uint32_t *dw = data;
++   uint32_t dw_count = size / 4;
++   while (dw_count > 0) {
++      const uint32_t n = MIN2(dw_count, max_dw);
++
++      struct nv_push *p = nvk_cmd_buffer_push(cmd, n + 8);
++      __push_mthd(p, subc, NVA040_LINE_LENGTH_IN);
++      P_NVA040_LINE_LENGTH_IN(p, n * 4);
++      P_NVA040_LINE_COUNT(p, 1);
++      P_NVA040_OFFSET_OUT_UPPER(p, addr >> 32);
++      P_NVA040_OFFSET_OUT(p, addr);
++      __push_1inc(p, subc, NVA040_LAUNCH_DMA);
++      if (flush) {
++         P_NVA040_LAUNCH_DMA(p, {
++            .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
++            .completion_type = COMPLETION_TYPE_FLUSH_ONLY,
++         });
++      } else {
++         P_NVA040_LAUNCH_DMA(p, {
++            .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
++            .completion_type = COMPLETION_TYPE_FLUSH_DISABLE,
++            .sysmembar_disable = SYSMEMBAR_DISABLE_TRUE,
++         });
++      }
++      P_INLINE_ARRAY(p, dw, n);
++
++      dw += n;
++      dw_count -= n;
++      addr += n * 4;
++   }
++}
++
++/* Upload data the GPU reads repeatedly (root descriptor tables, QMDs, push
++ * descriptor sets) to video memory without a CPU write through BAR1: the GPU
++ * copies it out of the pushbuf with I2M.  System memory would cost a PCIe
++ * round trip per read (it is GPU-uncached).
++ */
++VkResult
++nvk_cmd_buffer_gpu_upload_data(struct nvk_cmd_buffer *cmd, uint8_t subc,
++                               const void *data, uint32_t size,
++                               uint32_t alignment, uint64_t *addr)
++{
++   VkResult result = nvk_cmd_buffer_gpu_upload_alloc(cmd, size, alignment,
++                                                     addr);
++   if (unlikely(result != VK_SUCCESS))
++      return result;
++
++   nvk_cmd_buffer_begin_always_render(cmd, subc);
++   nvk_cmd_buffer_write_inline(cmd, subc, *addr, data, size, false);
++   nvk_cmd_buffer_end_always_render(cmd, subc);
++
++   return VK_SUCCESS;
++}
++
+ VkResult
+ nvk_cmd_buffer_upload_data(struct nvk_cmd_buffer *cmd,
+                            const void *data, uint32_t size,
+@@ -337,17 +476,17 @@ nvk_cmd_buffer_upload_data(struct nvk_cmd_buffer *cmd,
+ VkResult
+ nvk_cmd_buffer_alloc_qmd(struct nvk_cmd_buffer *cmd,
+                          uint32_t size, uint32_t alignment,
+-                         uint64_t *addr, void **ptr)
++                         uint64_t *addr)
+ {
+    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+ 
+    /* On Maxwell B and later, we have INVALIDATE_SKED_CACHES so we can just
+-    * allocate from wherever we want (the upload stream in this case).
++    * allocate from wherever we want (the GPU upload stream in this case).
+     */
+    if (pdev->info.cls_compute >= MAXWELL_COMPUTE_B) {
+       VkResult result =
+-         nvk_cmd_buffer_upload_alloc(cmd, size, alignment, addr, ptr);
++         nvk_cmd_buffer_gpu_upload_alloc(cmd, size, alignment, addr);
+       if (result == VK_SUCCESS && nvk_cmd_sked_qmds_tracked(pdev)) {
+          /* Recorded for the SKED cache invalidate at the end of the command
+           * buffer (the proprietary driver's QMD memory allocator,
+@@ -362,18 +501,18 @@ nvk_cmd_buffer_alloc_qmd(struct nvk_cmd_buffer *cmd,
+    /* The GPU compute scheduler (SKED) has a cache.  Maxwell B added the
+     * INVALIDATE_SKED_CACHES instruction to manage the SKED cache.  We call
+     * that at the top of every command buffer so that we always pick up
+-    * whatever QMDs we've written from the CPU fresh.  On Maxwell A and
+-    * earlier, the SKED cache still exists in some form but we have no way to
+-    * invalidate it.  If a compute shader has been dispatched from a QMD at an
+-    * address that's no longer valid, the SKED cache can fault.  To work
+-    * around this, we have a QMD heap on the device and we allocate QMDs from
+-    * that on Maxwell A and earlier.
++    * whatever QMDs we've written fresh.  On Maxwell A and earlier, the SKED
++    * cache still exists in some form but we have no way to invalidate it.
++    * If a compute shader has been dispatched from a QMD at an address that's
++    * no longer valid, the SKED cache can fault.  To work around this, we have
++    * a QMD heap on the device and we allocate QMDs from that on Maxwell A and
++    * earlier.
+     *
+     * Prior to Maxwell B, the GPU doesn't seem to need any sort of SKED cache
+-    * invalidation to pick up new writes from the CPU.  However, we do still
+-    * have to worry about faults that may be caused by the SKED cache
+-    * containing a stale address.  Just allocating all QMDs from a central
+-    * heap which never throws memory away seems to be sufficient for this.
++    * invalidation to pick up new QMD writes.  However, we do still have to
++    * worry about faults that may be caused by the SKED cache containing a
++    * stale address.  Just allocating all QMDs from a central heap which never
++    * throws memory away seems to be sufficient for this.
+     */
+    assert(size <= NVK_CMD_QMD_SIZE);
+    assert(alignment <= NVK_CMD_QMD_SIZE);
+@@ -386,7 +525,6 @@ nvk_cmd_buffer_alloc_qmd(struct nvk_cmd_buffer *cmd,
+    list_addtail(&qmd->link, &cmd->owned_qmd);
+ 
+    *addr = qmd->addr;
+-   *ptr = qmd->map;
+ 
+    return VK_SUCCESS;
+ }
+@@ -598,7 +736,6 @@ nvk_EndCommandBuffer(VkCommandBuffer commandBuffer)
+     * secondaries, they will have been flushed in their EndCommandBuffer()
+     * call.
+     */
+-   flush_mem_list(cmd, &cmd->owned_mem);
+    flush_mem_list(cmd, &cmd->owned_gart_mem);
+ 
+    return vk_command_buffer_get_record_result(&cmd->vk);
+@@ -1679,10 +1816,12 @@ nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
+ 
+       struct nvk_push_descriptor_set *push_set = desc->sets[set_idx].push;
+       uint64_t push_set_addr;
+-      result = nvk_cmd_buffer_upload_data(cmd, push_set->data,
+-                                          sizeof(push_set->data),
+-                                          min_cbuf_alignment,
+-                                          &push_set_addr);
++      const uint8_t subc = desc == &cmd->state.cs.descriptors ?
++                           SUBC_NV90C0 : SUBC_NV9097;
++      result = nvk_cmd_buffer_gpu_upload_data(cmd, subc, push_set->data,
++                                              sizeof(push_set->data),
++                                              min_cbuf_alignment,
++                                              &push_set_addr);
+       if (unlikely(result != VK_SUCCESS)) {
+          vk_command_buffer_set_error(&cmd->vk, result);
+          return;
+diff --git a/src/nouveau/vulkan/nvk_cmd_buffer.h b/src/nouveau/vulkan/nvk_cmd_buffer.h
+index 7db5d6201c7..2baaa2126b4 100644
+--- a/src/nouveau/vulkan/nvk_cmd_buffer.h
++++ b/src/nouveau/vulkan/nvk_cmd_buffer.h
+@@ -119,8 +119,30 @@ struct nvk_descriptor_state {
+ 
+    struct nvk_descriptor_set_binding sets[NVK_MAX_SETS];
+    uint32_t push_dirty;
++
++   /* Bitmask of the NVK_ROOT_CHUNK_SIZE_B chunks of root which have been
++    * written since the state was last reset.  The other chunks are zero in
++    * root and are never referenced by a valid command, so they don't need to
++    * be copied into GPU memory.
++    */
++   uint64_t root_written;
+ };
+ 
++#define NVK_ROOT_CHUNK_SIZE_B 64
++static_assert(sizeof(struct nvk_root_descriptor_table) <=
++              64 * NVK_ROOT_CHUNK_SIZE_B,
++              "root_written must cover the whole root descriptor table");
++
++static inline void
++nvk_descriptor_state_mark_root_written(struct nvk_descriptor_state *desc,
++                                       size_t offset, size_t size)
++{
++   assert(size > 0);
++   const uint32_t first = offset / NVK_ROOT_CHUNK_SIZE_B;
++   const uint32_t last = (offset + size - 1) / NVK_ROOT_CHUNK_SIZE_B;
++   desc->root_written |= BITFIELD64_RANGE(first, last - first + 1);
++}
++
+ #define nvk_descriptor_state_get_root(desc, member, dst) do { \
+    const struct nvk_root_descriptor_table *root = \
+       (const struct nvk_root_descriptor_table *)(desc)->root; \
+@@ -143,10 +165,11 @@ struct nvk_descriptor_state {
+    struct nvk_root_descriptor_table *root = \
+       (struct nvk_root_descriptor_table *)_desc->root; \
+    root->member = (src); \
+-   if (_desc->flush_root != NULL) { \
+-      size_t offset = (char *)&root->member - (char *)root; \
+-      _desc->flush_root((cmd), _desc, offset, sizeof(root->member)); \
+-   } \
++   size_t _offset = (char *)&root->member - (char *)root; \
++   nvk_descriptor_state_mark_root_written(_desc, _offset, \
++                                          sizeof(root->member)); \
++   if (_desc->flush_root != NULL) \
++      _desc->flush_root((cmd), _desc, _offset, sizeof(root->member)); \
+ } while (0)
+ 
+ #define nvk_descriptor_state_set_root_array(cmd, desc, member, \
+@@ -159,10 +182,13 @@ struct nvk_descriptor_state {
+    assert(_start + _count <= ARRAY_SIZE(root->member)); \
+    for (unsigned _index = 0; _index < _count; _index++) \
+       root->member[_index + _start] = (src)[_index]; \
+-   if (_desc->flush_root != NULL) { \
+-      size_t offset = (char *)&root->member[_start] - (char *)root; \
+-      _desc->flush_root((cmd), _desc, offset, \
+-                        _count * sizeof(root->member[0])); \
++   if (_count > 0) { \
++      size_t _offset = (char *)&root->member[_start] - (char *)root; \
++      nvk_descriptor_state_mark_root_written(_desc, _offset, \
++                                             _count * sizeof(root->member[0])); \
++      if (_desc->flush_root != NULL) \
++         _desc->flush_root((cmd), _desc, _offset, \
++                           _count * sizeof(root->member[0])); \
+    } \
+ } while (0)
+ 
+@@ -338,6 +364,12 @@ struct nvk_cmd_buffer {
+       struct nvk_graphics_state gfx;
+       struct nvk_compute_state cs;
+       VkQueryPipelineStatisticFlags inherited_pipeline_statistics;
++
++      /* SET_RENDER_ENABLE_OVERRIDE is MODE_ALWAYS_RENDER on the 3D/compute
++       * subchannel (meta operations); restored after GPU uploads.
++       */
++      bool always_render_3d;
++      bool always_render_cs;
+    } state;
+ 
+    /** List of nvk_cmd_mem
+@@ -350,9 +382,14 @@ struct nvk_cmd_buffer {
+    struct list_head owned_gart_mem;
+    struct list_head owned_qmd;
+ 
++   /* CPU-written upload memory (GART) */
+    struct nvk_cmd_mem *upload_mem;
+    uint32_t upload_offset;
+ 
++   /* GPU-written upload memory (VRAM, never CPU-mapped) */
++   struct nvk_cmd_mem *gpu_upload_mem;
++   uint32_t gpu_upload_offset;
++
+    struct nvk_cmd_mem *cond_render_mem;
+    /** Array of struct nvk_cmd_mem* */
+    struct util_dynarray copy_memory_indirect_temps;
+@@ -524,13 +561,31 @@ VkResult nvk_cmd_buffer_upload_alloc(struct nvk_cmd_buffer *cmd,
+                                      uint32_t size, uint32_t alignment,
+                                      uint64_t *addr, void **ptr);
+ 
++VkResult nvk_cmd_buffer_gpu_upload_alloc(struct nvk_cmd_buffer *cmd,
++                                         uint32_t size, uint32_t alignment,
++                                         uint64_t *addr);
++
++void nvk_cmd_buffer_write_inline(struct nvk_cmd_buffer *cmd, uint8_t subc,
++                                 uint64_t addr, const void *data,
++                                 uint32_t size, bool flush);
++
++void nvk_cmd_buffer_begin_always_render(struct nvk_cmd_buffer *cmd,
++                                        uint8_t subc);
++void nvk_cmd_buffer_end_always_render(struct nvk_cmd_buffer *cmd,
++                                      uint8_t subc);
++
++VkResult nvk_cmd_buffer_gpu_upload_data(struct nvk_cmd_buffer *cmd,
++                                        uint8_t subc, const void *data,
++                                        uint32_t size, uint32_t alignment,
++                                        uint64_t *addr);
++
+ VkResult nvk_cmd_buffer_upload_data(struct nvk_cmd_buffer *cmd,
+                                     const void *data, uint32_t size,
+                                     uint32_t alignment, uint64_t *addr);
+ 
+ VkResult nvk_cmd_buffer_alloc_qmd(struct nvk_cmd_buffer *cmd,
+                                   uint32_t size, uint32_t alignment,
+-                                  uint64_t *addr, void **ptr);
++                                  uint64_t *addr);
+ 
+ void nvk_cmd_flush_wait_dep(struct nvk_cmd_buffer *cmd,
+                             const VkDependencyInfo *dep,
+diff --git a/src/nouveau/vulkan/nvk_cmd_dispatch.c b/src/nouveau/vulkan/nvk_cmd_dispatch.c
+index 7e818736025..bd7792b6507 100644
+--- a/src/nouveau/vulkan/nvk_cmd_dispatch.c
++++ b/src/nouveau/vulkan/nvk_cmd_dispatch.c
+@@ -31,6 +31,7 @@
+ #include "clcec0.h"
+ #include "nv_push_cl90c0.h"
+ #include "nv_push_cl9097.h"
++#include "nv_push_cla040.h"
+ #include "nv_push_cla0c0.h"
+ #include "nv_push_clb0c0.h"
+ #include "nv_push_clb1c0.h"
+@@ -643,9 +644,8 @@ nvk_cs_join_emit_empty(struct nvk_cmd_buffer *cmd, const uint32_t *tmpl,
+    const uint32_t qmd_dw = qmd_size_B / 4;
+    assert(qmd_size_B == 256 || qmd_size_B == 384);
+ 
+-   void *qmd_mem;
+    VkResult result = nvk_cmd_buffer_alloc_qmd(cmd, qmd_size_B, 0x100,
+-                                              &q->addr, &qmd_mem);
++                                              &q->addr);
+    if (unlikely(result != VK_SUCCESS))
+       return result;
+ 
+@@ -935,12 +935,48 @@ nvk_cmd_cs_join_barrier(struct nvk_cmd_buffer *cmd,
+    return true;
+ }
+ 
++/* Copy the written chunks of a root descriptor table into GPU memory at
++ * root_desc_addr with I2M from the pushbuf.
++ */
++static void
++nvk_cmd_write_root_desc(struct nvk_cmd_buffer *cmd, uint64_t root_desc_addr,
++                        const void *root, size_t root_size,
++                        uint64_t root_written, bool flush)
++{
++   const uint32_t chunks = DIV_ROUND_UP(root_size, NVK_ROOT_CHUNK_SIZE_B);
++   if (chunks < 64)
++      root_written &= BITFIELD64_MASK(chunks);
++
++   while (root_written != 0) {
++      const uint32_t first = ffsll(root_written) - 1;
++      uint32_t last = first;
++      while (last + 1 < 64 && (root_written & BITFIELD64_BIT(last + 1)))
++         last++;
++      root_written &= ~BITFIELD64_RANGE(first, last - first + 1);
++
++      const uint32_t start_B = first * NVK_ROOT_CHUNK_SIZE_B;
++      const uint32_t end_B = MIN2((last + 1) * NVK_ROOT_CHUNK_SIZE_B,
++                                  root_size);
++      nvk_cmd_buffer_write_inline(cmd, SUBC_NV90C0, root_desc_addr + start_B,
++                                  (const char *)root + start_B,
++                                  end_B - start_B, flush);
++   }
++}
++
++/* Root descriptor tables and QMDs are read by the GPU many times per
++ * dispatch, so they live in video memory.  The CPU does not write them
++ * through BAR1: they are written by the GPU out of the pushbuf, in order
++ * with the launch.  When the caller patches them on the GPU afterwards
++ * (indirect dispatch) or reads them from a shader (generated commands),
++ * the writes are flushed before the following methods.
++ */
+ static VkResult
+ nvk_cmd_upload_qmd(struct nvk_cmd_buffer *cmd,
+                    const struct nvk_shader *shader,
+                    const struct nvk_descriptor_state *desc,
+                    const void *root,
+                    size_t root_size,
++                   uint64_t root_written,
+                    uint32_t global_size[3],
+                    bool join,
+                    enum nvk_qmd_launch launch,
+@@ -952,6 +988,7 @@ nvk_cmd_upload_qmd(struct nvk_cmd_buffer *cmd,
+    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+    const uint32_t min_cbuf_alignment = nvk_min_cbuf_alignment(&pdev->info);
+    const uint32_t qmd_size_B = nak_qmd_size_B(&pdev->info);
++   const bool flush = root_desc_addr_out != NULL;
+    VkResult result;
+ 
+    /* pre Pascal the constant buffer sizes need to be 0x100 aligned. As we
+@@ -960,16 +997,15 @@ nvk_cmd_upload_qmd(struct nvk_cmd_buffer *cmd,
+     */
+    assert(root_size % min_cbuf_alignment == 0);
+ 
+-   void *root_desc_map;
+    uint64_t root_desc_addr;
+-   result = nvk_cmd_buffer_upload_alloc(cmd, root_size, min_cbuf_alignment,
+-                                        &root_desc_addr, &root_desc_map);
++   result = nvk_cmd_buffer_gpu_upload_alloc(cmd, root_size,
++                                            min_cbuf_alignment,
++                                            &root_desc_addr);
+    if (unlikely(result != VK_SUCCESS))
+       return result;
+ 
+-   memcpy(root_desc_map, root, root_size);
+-
+    uint64_t qmd_addr = 0;
++   uint32_t qmd[NAK_MAX_QMD_DWORDS];
+    if (shader != NULL) {
+       struct nak_qmd_info qmd_info = {
+          .addr = shader->hdr_addr,
+@@ -1010,7 +1046,6 @@ nvk_cmd_upload_qmd(struct nvk_cmd_buffer *cmd,
+          }
+       }
+ 
+-      uint32_t qmd[NAK_MAX_QMD_DWORDS];
+       assert(qmd_size_B <= sizeof(qmd));
+       nak_fill_qmd(&pdev->info, &shader->info, &qmd_info, qmd, qmd_size_B);
+ 
+@@ -1050,21 +1085,37 @@ nvk_cmd_upload_qmd(struct nvk_cmd_buffer *cmd,
+          }
+       }
+ 
+-      void *qmd_map;
+-      result = nvk_cmd_buffer_alloc_qmd(cmd, qmd_size_B, 0x100,
+-                                        &qmd_addr, &qmd_map);
++      result = nvk_cmd_buffer_alloc_qmd(cmd, qmd_size_B, 0x100, &qmd_addr);
+       if (unlikely(result != VK_SUCCESS))
+          return result;
++   }
+ 
++   /* The root table is in memory before anything that may launch the QMD. */
++   nvk_cmd_buffer_begin_always_render(cmd, SUBC_NV90C0);
++   nvk_cmd_write_root_desc(cmd, root_desc_addr, root, root_size,
++                           root_written, flush);
++   nvk_cmd_buffer_end_always_render(cmd, SUBC_NV90C0);
++
++   if (shader != NULL) {
+       if (join) {
+          result = nvk_cs_join_dispatch(cmd, qmd, qmd_addr);
+          if (unlikely(result != VK_SUCCESS))
+             return result;
+       }
+ 
+-      memcpy(qmd_map, qmd, qmd_size_B);
+-      if (qmd_out != NULL)
++      /* The QMD reaches memory after the dependency links, in the place
++       * where the proprietary driver loads its dispatch QMD inline, and
++       * before the launch.  A caller that loads it inline itself (qmd_out)
++       * gets it back instead.
++       */
++      if (qmd_out != NULL) {
+          memcpy(qmd_out, qmd, qmd_size_B);
++      } else {
++         nvk_cmd_buffer_begin_always_render(cmd, SUBC_NV90C0);
++         nvk_cmd_buffer_write_inline(cmd, SUBC_NV90C0, qmd_addr, qmd,
++                                     qmd_size_B, flush);
++         nvk_cmd_buffer_end_always_render(cmd, SUBC_NV90C0);
++      }
+    }
+ 
+    *qmd_addr_out = qmd_addr;
+@@ -1087,7 +1138,7 @@ nvk_cmd_flush_cs_qmd(struct nvk_cmd_buffer *cmd,
+ 
+    return nvk_cmd_upload_qmd(cmd, state->cs.shader, desc,
+                              desc->root, sizeof(desc->root),
+-                             global_size, false, launch,
++                             desc->root_written, global_size, false, launch,
+                              qmd_addr_out, root_desc_addr_out, NULL);
+ }
+ 
+@@ -1141,7 +1192,7 @@ nvk_CmdDispatchBase(VkCommandBuffer commandBuffer,
+    const struct nvk_descriptor_state *desc = &cmd->state.cs.descriptors;
+    VkResult result = nvk_cmd_upload_qmd(cmd, cmd->state.cs.shader, desc,
+                                         desc->root, sizeof(desc->root),
+-                                        global_size, join,
++                                        desc->root_written, global_size, join,
+                                         nvk_cmd_qmd_launch(cmd),
+                                         &qmd_addr, NULL, NULL);
+    if (result != VK_SUCCESS) {
+@@ -1210,6 +1261,8 @@ nvk_cmd_dispatch_with_root_launch(struct nvk_cmd_buffer *cmd,
+    uint64_t qmd_addr;
+    VkResult result = nvk_cmd_upload_qmd(cmd, shader, NULL,
+                                         root, root_size,
++                                        BITFIELD64_MASK(DIV_ROUND_UP(root_size,
++                                                        NVK_ROOT_CHUNK_SIZE_B)),
+                                         group_count, false,
+                                         launch,
+                                         &qmd_addr, NULL, NULL);
+@@ -1501,7 +1554,7 @@ nvk_cmd_dispatch_indirect_inline_qmd(struct nvk_cmd_buffer *cmd,
+    const struct nvk_descriptor_state *desc = &cmd->state.cs.descriptors;
+    VkResult result = nvk_cmd_upload_qmd(cmd, cmd->state.cs.shader, desc,
+                                         desc->root, sizeof(desc->root),
+-                                        global_size, false,
++                                        desc->root_written, global_size, false,
+                                         nvk_cmd_qmd_launch(cmd),
+                                         &qmd_addr, &root_desc_addr, qmd);
+    if (result != VK_SUCCESS) {
+diff --git a/src/nouveau/vulkan/nvk_cmd_draw.c b/src/nouveau/vulkan/nvk_cmd_draw.c
+index 7414de82be1..1df387179fb 100644
+--- a/src/nouveau/vulkan/nvk_cmd_draw.c
++++ b/src/nouveau/vulkan/nvk_cmd_draw.c
+@@ -1773,12 +1773,14 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+       p = nvk_cmd_buffer_push(cmd, 2);
+       P_MTHD(p, NV9097, SET_RENDER_ENABLE_OVERRIDE);
+       P_NV9097_SET_RENDER_ENABLE_OVERRIDE(p, MODE_ALWAYS_RENDER);
++      cmd->state.always_render_3d = true;
+ 
+       nvk_CmdClearAttachments(nvk_cmd_buffer_to_handle(cmd),
+                               clear_count, clear_att, 1, &clear_rect);
+       p = nvk_cmd_buffer_push(cmd, 2);
+       P_MTHD(p, NV9097, SET_RENDER_ENABLE_OVERRIDE);
+       P_NV9097_SET_RENDER_ENABLE_OVERRIDE(p, MODE_USE_RENDER_ENABLE);
++      cmd->state.always_render_3d = false;
+    }
+ 
+    /* TODO: Attachment clears */
+@@ -5955,7 +5957,8 @@ nvk_cmd_begin_cond_render_copy_engine(struct nvk_cmd_buffer *cmd,
+     * input value into one operand and zero into the other operatnd.
+     */
+    if (cmd->cond_render_mem == NULL) {
+-      VkResult result = nvk_cmd_buffer_alloc_mem(cmd, false,
++      /* Zeroed by the CPU below: system memory */
++      VkResult result = nvk_cmd_buffer_alloc_mem(cmd, true,
+                                                  &cmd->cond_render_mem);
+       if (result != VK_SUCCESS) {
+          vk_command_buffer_set_error(&cmd->vk, result);
+@@ -6079,7 +6082,8 @@ nvk_cmd_begin_cond_render_inline_to_memory(struct nvk_cmd_buffer *cmd,
+     * the low word of operand A is ever written.
+     */
+    if (cmd->cond_render_mem == NULL) {
+-      VkResult result = nvk_cmd_buffer_alloc_mem(cmd, false,
++      /* Zeroed by the CPU below: system memory */
++      VkResult result = nvk_cmd_buffer_alloc_mem(cmd, true,
+                                                  &cmd->cond_render_mem);
+       if (result != VK_SUCCESS) {
+          vk_command_buffer_set_error(&cmd->vk, result);
+diff --git a/src/nouveau/vulkan/nvk_cmd_meta.c b/src/nouveau/vulkan/nvk_cmd_meta.c
+index 9411a02a72c..622de46822c 100644
+--- a/src/nouveau/vulkan/nvk_cmd_meta.c
++++ b/src/nouveau/vulkan/nvk_cmd_meta.c
+@@ -104,6 +104,7 @@ nvk_meta_begin_gfx(struct nvk_cmd_buffer *cmd,
+    struct nv_push *p = nvk_cmd_buffer_push(cmd, 10);
+    P_IMMD(p, NV9097, SET_MME_SHADOW_RAM_CONTROL, MODE_METHOD_PASSTHROUGH);
+    P_IMMD(p, NV9097, SET_RENDER_ENABLE_OVERRIDE, MODE_ALWAYS_RENDER);
++   cmd->state.always_render_3d = true;
+    P_IMMD(p, NV9097, SET_STATISTICS_COUNTER, {
+       .da_vertices_generated_enable = false,
+       .da_primitives_generated_enable = false,
+@@ -217,6 +218,7 @@ nvk_meta_end_gfx(struct nvk_cmd_buffer *cmd,
+    P_IMMD(p, NV9097, SET_ZPASS_PIXEL_COUNT, ENABLE_FALSE);
+    P_IMMD(p, NV9097, SET_STATISTICS_COUNTER, {});
+    P_IMMD(p, NV9097, SET_RENDER_ENABLE_OVERRIDE, MODE_USE_RENDER_ENABLE);
++   cmd->state.always_render_3d = false;
+    P_IMMD(p, NV9097, SET_MME_SHADOW_RAM_CONTROL, MODE_METHOD_TRACK_WITH_FILTER);
+ }
+ 
+@@ -230,6 +232,7 @@ nvk_meta_begin_compute(struct nvk_cmd_buffer *cmd,
+ 
+    struct nv_push *p = nvk_cmd_buffer_push(cmd, 1);
+    P_IMMD_WORD(p, NV90C0, SET_RENDER_ENABLE_OVERRIDE, MODE_ALWAYS_RENDER);
++   cmd->state.always_render_cs = true;
+ }
+ 
+ static void
+@@ -238,6 +241,7 @@ nvk_meta_end_compute(struct nvk_cmd_buffer *cmd,
+ {
+    struct nv_push *p = nvk_cmd_buffer_push(cmd, 1);
+    P_IMMD_WORD(p, NV90C0, SET_RENDER_ENABLE_OVERRIDE, MODE_USE_RENDER_ENABLE);
++   cmd->state.always_render_cs = false;
+ 
+    nvk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
+    cmd->state.cs = save->state;
+diff --git a/src/nouveau/vulkan/nvk_cmd_pool.c b/src/nouveau/vulkan/nvk_cmd_pool.c
+index 05b0ce5d644..5bc2ce49d2c 100644
+--- a/src/nouveau/vulkan/nvk_cmd_pool.c
++++ b/src/nouveau/vulkan/nvk_cmd_pool.c
+@@ -21,13 +21,21 @@ nvk_cmd_mem_create(struct nvk_cmd_pool *pool, bool force_gart, struct nvk_cmd_me
+    if (mem == NULL)
+       return vk_error(pool, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
+-   const uint32_t flags = force_gart ? NVKMD_MEM_GART
+-                                     : NVKMD_MEM_LOCAL;
+-
+-   result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &pool->vk.base,
+-                                       NVK_CMD_MEM_SIZE, 0,
+-                                       flags, NVKMD_MEM_MAP_WR,
+-                                       &mem->mem);
++   /* GART memory is written by the CPU (pushbufs, CPU uploads).  VRAM
++    * command memory is never CPU-mapped: its contents (root descriptor
++    * tables, QMDs, push descriptor sets) are written by the GPU from the
++    * pushbuf with inline-to-memory, see nvk_cmd_buffer_gpu_upload_data().
++    */
++   if (force_gart) {
++      result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &pool->vk.base,
++                                          NVK_CMD_MEM_SIZE, 0,
++                                          NVKMD_MEM_GART, NVKMD_MEM_MAP_WR,
++                                          &mem->mem);
++   } else {
++      result = nvkmd_dev_alloc_mem(dev->nvkmd, &pool->vk.base,
++                                   NVK_CMD_MEM_SIZE, 0,
++                                   NVKMD_MEM_LOCAL, &mem->mem);
++   }
+    if (result != VK_SUCCESS) {
+       vk_free(&pool->vk.alloc, mem);
+       return result;
+@@ -58,7 +66,7 @@ nvk_cmd_qmd_create(struct nvk_cmd_pool *pool, struct nvk_cmd_qmd **qmd_out)
+ 
+    result = nvk_heap_alloc(dev, &dev->qmd_heap,
+                            NVK_CMD_QMD_SIZE, NVK_CMD_QMD_SIZE,
+-                           &qmd->addr, &qmd->map);
++                           &qmd->addr, NULL);
+    if (result != VK_SUCCESS) {
+       vk_free(&pool->vk.alloc, qmd);
+       return result;
+@@ -153,7 +161,8 @@ nvk_cmd_pool_alloc_mem(struct nvk_cmd_pool *pool, bool force_gart,
+          return result;
+    }
+ 
+-   if (unlikely(pdev->debug_flags & NVK_DEBUG_TRASH_MEMORY)) {
++   if (unlikely(pdev->debug_flags & NVK_DEBUG_TRASH_MEMORY) &&
++       mem->mem->map != NULL) {
+       memset(mem->mem->map, 0xF1, mem->mem->size_B);
+    }
+ 
+diff --git a/src/nouveau/vulkan/nvk_cmd_pool.h b/src/nouveau/vulkan/nvk_cmd_pool.h
+index a1519a09857..a190300928c 100644
+--- a/src/nouveau/vulkan/nvk_cmd_pool.h
++++ b/src/nouveau/vulkan/nvk_cmd_pool.h
+@@ -26,7 +26,6 @@ struct nvk_cmd_mem {
+ 
+ struct nvk_cmd_qmd {
+    uint64_t addr;
+-   void *map;
+ 
+    /** Link in nvk_cmd_pool::free_qmd or nvk_cmd_buffer::owned_qmd */
+    struct list_head link;
+diff --git a/src/nouveau/vulkan/nvk_device.c b/src/nouveau/vulkan/nvk_device.c
+index 55c3279ef4d..d533cfec481 100644
+--- a/src/nouveau/vulkan/nvk_device.c
++++ b/src/nouveau/vulkan/nvk_device.c
+@@ -369,15 +369,19 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
+       if (result != VK_SUCCESS)
+          goto fail_nvkmd;
+ 
+-      result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &pdev->vk.base,
+-                                          0x1000, 0, NVKMD_MEM_LOCAL,
+-                                          NVKMD_MEM_MAP_WR, &dev->zero_page);
++      /* The zero page is video memory the CPU never maps; it is zeroed
++       * through the upload queue, which every queue submission waits for.
++       */
++      result = nvkmd_dev_alloc_mem(dev->nvkmd, &pdev->vk.base,
++                                   0x1000, 0, NVKMD_MEM_LOCAL,
++                                   &dev->zero_page);
+       if (result != VK_SUCCESS)
+          goto fail_upload;
+ 
+-      memset(dev->zero_page->map, 0, 0x1000);
+-      nvkmd_mem_sync_map_to_gpu(dev->zero_page, 0, 0x1000);
+-      nvkmd_mem_unmap(dev->zero_page, 0);
++      result = nvk_upload_queue_fill(dev, &dev->upload,
++                                     dev->zero_page->va->addr, 0, 0x1000);
++      if (result != VK_SUCCESS)
++         goto fail_zero_page;
+ 
+       result = nvk_descriptor_table_init(dev, &dev->images,
+                                          sizeof(struct nil_descriptor),
+@@ -457,8 +461,9 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
+          goto fail_shader_heap;
+ 
+       if (pdev->info.cls_eng3d < MAXWELL_B) {
++         /* QMDs are written by the GPU (nvk_cmd_upload_qmd()) */
+          result = nvk_heap_init(dev, &dev->qmd_heap,
+-                                NVKMD_MEM_LOCAL, NVKMD_MEM_MAP_WR,
++                                NVKMD_MEM_LOCAL, 0 /* map_flags */,
+                                 0 /* overalloc */, false /* contiguous */);
+          if (result != VK_SUCCESS)
+             goto fail_event_heap;

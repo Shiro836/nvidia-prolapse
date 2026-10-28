@@ -259,6 +259,15 @@ NVK_PATCHES = (
     # (NVKMD_MEM_POOL_BLOCK); the barrier after the copy and the end of the
     # command buffer wait for that counter instead of idling the engine.
     "nvk-compute-queue-copy-memory-indirect.patch",
+    # No CPU writes into driver-owned video memory through BAR1, as the
+    # proprietary driver: system-memory host-visible type first, texture and
+    # sampler headers written through the upload queue, CPU-written pools in
+    # system memory.
+    "nvk-cpu-written-memory-placement.patch",
+    # Command memory: data the GPU reads (root tables, QMDs, push descriptor
+    # sets) written by the GPU with inline-to-memory into video memory the
+    # CPU never maps; CPU uploads in system memory.
+    "nvk-gpu-written-command-memory.patch",
 )
 
 NVK_PATCH_LIST = [HERE / name for name in NVK_PATCHES]
