@@ -28,8 +28,10 @@ def generate():
     version = subprocess.run([tool, "--version"], capture_output=True, text=True, check=True).stdout.split()
     if version != ["cbindgen", CBINDGEN_VERSION]:
         sys.exit(f"gen-rm-header: need cbindgen {CBINDGEN_VERSION}, found {' '.join(version)}")
+    # cbindgen reads the crate graph through `cargo metadata`: run it in the workspace so cargo is the
+    # toolchain rust-toolchain.toml pins. No clang is involved.
     run = subprocess.run([tool, "--quiet", "--config", str(CRATE / "cbindgen.toml"), str(CRATE)],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, cwd=ROOT)
     if run.returncode != 0:
         sys.exit(f"gen-rm-header: cbindgen failed:\n{run.stderr}")
     return run.stdout

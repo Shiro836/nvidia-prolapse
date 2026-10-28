@@ -11,6 +11,13 @@ width and on configuration defines such as HAVE_FUTEX. Android targets add the N
 own bindgen runs do (mesa/build.py BINDGEN_EXTRA_CLANG_ARGS). bindgen is the one Mesa's Rust build pins
 (build/nak-tools, installed by mesa/compiler/build.py --tools-only; BINDGEN=<path> overrides it); the
 version is checked so that every checkout generates the same bytes.
+
+bindgen's other inputs are pinned too, so that a difference means stale bindings and nothing else:
+libclang and the clang whose builtin headers and search paths bindgen adds are the pinned NDK's
+(clang-sys otherwise picks the newest libclang.so and the first clang on PATH), rustfmt is the
+toolchain's from rust-toolchain.toml, and BINDGEN_EXTRA_CLANG_ARGS* from the caller are dropped.
+The host target still reads the host's libc and libdrm headers: those are the headers the host
+NVK build compiles against.
 """
 import argparse
 import json
@@ -72,6 +79,20 @@ def nvkmd_flags(build):
     return flags
 
 
+def pinned_env():
+    """The environment for bindgen: every input that is not the headers comes from a pinned source."""
+    libclang = NDK / "lib/libclang.so"
+    clang = NDK / "bin/clang"
+    for path in (libclang, clang):
+        if not path.exists():
+            sys.exit(f"gen-nvkmd-bindings: no {path}; run mesa/build.py once to download the NDK")
+    env = {name: value for name, value in os.environ.items() if not name.startswith("BINDGEN_EXTRA_CLANG_ARGS")}
+    env["LIBCLANG_PATH"] = str(libclang.parent)
+    env["CLANG_PATH"] = str(clang)
+    env["RUSTUP_TOOLCHAIN"] = RUST_TARGET
+    return env
+
+
 def generate(tool, target, build):
     module, clang_target, triple = TARGETS[target]
     flags = nvkmd_flags(build)
@@ -91,8 +112,7 @@ def generate(tool, target, build):
     if triple:
         command += [f"--sysroot={NDK}/sysroot", "-isystem", f"{NDK}/sysroot/usr/include/{triple}",
                     "-D__ANDROID_API__=33"]
-    # bindgen formats with rustfmt; run in the workspace so it is the pinned toolchain's.
-    run = subprocess.run(command, capture_output=True, text=True, cwd=ROOT)
+    run = subprocess.run(command, capture_output=True, text=True, cwd=ROOT, env=pinned_env())
     if run.returncode != 0:
         sys.exit(f"gen-nvkmd-bindings: bindgen failed for {target}:\n{run.stderr}")
     return module, run.stdout
