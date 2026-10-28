@@ -2,7 +2,7 @@
 # Every member uses `[lints] workspace = true` and `edition.workspace = true`.
 [workspace]
 resolver = "3"
-members = ["nv-ffi", "nvkmd-rm", "nvkmd-rm-logic", "nvkmd-sys", "rm", "rm-abi", "rm-core", "rm-sys", "video"]
+members = ["nv-ffi", "nvkmd-harness", "nvkmd-rm", "nvkmd-rm-logic", "nvkmd-sys", "rm", "rm-abi", "rm-core", "rm-sys", "video"]
 
 [workspace.package]
 edition = "2024"

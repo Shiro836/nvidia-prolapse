@@ -1,0 +1,27 @@
+[package]
+name = "nvkmd-harness"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Offline differential harness: drives an nvkmd backend through Mesa's nvkmd interface against a fake RM and records its calls"
+
+[[bin]]
+name = "nvkmd-harness"
+required-features = ["mesa"]
+
+[features]
+# The binary statically links Mesa's host NVK archives and one nvkmd backend;
+# mesa/tests/run-nvkmd-harness.py builds them and passes the link arguments
+# (NVKMD_HARNESS_LINK). Without that the binary cannot link, so plain
+# `cargo build`/`cargo test` skip it.
+mesa = []
+
+[dependencies]
+nv-rm-abi = { path = "../rm-abi" }
+nv-rm-core = { path = "../rm-core" }
+nvkmd-sys = { path = "../nvkmd-sys" }
+
+[lints]
+workspace = true

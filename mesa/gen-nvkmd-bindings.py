@@ -42,8 +42,9 @@ TARGETS = {
 }
 
 # What the backend implements (the nvkmd vtables, vk_sync_type), fills (nv_device_info), recovers its
-# objects from (nvk_device, vk_device's loss hooks) and calls (the functions below). Everything these
-# reach is generated too; vk_device's other members are left opaque.
+# objects from (nvk_device, vk_device's loss hooks) and calls (the functions below), plus the entry the
+# offline harness (nvkmd-harness) drives it through. Everything these reach is generated too;
+# vk_device's other members are left opaque.
 ALLOWLIST_TYPES = [
     "nvkmd_.*", "vk_sync", "vk_sync_type", "vk_sync_wait", "vk_sync_signal", "vk_sync_features",
     "vk_sync_wait_flags", "vk_sync_flags", "nv_device_info", "nv_zcull_device_info", "util_vma_heap",
@@ -54,7 +55,10 @@ ALLOWLIST_FUNCTIONS = [
     "vk_sync_wait_many", "vk_sync_signal", "util_vma_heap_init", "util_vma_heap_finish",
     "util_vma_heap_alloc", "util_vma_heap_alloc_addr", "util_vma_heap_free", "nv_device_info_init_shared_mem_sizes",
     "util_cache_granularity", "__vk_errorf", "_vk_device_set_lost", "drmGetVersion", "drmFreeVersion",
+    "nvkmd_try_create_pdev_for_drm", "open", "close", "fstat",
 ]
+# libdrm's device-record constants (xf86drm.h macros).
+ALLOWLIST_VARS = ["DRM_NODE_RENDER", "DRM_NODE_MAX", "DRM_BUS_PCI"]
 OPAQUE_TYPES = ["vk_device", "vk_object_base", "vk_physical_device", "vk_instance", "list_head"]
 
 
@@ -106,6 +110,8 @@ def generate(tool, target, build):
         command += ["--allowlist-type", name]
     for name in ALLOWLIST_FUNCTIONS:
         command += ["--allowlist-function", name]
+    for name in ALLOWLIST_VARS:
+        command += ["--allowlist-var", name]
     for name in OPAQUE_TYPES:
         command += ["--opaque-type", name]
     command += ["--", f"--target={clang_target}"] + flags

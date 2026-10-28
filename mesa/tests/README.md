@@ -1,5 +1,25 @@
 # Offline Mesa transport regression
 
+## Differential harness of the nvkmd backends
+
+```sh
+python3 mesa/tests/run-nvkmd-harness.py            # C and Rust backend, call logs compared
+python3 mesa/tests/run-nvkmd-harness.py --backend c
+```
+
+`nvkmd-harness` (a workspace crate) drives a backend only through Mesa's
+public nvkmd interface: `nvkmd_try_create_pdev_for_drm`, the ops tables and
+the hooks a backend installs in a `vk_device`. It is linked against the host
+NVK build of each backend (`build/nvk-host`, `build/nvk-host-rust`) with
+libc's render-node and allocation calls, libdrm and Mesa's diagnostic sinks
+replaced, and a fake RM. Every RM, render-node and libdrm call is logged; the
+two backends' logs must be identical, suite by suite. Suites: `pdev`
+(probing, refusals, failure cleanup, the filled device info and sync types,
+KMD device creation) and `loss` (loss publication through the hooks and their
+removal before the RM device closes).
+
+## Preflight harness of the C backend
+
 Run from the repository root after configuring the pinned host Mesa build:
 
 ```sh

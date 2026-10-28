@@ -54,6 +54,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nvkmd-harness"
+version = "0.1.0"
+dependencies = [
+ "nv-rm-abi",
+ "nv-rm-core",
+ "nvkmd-sys",
+]
+
+[[package]]
 name = "nvkmd-rm"
 version = "0.1.0"
 dependencies = [

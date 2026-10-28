@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /* The Mesa interfaces of the nvkmd backend, for mesa/gen-nvkmd-bindings.py. */
+#include <fcntl.h>
 #include <stddef.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <xf86drm.h>
 
 #include "nvk_device.h"
@@ -15,7 +18,9 @@
 /* The members the backend reaches inside structures it otherwise treats as
  * opaque: the nvkmd device of an NVK device (nvk_device.h), the loss state
  * and hooks of a vk_device (vk_device.h), and the device of a log object
- * (vk_object.h). */
+ * (vk_object.h). The offline harness that drives the backend through these
+ * interfaces also initialises a vk_device's queue list, which Mesa's loss
+ * report walks (vk_device.c _vk_device_report_lost). */
 enum nvkmd_sys_layout {
    NVKMD_SYS_NVK_DEVICE_VK = offsetof(struct nvk_device, vk),
    NVKMD_SYS_NVK_DEVICE_NVKMD = offsetof(struct nvk_device, nvkmd),
@@ -23,6 +28,7 @@ enum nvkmd_sys_layout {
    NVKMD_SYS_VK_DEVICE_NOTIFY_LOST = offsetof(struct vk_device, notify_lost),
    NVKMD_SYS_VK_DEVICE_NOTIFY_LOST_DATA = offsetof(struct vk_device, notify_lost_data),
    NVKMD_SYS_VK_DEVICE_CHECK_STATUS = offsetof(struct vk_device, check_status),
+   NVKMD_SYS_VK_DEVICE_QUEUES = offsetof(struct vk_device, queues),
    NVKMD_SYS_VK_OBJECT_BASE_DEVICE = offsetof(struct vk_object_base, device),
 };
 
