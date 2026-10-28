@@ -426,7 +426,7 @@ impl Client {
                     return Err(error);
                 }
             };
-        Ok(Rc::new(Device {
+        let device = Rc::new(Device {
             client: Rc::clone(self),
             handle,
             subdevice,
@@ -437,11 +437,16 @@ impl Client {
             generic_kind: Cell::new(None),
             cpu_maps: Rc::new(crate::cpu_map_cache::Registry::default()),
             cpu_map_failed: Cell::new(false),
+            channel_placement: Cell::new(None),
             bar_budget: Rc::new(BarBudget {
                 used: Cell::new(0),
                 limit: card.framebuffer_size,
             }),
-        }))
+        });
+        // On an error the device drops here, freeing its RM objects.
+        let placement = device.query_channel_placement()?;
+        device.channel_placement.set(Some(placement));
+        Ok(device)
     }
 }
 /// Borrowed control descriptor + client handle + exact ABI profile. Copy/Send:
@@ -465,6 +470,41 @@ impl ControlPort {
                 .next()
                 .expect("the compat table lists at least one release"),
         }
+    }
+    /// An RM control in the pointer-table form `{NvU32 size; NvP64 table}`
+    /// (e.g. NV2080_CTRL_BUS_GET_INFO_PARAMS, NV0080_CTRL_FB_GET_CAPS_PARAMS):
+    /// that parameter block has the same 16-byte layout on every release and
+    /// both Android ABIs, so it is sent without the per-release layout table.
+    /// RM reads and writes `table` during the call.
+    pub(crate) fn control_table<E: FromBytes + IntoBytes + Immutable>(
+        &self,
+        object: RmHandle,
+        command: u32,
+        table: &mut [E],
+    ) -> Result<()> {
+        let mut parameters = abi::TableParams {
+            size: u32::try_from(table.len())
+                .map_err(|e| Error::Contract(format!("RM control table too long: {e}")))?,
+            padding: 0,
+            table: u64_from_usize(table.as_mut_ptr().expose_provenance()),
+        };
+        let mut call = abi::Control {
+            client: self.root.get(),
+            object: object.get(),
+            command,
+            parameters: u64_from_usize(std::ptr::from_mut(&mut parameters).expose_provenance()),
+            size: wire_size(size_of::<abi::TableParams>())?,
+            ..Default::default()
+        };
+        exchange_wire(
+            self.fd,
+            0x2a,
+            self.compat,
+            "NVOS54_PARAMETERS",
+            &mut call,
+            "RM control",
+        )?;
+        status("RM control", call.status)
     }
     pub(crate) fn control<T: FromBytes + IntoBytes + Immutable>(
         &self,
@@ -546,6 +586,9 @@ pub struct Device {
     generic_kind: Cell<Option<u32>>,
     cpu_maps: Rc<crate::cpu_map_cache::Registry<Mapping>>,
     cpu_map_failed: Cell<bool>,
+    /// Where this GPU's channel buffers go, decided once at creation
+    /// ([`channel_buffer::Placement`]).
+    channel_placement: Cell<Option<channel_buffer::Placement>>,
 }
 impl Device {
     pub(crate) fn cpu_mapping_failed(&self) -> bool {
@@ -740,10 +783,130 @@ impl Device {
             owned: true,
             charge_bar: false,
             _mapping_owner: None,
+            nvos33_flags: 0,
             compressed: false,
             pages: PhysicalPages::Huge2M,
         });
         Ok((memory, grant))
+    }
+    /// The GPFIFO ring of a channel with a usermode doorbell: system memory,
+    /// GPU-uncached, write-combined or write-back ([`channel_buffer`]), format
+    /// 0, alignment 0, CPU-mapped through `/dev/nvidiactl` with RM's default
+    /// mapping (NVOS33 flags 0).
+    /// Read the inputs of the channel-buffer placement from RM and run the
+    /// write-combine probe ([`channel_buffer`]).
+    fn query_channel_placement(self: &Rc<Self>) -> Result<channel_buffer::Placement> {
+        let port = self.client.port();
+        // NV2080_CTRL_CMD_BUS_GET_INFO, entries {index, data} (ctrl2080bus.h).
+        let mut bus = [
+            [channel_buffer::BUS_NONCOHERENT_DMA_FLAGS, 0],
+            [channel_buffer::BUS_GPU_GART_SIZE, 0],
+            [channel_buffer::BUS_GPU_GART_SIZE_HI, 0],
+        ];
+        port.control_table(self.subdevice, 0x2080_1802, &mut bus)?;
+        // NV0080_CTRL_CMD_FB_GET_CAPS, NV0080_CTRL_FB_CAPS_TBL_SIZE bytes.
+        let mut caps = [0u8; 3];
+        port.control_table(self.handle, 0x0080_1301, &mut caps)?;
+        // NV2080_CTRL_CMD_FB_GET_INFO {index, data}, NV2080_CTRL_FB_INFO_INDEX_IS_ZERO_FB.
+        let mut fb = [channel_buffer::FB_IS_ZERO_FB, 0u32];
+        let mut query = [1u64, u64_from_usize(fb.as_mut_ptr().expose_provenance())];
+        self.client
+            .control(self.subdevice, 0x2080_1301, &mut query)?;
+        let inputs = channel_buffer::Inputs {
+            noncoherent_dma_flags: bus[0][1],
+            gart_size_mib: (u64::from(bus[2][1]) << 32) | u64::from(bus[1][1]),
+            fb_caps0: caps[0],
+            zero_fb: fb[1] != 0,
+        };
+        channel_buffer::placement(inputs, |attr| self.probe_sysmem(attr))
+    }
+    /// One page of system memory with NVOS32 `attr`, freed at once: whether RM
+    /// grants that coherency. An RM refusal is `false`; a failed ioctl or free
+    /// is an error.
+    fn probe_sysmem(self: &Rc<Self>, attr: u32) -> Result<bool> {
+        let size = self.client.cpu_page_size;
+        let mut parameters = abi::MemoryAlloc {
+            owner: self.client.root.get(),
+            flags: channel_buffer::PROBE_FLAGS,
+            attr,
+            size: u64_from_usize(size),
+            limit: u64_from_usize(size) - 1,
+            ..Default::default()
+        };
+        match self
+            .client
+            .allocate(self.handle, ClassId::new(0x3e), &mut parameters)
+        {
+            Ok(handle) => {
+                self.client.free(self.handle, handle)?;
+                Ok(true)
+            }
+            Err(Error::Rm { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    fn channel_placement(&self) -> Result<channel_buffer::Placement> {
+        self.channel_placement
+            .get()
+            .ok_or_else(|| Error::Contract("channel placement not queried".into()))
+    }
+    pub(crate) fn allocate_gpfifo_ring(
+        self: &Rc<Self>,
+        requested_size: usize,
+    ) -> Result<Rc<Memory>> {
+        let placement = self.channel_placement()?;
+        self.allocate_channel_buffer(requested_size, ClassId::new(0x3e), placement.ring, 0, false)
+    }
+    /// The USERD of a channel with a usermode doorbell ([`channel_buffer`]):
+    /// video memory at RM's default page size and physicality, CPU-mapped
+    /// through BAR1 with NVOS33 MAPPING DIRECT requested (flags 0x8000, as the
+    /// NVIDIA driver maps its USERD block), or on a GPU without framebuffer
+    /// system memory mapped like the ring.
+    pub(crate) fn allocate_userd(self: &Rc<Self>) -> Result<Rc<Memory>> {
+        match self.channel_placement()?.userd {
+            channel_buffer::Userd::Video(request) => {
+                self.allocate_channel_buffer(4096, ClassId::new(0x40), request, 0x8000, true)
+            }
+            channel_buffer::Userd::System(request) => {
+                self.allocate_channel_buffer(4096, ClassId::new(0x3e), request, 0, false)
+            }
+        }
+    }
+    fn allocate_channel_buffer(
+        self: &Rc<Self>,
+        requested_size: usize,
+        class: ClassId,
+        request: channel_buffer::Request,
+        nvos33_flags: u32,
+        charge_bar: bool,
+    ) -> Result<Rc<Memory>> {
+        let size = platform::round_to_cpu_pages(requested_size, self.client.cpu_page_size)
+            .map_err(|e| Error::Io("round RM allocation to CPU pages", e))?;
+        let mut parameters = abi::MemoryAlloc {
+            owner: self.client.root.get(),
+            memory_type: 0,
+            flags: request.flags,
+            attr: request.attr,
+            attr2: request.attr2,
+            format: 0,
+            size: u64_from_usize(size),
+            alignment: 0,
+            limit: u64_from_usize(size) - 1,
+            ..Default::default()
+        };
+        let handle = self.client.allocate(self.handle, class, &mut parameters)?;
+        Ok(Rc::new(Memory {
+            device: Rc::clone(self),
+            handle,
+            parent: self.handle,
+            size,
+            owned: true,
+            charge_bar,
+            _mapping_owner: None,
+            nvos33_flags,
+            compressed: false,
+            pages: PhysicalPages::Small4K,
+        }))
     }
     fn allocate_placed(
         self: &Rc<Self>,
@@ -845,6 +1008,7 @@ impl Device {
             owned: true,
             charge_bar: !system,
             _mapping_owner: None,
+            nvos33_flags: 0,
             compressed: compressible && compression_granted(parameters.attr),
             pages: if compressible {
                 PhysicalPages::Big64K
@@ -894,6 +1058,251 @@ pub(crate) mod pool_block {
     pub(crate) const ATTR2: u32 = 1 | (1 << 2) | (1 << 20);
     /// The granted attr must keep these fields as requested.
     pub(crate) const ATTR_CHECKED: u32 = (3 << 23) | (3 << 25) | (3 << 27) | (3 << 12);
+}
+/// Placement of the channel buffers of a GPU with a usermode doorbell, as the
+/// NVIDIA driver decides it (libnvidia-eglcore.so.615.78.08: device init
+/// E 0x968bc0, channel buffers E 0x9e0db0, allocator from E 0xa40622; no branch
+/// on the GPU generation). NVOS32 fields from public nvos.h, RM inputs from
+/// ctrl2080bus.h, ctrl0080fb.h and ctrl2080fb.h.
+///
+/// The NVIDIA driver also reads two registry keys here ("91851354", a sysmem
+/// coherency override, and "ForceSysmemBuffers"); this driver has no registry,
+/// which is their default (no override, video-memory USERD).
+pub(crate) mod channel_buffer {
+    use super::Result;
+
+    /// One NVOS32 request: flags, attr, attr2.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Request {
+        pub(crate) flags: u32,
+        pub(crate) attr: u32,
+        pub(crate) attr2: u32,
+    }
+    /// Where USERD goes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Userd {
+        /// Video memory (NV01_MEMORY_LOCAL_USER), mapped through BAR1.
+        Video(Request),
+        /// System memory (NV01_MEMORY_SYSTEM), on a GPU without framebuffer.
+        System(Request),
+    }
+    /// The decision for one GPU.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Placement {
+        pub(crate) ring: Request,
+        pub(crate) userd: Userd,
+    }
+    /// The RM values the decision reads.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct Inputs {
+        /// NV2080_CTRL_BUS_INFO_INDEX_NONCOHERENT_DMA_FLAGS.
+        pub(crate) noncoherent_dma_flags: u32,
+        /// NV2080_CTRL_BUS_INFO_INDEX_GPU_GART_SIZE{,_HI}, in MiB.
+        pub(crate) gart_size_mib: u64,
+        /// Byte 0 of the NV0080_CTRL_CMD_FB_GET_CAPS table.
+        pub(crate) fb_caps0: u8,
+        /// NV2080_CTRL_FB_INFO_INDEX_IS_ZERO_FB.
+        pub(crate) zero_fb: bool,
+    }
+    pub(crate) const BUS_NONCOHERENT_DMA_FLAGS: u32 = 0xc;
+    pub(crate) const BUS_GPU_GART_SIZE: u32 = 0xd;
+    pub(crate) const BUS_GPU_GART_SIZE_HI: u32 = 0x32;
+    /// NV2080_CTRL_BUS_INFO_NONCOHERENT_DMA_FLAGS_GPUGART (2:2).
+    const GPUGART: u32 = 1 << 2;
+    /// NV0080_CTRL_FB_CAPS_SUPPORT_CACHED_SYSMEM (byte 0, 0x08).
+    const SUPPORT_CACHED_SYSMEM: u8 = 0x08;
+    pub(crate) const FB_IS_ZERO_FB: u32 = 0x36;
+    /// IGNORE_BANK_PLACEMENT | FORCE_MEM_GROWS_DOWN | FORCE_ALIGN_HOST_PAGE |
+    /// MEMORY_HANDLE_PROVIDED.
+    const FLAGS: u32 = 0x1 | 0x4 | 0x8 | 0x4000;
+    /// | PERSISTENT_VIDMEM.
+    const PERSISTENT_VIDMEM: u32 = 0x1_0000;
+    /// LOCATION (26:25) PCI.
+    const PCI: u32 = 1 << 25;
+    /// COHERENCY (31:29) CACHED, WRITE_COMBINE, WRITE_BACK.
+    const CACHED: u32 = 1 << 29;
+    const WRITE_COMBINE: u32 = 2 << 29;
+    const WRITE_BACK: u32 = 5 << 29;
+    /// PHYSICALITY (28:27) NONCONTIGUOUS.
+    const NONCONTIGUOUS: u32 = 1 << 27;
+    /// ATTR2 GPU_CACHEABLE (3:2) YES / NO.
+    const GPU_CACHED: u32 = 1 << 2;
+    const GPU_UNCACHED: u32 = 2 << 2;
+    /// NVOS32 flags of the probe allocations: MEMORY_HANDLE_PROVIDED.
+    pub(crate) const PROBE_FLAGS: u32 = 0x4000;
+    /// The probe's two requests: one noncontiguous page, WRITE_COMBINE first,
+    /// then CACHED (the NVIDIA driver's NVOS02 flags 0x2010 / 0x1010,
+    /// E 0x969d2d / E 0x969d66, as NVOS32 attributes).
+    pub(crate) const PROBE_WRITE_COMBINE: u32 = PCI | NONCONTIGUOUS | WRITE_COMBINE;
+    pub(crate) const PROBE_CACHED: u32 = PCI | NONCONTIGUOUS | CACHED;
+
+    /// Decide the placement. `probe(attr)` allocates and frees one page of
+    /// system memory with `attr` and says whether RM granted it.
+    ///
+    /// The ring is write-combined system memory when RM reports noncoherent
+    /// GPUGART and, with a non-zero GART, grants a write-combined page;
+    /// otherwise it is WRITE_BACK system memory (E 0x969cd2..0x969dce, then the
+    /// allocator's `testb $0x1,0x2b200` at E 0xa40e10). The CACHED probe after
+    /// a refused WRITE_COMBINE one does not change the outcome; it is kept so
+    /// RM sees the same requests. USERD is video memory, GPU-cached only with
+    /// SUPPORT_CACHED_SYSMEM (E 0xa406ee `testb $0x8,0x160`), or, on a GPU
+    /// without framebuffer, system memory with the ring's request.
+    pub(crate) fn placement(
+        inputs: Inputs,
+        mut probe: impl FnMut(u32) -> Result<bool>,
+    ) -> Result<Placement> {
+        let mut write_combine = inputs.noncoherent_dma_flags & GPUGART != 0;
+        // GART size in bytes is MiB << 20 in 64 bits; only zero matters.
+        if inputs.gart_size_mib.wrapping_shl(20) != 0 && !probe(PROBE_WRITE_COMBINE)? {
+            probe(PROBE_CACHED)?;
+            write_combine = false;
+        }
+        let ring = Request {
+            flags: FLAGS,
+            attr: PCI
+                | if write_combine {
+                    WRITE_COMBINE
+                } else {
+                    WRITE_BACK
+                },
+            attr2: GPU_UNCACHED,
+        };
+        let userd = if inputs.zero_fb {
+            Userd::System(ring)
+        } else {
+            Userd::Video(Request {
+                flags: FLAGS | PERSISTENT_VIDMEM,
+                attr: 0,
+                attr2: if inputs.fb_caps0 & SUPPORT_CACHED_SYSMEM != 0 {
+                    GPU_CACHED
+                } else {
+                    GPU_UNCACHED
+                },
+            })
+        };
+        Ok(Placement { ring, userd })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// GB202 (615.78.08): NONCOHERENT_DMA_FLAGS 5, GART 0x20 << 32 MiB,
+        /// SUPPORT_CACHED_SYSMEM, framebuffer present.
+        const GB202: Inputs = Inputs {
+            noncoherent_dma_flags: 5,
+            gart_size_mib: 0x20 << 32,
+            fb_caps0: 0x08,
+            zero_fb: false,
+        };
+        fn run(inputs: Inputs, grants: &[bool]) -> (Placement, Vec<u32>) {
+            let mut probes = Vec::new();
+            let placement = placement(inputs, |attr| {
+                probes.push(attr);
+                Ok(grants[probes.len() - 1])
+            })
+            .expect("the probe does not fail");
+            (placement, probes)
+        }
+        #[test]
+        fn measured_gpu_gets_the_measured_requests() {
+            let (p, probes) = run(GB202, &[true]);
+            assert_eq!(probes, [PROBE_WRITE_COMBINE]);
+            assert_eq!(
+                (p.ring.flags, p.ring.attr, p.ring.attr2),
+                (0x400d, 0x4200_0000, 0x8)
+            );
+            assert_eq!(
+                p.userd,
+                Userd::Video(Request {
+                    flags: 0x1_400d,
+                    attr: 0,
+                    attr2: 0x4
+                })
+            );
+        }
+        #[test]
+        fn userd_is_gpu_uncached_without_cached_sysmem() {
+            let (p, _) = run(
+                Inputs {
+                    fb_caps0: 0xf7,
+                    ..GB202
+                },
+                &[true],
+            );
+            assert_eq!(
+                p.userd,
+                Userd::Video(Request {
+                    flags: 0x1_400d,
+                    attr: 0,
+                    attr2: 0x8
+                })
+            );
+        }
+        #[test]
+        fn refused_write_combine_probe_makes_the_ring_write_back() {
+            let (p, probes) = run(GB202, &[false, true]);
+            assert_eq!(probes, [PROBE_WRITE_COMBINE, PROBE_CACHED]);
+            assert_eq!((p.ring.attr, p.ring.attr2), (0xa200_0000, 0x8));
+            let (p, _) = run(GB202, &[false, false]);
+            assert_eq!(p.ring.attr, 0xa200_0000);
+        }
+        #[test]
+        fn no_gart_skips_the_probe_and_no_gpugart_means_write_back() {
+            let (p, probes) = run(
+                Inputs {
+                    gart_size_mib: 0,
+                    ..GB202
+                },
+                &[],
+            );
+            assert!(probes.is_empty());
+            assert_eq!(p.ring.attr, 0x4200_0000);
+            // 2^44 MiB << 20 leaves 64 bits: the same as no GART.
+            let (_, probes) = run(
+                Inputs {
+                    gart_size_mib: 1 << 44,
+                    ..GB202
+                },
+                &[],
+            );
+            assert!(probes.is_empty());
+            let (p, _) = run(
+                Inputs {
+                    noncoherent_dma_flags: 1,
+                    ..GB202
+                },
+                &[true],
+            );
+            assert_eq!(p.ring.attr, 0xa200_0000);
+        }
+        #[test]
+        fn zero_fb_puts_userd_in_system_memory_like_the_ring() {
+            let (p, _) = run(
+                Inputs {
+                    zero_fb: true,
+                    ..GB202
+                },
+                &[true],
+            );
+            assert_eq!(p.userd, Userd::System(p.ring));
+            let (p, _) = run(
+                Inputs {
+                    zero_fb: true,
+                    ..GB202
+                },
+                &[false, false],
+            );
+            assert_eq!(
+                p.userd,
+                Userd::System(Request {
+                    flags: 0x400d,
+                    attr: 0xa200_0000,
+                    attr2: 0x8
+                })
+            );
+        }
+    }
 }
 const NONCONTIG_FROM: usize = 16 << 20;
 /// NVOS32 attr for a compressible device-local request (nvos.h fields:
@@ -947,6 +1356,7 @@ impl Device {
             owned: true,
             charge_bar: false,
             _mapping_owner: None,
+            nvos33_flags: 0,
             compressed: false,
             pages: PhysicalPages::Small4K,
         })
@@ -972,6 +1382,7 @@ impl Device {
             owned: false,
             charge_bar: true,
             _mapping_owner: Some(owner),
+            nvos33_flags: 0,
             compressed: false,
             pages: PhysicalPages::Small4K,
         })
@@ -1001,6 +1412,8 @@ pub struct Memory {
     charge_bar: bool,
     // USERD belongs to its channel; retain that owner through rollback/quarantine.
     _mapping_owner: Option<Rc<dyn std::any::Any>>,
+    /// NVOS33 flags of a CPU mapping of owned memory (0: RM's defaults).
+    nvos33_flags: u32,
     /// RM granted compression (NVOS32 attr COMPR != NONE on return) for an
     /// allocation that asked for it; only then may a VA carry a compressible kind.
     pub(crate) compressed: bool,
@@ -1026,6 +1439,7 @@ impl Memory {
             owned: true,
             charge_bar: !system,
             _mapping_owner: None,
+            nvos33_flags: 0,
             compressed: false,
             pages: PhysicalPages::Small4K,
         })
@@ -1091,7 +1505,11 @@ impl Memory {
                 0
             },
         )?;
-        let flags = if self.owned { 0 } else { 1 << 17 }; // NVOS33 FIFO_MAPPING_ENABLE
+        let flags = if self.owned {
+            self.nvos33_flags
+        } else {
+            1 << 17 // NVOS33 FIFO_MAPPING_ENABLE
+        };
         let space = device.client.address_space(self.handle, flags)?;
         // Each mapping gets a fresh, unregistered fd (O_RDWR | O_CLOEXEC),
         // closed right after mmap: the VMA then pins only that file, never the
@@ -2077,6 +2495,27 @@ mod budget_tests {
             assert_eq!(kernel_used.get(), 0);
             assert_eq!(budget.used.get(), 0);
         }
+    }
+    #[test]
+    #[ignore = "needs an accessible NVIDIA GPU"]
+    fn channel_placement_is_queried_at_device_creation_on_selected_nvidia() {
+        let client = Client::open().unwrap();
+        let card = client
+            .cards()
+            .unwrap()
+            .into_iter()
+            .find(|card| card.pci.vendor == 0x10de)
+            .expect("no NVIDIA card");
+        let device = client.device(card).unwrap();
+        let placement = device.channel_placement().unwrap();
+        eprintln!("device {:04x}: {placement:?}", card.pci.device);
+        assert!(matches!(placement.ring.attr, 0x4200_0000 | 0xa200_0000));
+        let ring = device.allocate_gpfifo_ring(8192).unwrap();
+        let userd = device.allocate_userd().unwrap();
+        ring.map().unwrap().write_u32(0, 1).unwrap();
+        let mut map = userd.map().unwrap();
+        map.write_u32(0x8c, 7).unwrap();
+        assert_eq!(map.read_u32(0x8c).unwrap(), 7);
     }
     #[test]
     #[ignore = "needs an accessible NVIDIA GPU"]

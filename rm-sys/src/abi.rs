@@ -204,6 +204,20 @@ pub struct UnmapMemory {
     pub status: u32,
     pub flags: u32,
 }
+/// The `{NvU32 size; NvP64 table}` parameter block of pointer-table RM
+/// controls (NV2080_CTRL_BUS_GET_INFO_PARAMS, NV0080_CTRL_FB_GET_CAPS_PARAMS,
+/// public ctrl2080bus.h / ctrl0080fb.h): 16 bytes on every target.
+#[repr(C, align(8))]
+#[derive(Default, Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct TableParams {
+    pub size: u32,
+    pub padding: u32,
+    pub table: u64,
+}
+const _: () = {
+    assert!(std::mem::size_of::<TableParams>() == 16);
+    assert!(std::mem::offset_of!(TableParams, table) == 8);
+};
 /// NVOS56_PARAMETERS (public nvos.h, NV04_UPDATE_DEVICE_MAPPING_INFO): the
 /// same layout on every RM release and on both Android targets, since both
 /// addresses are `NvP64` aligned to 8 bytes.

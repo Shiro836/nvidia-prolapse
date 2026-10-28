@@ -1047,7 +1047,7 @@ impl Drop for Subcontext {
 
 pub(crate) struct Queue {
     _events: crate::events::ChannelEvents,
-    userd: Option<rm::Mapping>,
+    userd: Userd,
     channel_class: u32,
     completion: crate::fences::NativeFenceSurface,
     /// Owned for their RM lifetime only (freed by drop, in field order).
@@ -1564,12 +1564,27 @@ impl Queue {
         for offset in (0..48).step_by(4) {
             error_notifier.write_u32(offset, 0)?;
         }
-        let ring_mem = device.allocate_aligned(65536, 4096, true, !modern)?;
+        // With a usermode doorbell the ring is write-combined system memory
+        // and USERD is a separate video-memory object, both as the NVIDIA
+        // driver places them (Device::allocate_gpfifo_ring, allocate_userd).
+        // Before Volta, RM owns USERD (mapped below) and the ring stays
+        // CPU-cached system memory.
+        let ring_bytes = QUEUE_ENTRIES * 8;
+        let ring_mem = if modern {
+            device.allocate_gpfifo_ring(ring_bytes)?
+        } else {
+            device.allocate_aligned(65536, 4096, true, true)?
+        };
         let ring_gpu = space.map(&ring_mem)?;
         let mut ring = ring_mem.map()?;
-        for i in 0..65536 / 4 {
+        for i in 0..ring_mem.size / 4 {
             ring.write_u32(i * 4, 0)?;
         }
+        let userd_mem = if modern {
+            Some(device.allocate_userd()?)
+        } else {
+            None
+        };
         // CPU rewrites the release sequence between submissions. Like Mesa's
         // command streams, this is CPU-cached/GPU-uncached system memory.
         let tail_mem = device.allocate_aligned(QUEUE_ENTRIES * TAIL_STRIDE, 4096, false, true)?;
@@ -1676,9 +1691,9 @@ impl Queue {
             },
             ..Default::default()
         };
-        if modern {
-            params.userd_memory[0] = ring_mem.handle.get();
-            params.userd_offsets[0] = 8192;
+        if let Some(userd) = &userd_mem {
+            params.userd_memory[0] = userd.handle.get();
+            params.userd_offsets[0] = 0;
         }
         let mut dependencies = vec![Rc::clone(&group), Rc::clone(&space.vaspace)];
         if let Some(context) = context {
@@ -1693,10 +1708,9 @@ impl Queue {
         )?;
         let channel_events =
             events.attach_channel(channel.handle, caps.channel, channel.clone())?;
-        let userd = if modern {
-            None
-        } else {
-            Some(device.map_channel_userd(channel.handle, channel.clone())?)
+        let userd = match &userd_mem {
+            Some(memory) => Userd::Owned(memory.map()?),
+            None => Userd::Rm(device.map_channel_userd(channel.handle, channel.clone())?),
         };
         let mut engines = Vec::new();
         for (bit, class) in [
@@ -2235,8 +2249,12 @@ impl Queue {
     }
     /// Publish GP_PUT and ring the doorbell.
     ///
-    /// Volta+ (usermode doorbell): GPFIFO entries and GP_PUT (USERD at ring
-    /// offset 8192) are VRAM written through BAR1 (write-combined). The
+    /// Volta+ (usermode doorbell): GPFIFO entries go to write-combined system
+    /// memory, GP_PUT to the video-memory USERD through BAR1 (write-combined).
+    /// The full barrier before GP_PUT drains the CPU's write-combining buffers,
+    /// so the entries are in memory before the host can see the new GP_PUT
+    /// (the NVIDIA driver's sfence between its GPFIFO stores and the GP_PUT
+    /// store, libnvidia-eglcore.so.615.78.08 E 0xa814a0). The
     /// doorbell must not reach the GPU host before the GP_PUT write is
     /// visible, or the host sees no new work and an idle queue's last batch
     /// is stranded until some later doorbell (measured: with a BAR0 doorbell
@@ -2258,28 +2276,41 @@ impl Queue {
     /// kick; its read-back is retained unchanged.
     fn kick(&mut self) -> Result<()> {
         crate::platform::device_full_barrier();
-        if let Some(userd) = self.userd.as_mut() {
-            userd.write_u32(0x8c, gp_put(self.put))?;
-            crate::platform::device_full_barrier();
-            let _posted_write_flush = userd.read_u32(0x8c)?;
-        } else {
-            let put = gp_put(self.put);
-            self.ring.write_u32(8192 + 0x8c, put)?;
-            crate::platform::device_full_barrier();
-            if !self.bar1_doorbell {
-                let visible = self.ring.read_u32(8192 + 0x8c)?;
-                if visible != put {
-                    return Err(ChannelError::PutReadback { visible, put }.into());
-                }
+        match &mut self.userd {
+            Userd::Rm(userd) => {
+                userd.write_u32(0x8c, gp_put(self.put))?;
                 crate::platform::device_full_barrier();
+                let _posted_write_flush = userd.read_u32(0x8c)?;
+                return Ok(());
             }
-            self.doorbell
-                .as_mut()
-                .ok_or(ChannelError::Doorbell)?
-                .write_u32(0x90, self.token)?;
+            Userd::Owned(userd) => {
+                let put = gp_put(self.put);
+                userd.write_u32(0x8c, put)?;
+                crate::platform::device_full_barrier();
+                if !self.bar1_doorbell {
+                    let visible = userd.read_u32(0x8c)?;
+                    if visible != put {
+                        return Err(ChannelError::PutReadback { visible, put }.into());
+                    }
+                    crate::platform::device_full_barrier();
+                }
+            }
         }
+        self.doorbell
+            .as_mut()
+            .ok_or(ChannelError::Doorbell)?
+            .write_u32(0x90, self.token)?;
         Ok(())
     }
+}
+/// Where a channel's GP_PUT (USERD + 0x8c) is written.
+enum Userd {
+    /// Before Volta: RM's own USERD, mapped through the channel object;
+    /// writing GP_PUT is the kick.
+    Rm(rm::Mapping),
+    /// Volta+: our video-memory USERD, mapped through BAR1; the doorbell
+    /// write follows.
+    Owned(rm::Mapping),
 }
 impl Drop for Queue {
     fn drop(&mut self) {
