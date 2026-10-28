@@ -67,6 +67,9 @@ name = "nvkmd-rm"
 version = "0.1.0"
 dependencies = [
  "nv-ffi",
+ "nv-rm-abi",
+ "nv-rm-core",
+ "nvkmd-rm-logic",
  "nvkmd-sys",
 ]
 

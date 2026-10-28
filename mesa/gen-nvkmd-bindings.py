@@ -53,12 +53,14 @@ ALLOWLIST_TYPES = [
 ALLOWLIST_FUNCTIONS = [
     "nvkmd_mem_init", "nvkmd_dev_alloc_va", "nvkmd_va_bind_mem", "nvkmd_va_free", "nvkmd_va_unbind",
     "vk_sync_wait_many", "vk_sync_signal", "util_vma_heap_init", "util_vma_heap_finish",
-    "util_vma_heap_alloc", "util_vma_heap_alloc_addr", "util_vma_heap_free", "nv_device_info_init_shared_mem_sizes",
+    "util_vma_heap_alloc", "util_vma_heap_alloc_addr", "util_vma_heap_free",
     "util_cache_granularity", "__vk_errorf", "_vk_device_set_lost", "drmGetVersion", "drmFreeVersion",
-    "nvkmd_try_create_pdev_for_drm", "open", "close", "fstat",
+    "nvkmd_try_create_pdev_for_drm", "nvkmd_dev_init", "nvkmd_dev_finish", "nvkmd_mem_finish",
+    "nvkmd_dev_info_init_shared_mem_sizes", "open", "close",
+    "fstat",
 ]
-# libdrm's device-record constants (xf86drm.h macros).
-ALLOWLIST_VARS = ["DRM_NODE_RENDER", "DRM_NODE_MAX", "DRM_BUS_PCI"]
+# libdrm's device-record constants (xf86drm.h) and the open flags of the render node (fcntl.h): macros.
+ALLOWLIST_VARS = ["DRM_NODE_RENDER", "DRM_NODE_MAX", "DRM_BUS_PCI", "O_RDWR", "O_CLOEXEC"]
 OPAQUE_TYPES = ["vk_device", "vk_object_base", "vk_physical_device", "vk_instance", "list_head"]
 
 

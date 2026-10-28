@@ -393,7 +393,7 @@ index 10042cdf106c67ac2dffee90e686bc579fec78e0..8446bfe5f3a5004eff2b33888a276745
        .has_alloc_tiled = nouveau_ws_device_has_tiled_bo(ws_dev),
        .has_map_fixed = true,
 diff --git a/src/nouveau/vulkan/nvkmd/nvkmd.c b/src/nouveau/vulkan/nvkmd/nvkmd.c
-index c6ffb9479fa64968710422f409f1d8e8735f24b1..cb06c526d4538a37cbe19e2ce7788f8432d1968e 100644
+index c6ffb9479fa64968710422f409f1d8e8735f24b1..eb4ba7d53690a4a742e855b391d30dbadcc348bb 100644
 --- a/src/nouveau/vulkan/nvkmd/nvkmd.c
 +++ b/src/nouveau/vulkan/nvkmd/nvkmd.c
 @@ -5,6 +5,7 @@
@@ -404,7 +404,41 @@ index c6ffb9479fa64968710422f409f1d8e8735f24b1..cb06c526d4538a37cbe19e2ce7788f84
  #include "nv_push.h"
  #include "util/cache_ops.h"
  #include "util/u_math.h"
-@@ -88,7 +89,7 @@ nvkmd_try_create_pdev_for_drm(struct _drmDevice *drm_device,
+@@ -82,13 +83,41 @@ nvkmd_mem_init(struct nvkmd_dev *dev,
+    simple_mtx_init(&mem->map_mutex, mtx_plain);
+ }
+ 
++/* Out-of-line forms of inline Mesa helpers a backend needs (the list and
++ * mutex setup of nvkmd_dev and nvkmd_mem, nv_device_info's shared memory
++ * configurations), for backends that cannot call static inline functions. */
++void
++nvkmd_dev_init(struct nvkmd_dev *dev)
++{
++   list_inithead(&dev->mems);
++   simple_mtx_init(&dev->mems_mutex, mtx_plain);
++}
++
++void
++nvkmd_dev_finish(struct nvkmd_dev *dev)
++{
++   simple_mtx_destroy(&dev->mems_mutex);
++}
++
++void
++nvkmd_mem_finish(struct nvkmd_mem *mem)
++{
++   simple_mtx_destroy(&mem->map_mutex);
++}
++
++void
++nvkmd_dev_info_init_shared_mem_sizes(struct nv_device_info *info)
++{
++   nv_device_info_init_shared_mem_sizes(info);
++}
++
+ VkResult
+ nvkmd_try_create_pdev_for_drm(struct _drmDevice *drm_device,
+                               struct vk_object_base *log_obj,
                                enum nvk_debug debug_flags,
                                struct nvkmd_pdev **pdev_out)
  {
@@ -413,7 +447,7 @@ index c6ffb9479fa64968710422f409f1d8e8735f24b1..cb06c526d4538a37cbe19e2ce7788f84
                                          debug_flags, pdev_out);
  }
  
-@@ -416,6 +417,8 @@ nvkmd_mem_map(struct nvkmd_mem *mem, struct vk_object_base *log_obj,
+@@ -416,6 +445,8 @@ nvkmd_mem_map(struct nvkmd_mem *mem, struct vk_object_base *log_obj,
           result = mem->ops->map(mem, log_obj, NVKMD_MEM_MAP_RDWR, NULL, &map);
           if (result == VK_SUCCESS)
              mem->map = map;
@@ -423,7 +457,7 @@ index c6ffb9479fa64968710422f409f1d8e8735f24b1..cb06c526d4538a37cbe19e2ce7788f84
           map = mem->map;
        }
 diff --git a/src/nouveau/vulkan/nvkmd/nvkmd.h b/src/nouveau/vulkan/nvkmd/nvkmd.h
-index 5e56f4ed36cd5bdd45544bdeb370321f4d0cc3a1..3c776c78a0ab17b3f909f311f0bd6344bfe9a98a 100644
+index 5e56f4ed36cd5bdd45544bdeb370321f4d0cc3a1..362d4b090179746648941d99746b43eee854b8fc 100644
 --- a/src/nouveau/vulkan/nvkmd/nvkmd.h
 +++ b/src/nouveau/vulkan/nvkmd/nvkmd.h
 @@ -116,11 +116,16 @@ enum nvkmd_bind_op {
@@ -443,6 +477,25 @@ index 5e56f4ed36cd5bdd45544bdeb370321f4d0cc3a1..3c776c78a0ab17b3f909f311f0bd6344
  };
  
  struct nvkmd_pdev_ops {
+@@ -267,6 +272,7 @@ void nvkmd_mem_init(struct nvkmd_dev *dev,
+                     enum nvkmd_mem_flags flags,
+                     uint64_t size_B,
+                     uint32_t bind_align_B);
++void nvkmd_mem_finish(struct nvkmd_mem *mem);
+ 
+ struct nvkmd_va_ops {
+    void (*free)(struct nvkmd_va *va);
+@@ -413,6 +419,10 @@ nvkmd_pdev_create_dev(struct nvkmd_pdev *pdev,
+    return pdev->ops->create_dev(pdev, log_obj, dev_out);
+ }
+ 
++void nvkmd_dev_init(struct nvkmd_dev *dev);
++void nvkmd_dev_finish(struct nvkmd_dev *dev);
++void nvkmd_dev_info_init_shared_mem_sizes(struct nv_device_info *info);
++
+ static inline void
+ nvkmd_dev_destroy(struct nvkmd_dev *dev)
+ {
 diff --git a/src/util/u_sync_provider.c b/src/util/u_sync_provider.c
 index f211fafb82deddd230d0ab2511ed1c3be3a95a3a..8d538feebba83bb61660fd0d7e66d1dc31ae2122 100644
 --- a/src/util/u_sync_provider.c

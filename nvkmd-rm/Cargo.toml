@@ -9,9 +9,16 @@ description = "NVK's nvkmd backend over the RM, linked into libvulkan_nouveau as
 
 [lib]
 crate-type = ["staticlib"]
+# The library calls Mesa's hidden-visibility functions, which only a link with
+# Mesa's objects resolves: its tests are mesa/tests/run-nvkmd-harness.py.
+test = false
+doctest = false
 
 [dependencies]
 nv-ffi = { path = "../nv-ffi" }
+nv-rm-abi = { path = "../rm-abi" }
+nv-rm-core = { path = "../rm-core" }
+nvkmd-rm-logic = { path = "../nvkmd-rm-logic" }
 nvkmd-sys = { path = "../nvkmd-sys" }
 
 [lints]

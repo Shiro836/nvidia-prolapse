@@ -33,6 +33,7 @@ fn main() -> ExitCode {
             };
         }
     }
+    fake::init();
     let mut stdout = std::io::stdout().lock();
     for (name, run) in suites::SUITES {
         if !wanted.is_empty() && !wanted.iter().any(|wanted| wanted == name) {

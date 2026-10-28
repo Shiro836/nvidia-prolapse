@@ -18,7 +18,7 @@
 use std::ffi::{CStr, VaList, c_char, c_int, c_void};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use nv_rm_abi::{NvRmDevice, NvRmInfo, NvRmZcullInfo};
 use nvkmd_sys::{
@@ -32,9 +32,26 @@ use crate::mesa;
 /// The RM device handle the fake hands out. Never dereferenced: the backend
 /// only passes it back.
 pub(crate) const RM_DEVICE: usize = 42;
-/// The descriptor of the fake render node. Not a real descriptor: every call
-/// on it is answered here.
-pub(crate) const RENDER_FD: c_int = 99;
+/// The descriptor of the fake render node: a real descriptor (of `/dev/null`,
+/// held for the whole run) so that owning-descriptor types may check it is
+/// open, but every call the backend makes on it is answered here and the fake
+/// `close` leaves it open. Opened first thing, so its number is the same in
+/// every run.
+static RENDER: OnceLock<c_int> = OnceLock::new();
+
+/// Opens the fake render node's descriptor; call before any suite.
+pub(crate) fn init() {
+    let file = std::fs::File::open("/dev/null").expect("/dev/null opens");
+    let fd = std::os::fd::IntoRawFd::into_raw_fd(file);
+    assert!(
+        RENDER.set(fd).is_ok(),
+        "the render node descriptor is opened once"
+    );
+}
+
+fn render_fd() -> c_int {
+    *RENDER.get().expect("fake::init ran before the suites")
+}
 /// The path the suites put in `drmDevice.nodes[DRM_NODE_RENDER]`.
 pub(crate) const RENDER_PATH: &CStr = c"/fake/render";
 /// `st_rdev` of the fake render node.
@@ -259,6 +276,11 @@ pub(crate) unsafe extern "C" fn __wrap_open64(
         }
         return fd;
     }
+    if name == c"/dev/null" {
+        // The harness's own descriptor for the fake render node (`init`).
+        // SAFETY: forwarded to libc; read-only opens take no mode.
+        return unsafe { __real_open64(path, flags) };
+    }
     assert_eq!(name, RENDER_PATH, "only the fake render node is opened");
     let mut state = state();
     state.opens += 1;
@@ -277,10 +299,11 @@ pub(crate) unsafe extern "C" fn __wrap_open64(
         "the render node is opened O_RDWR | O_CLOEXEC"
     );
     state.record(format!(
-        "open({}, {flags:#o}) = {RENDER_FD}",
-        name.to_string_lossy()
+        "open({}, {flags:#o}) = {}",
+        name.to_string_lossy(),
+        render_fd()
     ));
-    RENDER_FD
+    render_fd()
 }
 
 /// libc `close`: the fake render node, sysfs descriptors and descriptors the
@@ -291,7 +314,7 @@ pub(crate) unsafe extern "C" fn __wrap_open64(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __wrap_close(fd: c_int) -> c_int {
     let mut state = state();
-    if fd == RENDER_FD {
+    if fd == render_fd() {
         state.closes += 1;
         state.record(format!("close({fd}) = 0"));
         return 0;
@@ -312,7 +335,7 @@ pub(crate) unsafe extern "C" fn __wrap_close(fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __wrap_fstat64(fd: c_int, buf: *mut stat) -> c_int {
     let mut state = state();
-    if fd != RENDER_FD {
+    if fd != render_fd() {
         assert!(
             state.sysfs.contains(&fd),
             "fstat only on the render node and sysfs"
@@ -373,7 +396,7 @@ static VERSION: VersionRecord = VersionRecord(core::cell::UnsafeCell::new(_drmVe
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn __wrap_drmGetVersion(fd: c_int) -> drmVersionPtr {
     let mut state = state();
-    assert_eq!(fd, RENDER_FD, "the version query is on the render node");
+    assert_eq!(fd, render_fd(), "the version query is on the render node");
     let name = match state.version {
         Version::Missing => {
             state.record(format!("drmGetVersion({fd}) = NULL"));
