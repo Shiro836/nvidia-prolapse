@@ -107,9 +107,9 @@ assertions are the compile-time asserts of §4 on every target; `mesa/build.py` 
 after `meson setup` and fails when the committed file differs (stale bindings after a pin
 bump cannot build). Committing them keeps `cargo test --workspace` independent of a Mesa build.
 
-`nv_rm.h` is generated, never hand-written: `tools/gen-rm-header.py` runs the pinned cbindgen
-over `nv-rm-abi` and the header is committed with a generated banner; a test regenerates it and
-fails on a difference. The `rm` crate's exported definitions are pinned to the declarations at
+`nv_rm.h` is generated, never hand-written: `mesa/gen-rm-header.py` runs the cbindgen Mesa's
+build pins over `nv-rm-abi` and the header is committed with a generated banner;
+`mesa/build.py` regenerates it and fails on a difference. The `rm` crate's exported definitions are pinned to the declarations at
 compile time (`const _: nv_rm_abi::SyncSignal = capi::nv_rm_sync_signal;` per entry, the fn
 pointer type aliases living next to the declarations), so a definition and its declaration
 cannot drift. C consumers (gallium-nvrm, the C backend until it is deleted, the C tests)
@@ -288,7 +288,7 @@ suites on the C backend, and the checks named. Estimates are focused working hou
 | # | step | checks | est. |
 |---|---|---|---|
 | 0 | rebase onto the in-flight status-mapping and teardown-after-loss changes in `rm/src/mesa.rs`/`gpu.rs` | — | — |
-| 1 | `nv-rm-abi` + generated `nv_rm.h` (cbindgen, typed handles, stale check), replacing the hand-written header; `rm` entries pinned to the declarations | generated header compiles in `nvkmd_rm.c`, gallium-nvrm, `bridge-check.c`, `abi-check.c` on both Android targets; `nm -D` of `libnv_bionic_native.so` identical; capture 0/42 | 3 h |
+| 1 | `nv-rm-abi` + generated `nv_rm.h` (cbindgen, typed handles, stale check), replacing the hand-written header; `rm` entries pinned to the declarations (done) | generated header compiles in `nvkmd_rm.c`, gallium-nvrm, `bridge-check.c`, `abi-check.c` on both Android targets; `nm -D` of `libnv_bionic_native.so` identical; capture 0/42 | 3 h |
 | 1b | `rm`: split `mesa.rs` into `rm::device` and `rm/src/capi.rs` (§2.4). Pure refactor | rm tests + Miri on touched unsafe modules, pdev-preflight, capture 0/42, `nm -D` identical | 5 h |
 | 2 | `nvkmd-sys`: generator script, committed bindings for 3 targets, stale check in `build.py` | layout asserts on 3 targets, regen is a no-op | 3 h |
 | 3 | build plumbing: meson option, `build.py --nvkmd`, link spike with an archive holding only the guard (three Rust staticlibs in one `.so`, `--exclude-libs`) | both Android targets link, `nm -D` unchanged | 2 h |

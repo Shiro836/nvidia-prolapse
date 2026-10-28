@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Mesa nvkmd -> Rust RM bridge, executed entirely on the calling threads.
-//! The C ABI is documented in mesa/nv_rm.h.
+//! The C ABI is declared and documented in the `nv-rm-abi` crate (rm-abi/),
+//! which mesa/nv_rm.h is generated from.
 //!
 //! There is no ordinary-path worker. Submission, status, reset, host signal,
 //! CPU waits, export/import, retirement and loss checks run on the API caller
@@ -34,6 +35,11 @@ use crate::{
     waiters::Waiters,
     watcher::Watcher,
 };
+/// The C ABI's structs (`nv_rm.h` is generated from `nv-rm-abi`).
+pub(crate) use nv_rm_abi::{
+    NvRmAllocation as Allocation, NvRmContextId, NvRmInfo as Info, NvRmMappingId, NvRmMemoryId,
+    NvRmSyncId, NvRmSyncPoint as SyncPoint, NvRmToken,
+};
 use nv_rm_core::conv::{high_u32, low_u32, u64_from_usize, usize_from_u32};
 use std::{
     collections::HashMap,
@@ -46,66 +52,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct Info {
-    vendor_id: u32,
-    device_id: u32,
-    chipset: u32,
-    sm: u32,
-    pci_domain: u32,
-    pci_bus: u32,
-    pci_device: u32,
-    pci_function: u32,
-    gpc_count: u32,
-    tpc_count: u32,
-    mp_per_tpc: u32,
-    max_warps_per_mp: u32,
-    cls_copy: u32,
-    cls_eng2d: u32,
-    cls_eng3d: u32,
-    cls_m2mf: u32,
-    cls_compute: u32,
-    generic_kind: u32,
-    vram_size: u64,
-    bar_size: u64,
-    name: [u8; 64],
-    /// GR_GET_ZCULL_INFO followed by the GRAPHICS_ZCULL context-switch buffer
-    /// size and alignment: the layout of Mesa's nv_zcull_device_info
-    /// (nv_device_info.h:17-30). Meaningful only when `has_zcull_info` is 1.
-    zcull: abi::ZcullInfo,
-    zcull_ctxsw_size: u32,
-    zcull_ctxsw_align: u32,
-    has_zcull_info: u32,
-    /// RM's SM ISA code (NV2080_CTRL_GR_INFO_INDEX_SM_VERSION), from which
-    /// `sm` is derived.
-    sm_isa: u32,
-    /// NV2080_CTRL_GR_INFO_INDEX_SHADER_PIPE_COUNT and
-    /// NV2080_CTRL_GR_INFO_INDEX_SHADER_PIPE_SUB_COUNT (the TPC count, as
-    /// OGKM nv_gpu_ops.c reads it), the inputs of the compute contexts'
-    /// SET_SCG_CONTROL limits.
-    shader_pipe_count: u32,
-    shader_pipe_sub_count: u32,
-    /// Contexts that can join another context's channel group
-    /// (`Queue::new_in_group`): the group's subcontext count less the
-    /// creator's VEID 0 from Volta on, its channel count less one before
-    /// (query_info).
-    max_shared_ctx: u32,
-    _reserved: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct Allocation {
-    id: u64,
-    size: u64,
-    cpu_address: usize,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct SyncPoint {
-    sync: u64,
-    value: u64,
-}
 
 /// Thread-shareable device state (see module doc).
 pub(crate) struct Core {
@@ -311,7 +257,7 @@ pub(crate) struct Bridge {
 /// # Safety
 /// `id` is 0 (rejected) or an nv_rm_sync_create id whose payload is not
 /// destroyed during `'a`.
-unsafe fn sync_ref<'a>(id: u64) -> Result<&'a SyncObj> {
+unsafe fn sync_ref<'a>(id: NvRmSyncId) -> Result<&'a SyncObj> {
     let pointer = sync_pointer(id)?;
     if pointer.is_null() {
         return Err(Error::Contract("null synchronization id".into()));
@@ -1188,7 +1134,7 @@ impl Bridge {
     /// # Safety
     /// `id` is 0 or a live nv_rm_sync_create payload, and `drm_fd` is
     /// negative (rejected where needed) or open, for the whole call.
-    unsafe fn export_sync_file(&self, id: u64, drm_fd: i32) -> Result<Option<OwnedFd>> {
+    unsafe fn export_sync_file(&self, id: NvRmSyncId, drm_fd: i32) -> Result<Option<OwnedFd>> {
         // SAFETY: `id` is this function's, under its contract.
         let sync = unsafe { sync_ref(id) }?;
         if sync.timeline {
@@ -1500,7 +1446,7 @@ fn capture_submit(inner: &mut Inner, context: u64, pushes: &[Push], counts: [u32
                 } else {
                     None
                 };
-                (p.address, p.size, p.flags, words)
+                (p.address, p.size_B, p.flags, words)
             })
             .collect();
         // Texture header / sampler pools this batch binds: their contents
@@ -1519,7 +1465,7 @@ fn capture_push(
     binds: &std::collections::BTreeMap<u64, (u64, u64, u64)>,
     p: &Push,
 ) -> Option<Vec<u8>> {
-    capture_read(inner, binds, p.address, p.size)
+    capture_read(inner, binds, p.address, p.size_B)
 }
 /// Bytes [address, address + size) of a CPU-mapped allocation (None when the
 /// range is not inside one bind of a currently CPU-mapped allocation).
@@ -1604,7 +1550,8 @@ fn c_count(len: usize) -> u32 {
 }
 /// The payload pointer of a sync id (`nv_rm_sync_create`'s `Arc::into_raw`
 /// address, exposed as an integer for C).
-fn sync_pointer(id: u64) -> Result<*const SyncObj> {
+fn sync_pointer(id: NvRmSyncId) -> Result<*const SyncObj> {
+    let id = id.get();
     usize::try_from(id)
         .map(std::ptr::with_exposed_provenance)
         .map_err(|error| Error::Contract(format!("synchronization id {id:#x}: {error}")))
@@ -1769,8 +1716,8 @@ fn query_info(d: &Device) -> Result<Info> {
         generic_kind: caps.generic_kind,
         vram_size: u64::from(fb[1]) * 1024,
         bar_size: c.framebuffer_size,
-        name: text,
-        zcull,
+        name: text.map(|byte| std::ffi::c_char::from_ne_bytes([byte])),
+        zcull: zcull_abi(zcull),
         zcull_ctxsw_size,
         zcull_ctxsw_align,
         has_zcull_info,
@@ -1778,8 +1725,25 @@ fn query_info(d: &Device) -> Result<Info> {
         shader_pipe_count: gr[3][1],
         shader_pipe_sub_count: gr[4][1],
         max_shared_ctx,
-        _reserved: 0,
+        reserved: 0,
     })
+}
+
+/// The RM control's ZCULL fields in the C ABI's struct (same order, both
+/// from ctrl2080gr.h `NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS`).
+fn zcull_abi(z: abi::ZcullInfo) -> nv_rm_abi::NvRmZcullInfo {
+    nv_rm_abi::NvRmZcullInfo {
+        width_align_pixels: z.width_align_pixels,
+        height_align_pixels: z.height_align_pixels,
+        pixel_squares_by_aliquots: z.pixel_squares_by_aliquots,
+        aliquot_total: z.aliquot_total,
+        region_byte_multiplier: z.region_byte_multiplier,
+        region_header_size: z.region_header_size,
+        subregion_header_size: z.subregion_header_size,
+        subregion_count: z.subregion_count,
+        subregion_width_align_pixels: z.subregion_width_align_pixels,
+        subregion_height_align_pixels: z.subregion_height_align_pixels,
+    }
 }
 
 /// Most subregions Mesa's ZCULL layout code accepts (nil zcull.rs
@@ -2143,7 +2107,7 @@ unsafe fn input<'a, T>(ptr: *const T, count: u32, maximum: u32) -> Result<&'a [T
         unsafe { std::slice::from_raw_parts(ptr, usize_from_u32(count)) }
     })
 }
-fn status_of(result: Result<SubmitStatus>, out: *mut u64) -> i32 {
+fn status_of(result: Result<SubmitStatus>, out: *mut NvRmToken) -> i32 {
     let mut status = 0;
     let code = report((|| {
         let token = match result? {
@@ -2154,7 +2118,7 @@ fn status_of(result: Result<SubmitStatus>, out: *mut u64) -> i32 {
             }
         };
         // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-        unsafe { output(out, token.get()) }
+        unsafe { output(out, NvRmToken::new(token.get())) }
     })());
     if code == 0 { status } else { code }
 }
@@ -2318,7 +2282,7 @@ pub(crate) unsafe extern "C" fn nv_rm_alloc(
         };
         let id = next_id(s)?;
         let a = Allocation {
-            id,
+            id: NvRmMemoryId::new(id),
             size: u64_from_usize(memory.size),
             cpu_address: 0,
         };
@@ -2350,7 +2314,12 @@ fn next_id(s: &mut Inner) -> Result<u64> {
 /// every descriptor argument is open for the call; every sync id is 0 or a
 /// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn nv_rm_map(p: *mut Bridge, memory: u64, out: *mut usize) -> i32 {
+pub(crate) unsafe extern "C" fn nv_rm_map(
+    p: *mut Bridge,
+    memory: NvRmMemoryId,
+    out: *mut usize,
+) -> i32 {
+    let memory = memory.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(Entry::Map, "nv_rm_map", object, move || {
@@ -2384,7 +2353,8 @@ pub(crate) unsafe extern "C" fn nv_rm_map(p: *mut Bridge, memory: u64, out: *mut
 /// every descriptor argument is open for the call; every sync id is 0 or a
 /// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn nv_rm_unmap(p: *mut Bridge, memory: u64) -> i32 {
+pub(crate) unsafe extern "C" fn nv_rm_unmap(p: *mut Bridge, memory: NvRmMemoryId) -> i32 {
+    let memory = memory.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_unmap", object, move || {
@@ -2418,7 +2388,8 @@ pub(crate) unsafe extern "C" fn nv_rm_unmap(p: *mut Bridge, memory: u64) -> i32 
 /// Only on a broken internal invariant (an id validated under the device
 /// lock and then missing); the FFI guard turns that into device loss.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: u64) -> i32 {
+pub(crate) unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: NvRmMemoryId) -> i32 {
+    let memory = memory.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_free", object, move || {
@@ -2463,13 +2434,14 @@ pub(crate) unsafe extern "C" fn nv_rm_free(p: *mut Bridge, memory: u64) -> i32 {
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_bind(
     p: *mut Bridge,
-    memory: u64,
+    memory: NvRmMemoryId,
     offset: u64,
     size: u64,
     address: u64,
     kind: u32,
-    out: *mut u64,
+    out: *mut NvRmMappingId,
 ) -> i32 {
+    let memory = memory.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(Entry::Bind, "nv_rm_bind", object, move || {
@@ -2518,7 +2490,7 @@ pub(crate) unsafe extern "C" fn nv_rm_bind(
             cap.binds.insert(address, (size, memory, offset));
         }
         // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-        unsafe { output(out, id) }
+        unsafe { output(out, NvRmMappingId::new(id)) }
     })
 }
 /// Immediate RM unmap, no GPU wait. Only for application-ordered Vulkan
@@ -2532,7 +2504,8 @@ pub(crate) unsafe extern "C" fn nv_rm_bind(
 /// every descriptor argument is open for the call; every sync id is 0 or a
 /// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: u64) -> i32 {
+pub(crate) unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: NvRmMappingId) -> i32 {
+    let mapping = mapping.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(Entry::Bind, "nv_rm_unbind", object, move || {
@@ -2578,7 +2551,7 @@ pub(crate) unsafe extern "C" fn nv_rm_unbind(p: *mut Bridge, mapping: u64) -> i3
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_va_free(
     p: *mut Bridge,
-    mappings: *const u64,
+    mappings: *const NvRmMappingId,
     count: u32,
     address: u64,
     size: u64,
@@ -2605,7 +2578,7 @@ pub(crate) unsafe extern "C" fn nv_rm_va_free(
             for (i, id) in ids.iter().enumerate() {
                 let map = s
                     .maps
-                    .get(id)
+                    .get(&id.get())
                     .ok_or_else(|| Error::Contract("VA free of unknown GPU mapping".into()))?;
                 if map.address().get() < address
                     || map.address().get().saturating_add(map.length().get()) > end
@@ -2628,12 +2601,12 @@ pub(crate) unsafe extern "C" fn nv_rm_va_free(
             // vector keeps its capacity: no allocation per free.
             let mut freeing = std::mem::take(&mut s.freeing);
             for id in ids {
-                s.bind_info.remove(id);
+                s.bind_info.remove(&id.get());
             }
             freeing.extend(ids.iter().map(|id| {
                 ReclaimItem::Mapping(
                     s.maps
-                        .remove(id)
+                        .remove(&id.get())
                         .expect("every id was validated above under the same lock"),
                 )
             }));
@@ -2659,7 +2632,7 @@ pub(crate) unsafe extern "C" fn nv_rm_va_free(
 pub(crate) unsafe extern "C" fn nv_rm_context_create(
     p: *mut Bridge,
     engines: u32,
-    out: *mut u64,
+    out: *mut NvRmContextId,
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
@@ -2672,7 +2645,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_create(
         let mut guard = b.lock()?;
         let id = b.create_context(&mut guard.0, engines, None)?;
         // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-        unsafe { output(out, id) }
+        unsafe { output(out, NvRmContextId::new(id)) }
     })
 }
 /// Create a context whose channel joins `share`'s TSG on the lowest free
@@ -2689,9 +2662,10 @@ pub(crate) unsafe extern "C" fn nv_rm_context_create(
 pub(crate) unsafe extern "C" fn nv_rm_context_create_shared(
     p: *mut Bridge,
     engines: u32,
-    share: u64,
-    out: *mut u64,
+    share: NvRmContextId,
+    out: *mut NvRmContextId,
 ) -> i32 {
+    let share = share.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(
@@ -2707,7 +2681,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_create_shared(
             let mut guard = b.lock()?;
             let id = b.create_context(&mut guard.0, engines, Some(share))?;
             // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-            unsafe { output(out, id) }
+            unsafe { output(out, NvRmContextId::new(id)) }
         },
     )
 }
@@ -2722,7 +2696,8 @@ pub(crate) unsafe extern "C" fn nv_rm_context_create_shared(
 /// Only on a broken internal invariant (an id validated under the device
 /// lock and then missing); the FFI guard turns that into device loss.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -> i32 {
+pub(crate) unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: NvRmContextId) -> i32 {
+    let id = id.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_context_destroy", object, move || {
@@ -2773,14 +2748,15 @@ pub(crate) unsafe extern "C" fn nv_rm_context_destroy(p: *mut Bridge, id: u64) -
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_submit_waits(
     p: *mut Bridge,
-    id: u64,
+    id: NvRmContextId,
     pushes: *const Push,
     count: u32,
     drm_fd: i32,
     wait_fds: *const i32,
     wait_count: u32,
-    out: *mut u64,
+    out: *mut NvRmToken,
 ) -> i32 {
+    let id = id.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_submit_waits", object, move || {
@@ -2825,16 +2801,28 @@ pub(crate) unsafe extern "C" fn nv_rm_submit_waits(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_submit(
     p: *mut Bridge,
-    id: u64,
+    id: NvRmContextId,
     pushes: *const Push,
     count: u32,
-    out: *mut u64,
+    out: *mut NvRmToken,
 ) -> i32 {
+    let id = id.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_submit", object, move || {
         // SAFETY: forwards this entry point's own arguments, under its contract.
-        unsafe { nv_rm_submit_waits(p, id, pushes, count, -1, std::ptr::null(), 0, out) }
+        unsafe {
+            nv_rm_submit_waits(
+                p,
+                NvRmContextId::new(id),
+                pushes,
+                count,
+                -1,
+                std::ptr::null(),
+                0,
+                out,
+            )
+        }
     })
 }
 /// # Safety
@@ -2846,10 +2834,12 @@ pub(crate) unsafe extern "C" fn nv_rm_submit(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_poll(
     p: *mut Bridge,
-    id: u64,
-    token: u64,
+    id: NvRmContextId,
+    token: NvRmToken,
     complete: *mut u32,
 ) -> i32 {
+    let id = id.get();
+    let token = token.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_poll", object, move || {
@@ -2874,10 +2864,12 @@ pub(crate) unsafe extern "C" fn nv_rm_poll(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_wait(
     p: *mut Bridge,
-    id: u64,
-    token: u64,
+    id: NvRmContextId,
+    token: NvRmToken,
     timeout_ns: u64,
 ) -> i32 {
+    let id = id.get();
+    let token = token.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_wait", object, move || {
@@ -2902,11 +2894,13 @@ pub(crate) unsafe extern "C" fn nv_rm_wait(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_context_fence(
     p: *mut Bridge,
-    id: u64,
-    token: u64,
+    id: NvRmContextId,
+    token: NvRmToken,
     drm_fd: i32,
     out: *mut i32,
 ) -> i32 {
+    let id = id.get();
+    let token = token.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_context_fence", object, move || {
@@ -2943,25 +2937,27 @@ pub(crate) unsafe extern "C" fn nv_rm_context_fence(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_exec(
     p: *mut Bridge,
-    id: u64,
+    id: NvRmContextId,
     pushes: *const Push,
     count: u32,
 ) -> i32 {
+    let id = id.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_exec", object, move || {
         loop {
-            let mut token = 0;
+            let mut token = NvRmToken::new(0);
             // SAFETY: this entry point's own arguments, under the same
             // contract; `token` is a live local.
-            let result = unsafe { nv_rm_submit(p, id, pushes, count, &raw mut token) };
+            let result =
+                unsafe { nv_rm_submit(p, NvRmContextId::new(id), pushes, count, &raw mut token) };
             if result != 0 && result != 1 {
                 return result;
             }
             // Synchronous by contract (nv_rm.h nv_rm_exec), so unbounded like
             // nvkmd_rm.c's context sync; see `deadline` for how loss ends it.
             // SAFETY: this entry point's own device argument.
-            let wait = unsafe { nv_rm_wait(p, id, token, u64::MAX) };
+            let wait = unsafe { nv_rm_wait(p, NvRmContextId::new(id), token, u64::MAX) };
             if wait != 0 {
                 return wait;
             }
@@ -3071,10 +3067,11 @@ pub(crate) unsafe extern "C" fn nv_rm_timestamp(p: *mut Bridge, out: *mut u64) -
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_export(
     p: *mut Bridge,
-    memory: u64,
+    memory: NvRmMemoryId,
     drm_fd: i32,
     out: *mut i32,
 ) -> i32 {
+    let memory = memory.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(Entry::Export, "nv_rm_export", object, move || {
@@ -3137,7 +3134,7 @@ pub(crate) unsafe extern "C" fn nv_rm_import(
         let memory = crate::external::import(&s.device, drm, dma_buf)?;
         let id = next_id(s)?;
         let result = Allocation {
-            id,
+            id: NvRmMemoryId::new(id),
             size: u64_from_usize(memory.size),
             cpu_address: 0,
         };
@@ -3165,7 +3162,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_create(
     p: *mut Bridge,
     flags: u32,
     initial: u64,
-    out: *mut u64,
+    out: *mut NvRmSyncId,
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
@@ -3185,14 +3182,14 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_create(
         };
         let id = u64_from_usize(Arc::into_raw(Arc::new(sync)).expose_provenance());
         // SAFETY: nv_rm.h: an output pointer is NULL or writable for the call; output() rejects NULL.
-        unsafe { output(out, id) }
+        unsafe { output(out, NvRmSyncId::new(id)) }
     })
 }
 /// # Safety
 /// `id` is a live nv_rm_sync_create payload, destroyed exactly once, with no
 /// other call using it in flight or after; the device pointer is unused.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn nv_rm_sync_destroy(_p: *mut Bridge, id: u64) -> i32 {
+pub(crate) unsafe extern "C" fn nv_rm_sync_destroy(_p: *mut Bridge, id: NvRmSyncId) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { _p.as_ref() };
     guarded("nv_rm_sync_destroy", object, move || {
@@ -3213,7 +3210,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_destroy(_p: *mut Bridge, id: u64) -> 
 /// # Safety
 /// As nv_rm_sync_destroy; `p` is NULL or a live nv_rm_open device.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn nv_rm_sync_destroy_deferred(p: *mut Bridge, id: u64) -> i32 {
+pub(crate) unsafe extern "C" fn nv_rm_sync_destroy_deferred(p: *mut Bridge, id: NvRmSyncId) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_sync_destroy_deferred", object, move || {
@@ -3237,7 +3234,7 @@ pub(crate) fn needs_slot(error: &Error) -> bool {
 /// every descriptor argument is open for the call; every sync id is 0 or a
 /// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: u64) -> i32 {
+pub(crate) unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: NvRmSyncId) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(Entry::Sync, "nv_rm_sync_reset", object, move || {
@@ -3274,8 +3271,8 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: u64) -> i32
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_sync_move(
     p: *mut Bridge,
-    dst: u64,
-    src: u64,
+    dst: NvRmSyncId,
+    src: NvRmSyncId,
     _shared_source: u32,
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
@@ -3313,7 +3310,11 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_move(
 /// every descriptor argument is open for the call; every sync id is 0 or a
 /// live nv_rm_sync_create payload.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn nv_rm_sync_signal(p: *mut Bridge, id: u64, value: u64) -> i32 {
+pub(crate) unsafe extern "C" fn nv_rm_sync_signal(
+    p: *mut Bridge,
+    id: NvRmSyncId,
+    value: u64,
+) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(Entry::Sync, "nv_rm_sync_signal", object, move || {
@@ -3352,7 +3353,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_signal(p: *mut Bridge, id: u64, value
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_sync_get_value(
     p: *mut Bridge,
-    id: u64,
+    id: NvRmSyncId,
     out: *mut u64,
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
@@ -3453,7 +3454,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_wait_many(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_sync_import_fd(
     p: *mut Bridge,
-    id: u64,
+    id: NvRmSyncId,
     fd: i32,
     opaque: u32,
 ) -> i32 {
@@ -3485,7 +3486,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_import_fd(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_sync_export_fd(
     p: *mut Bridge,
-    id: u64,
+    id: NvRmSyncId,
     opaque: u32,
     drm_fd: i32,
     out: *mut i32,
@@ -3501,7 +3502,7 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_export_fd(
         if b.capture.load(Ordering::Relaxed)
             && let Some(cap) = b.lock()?.0.capture.as_mut()
         {
-            cap.mark(0, id, 2 + opaque);
+            cap.mark(0, id.get(), 2 + opaque);
         }
         let fd = if opaque != 0 {
             // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
@@ -3537,8 +3538,8 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_export_fd(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_sync_reserve(
     p: *mut Bridge,
-    dst: u64,
-    src: u64,
+    dst: NvRmSyncId,
+    src: NvRmSyncId,
     reserved: *mut u32,
 ) -> i32 {
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
@@ -3578,15 +3579,16 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_reserve(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_submit_batch(
     p: *mut Bridge,
-    id: u64,
+    id: NvRmContextId,
     pushes: *const Push,
     count: u32,
     waits: *const SyncPoint,
     wait_count: u32,
     signals: *const SyncPoint,
     signal_count: u32,
-    out: *mut u64,
+    out: *mut NvRmToken,
 ) -> i32 {
+    let id = id.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_submit_batch", object, move || {
@@ -3617,13 +3619,14 @@ pub(crate) unsafe extern "C" fn nv_rm_submit_batch(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_submit_sync(
     p: *mut Bridge,
-    id: u64,
+    id: NvRmContextId,
     pushes: *const Push,
     count: u32,
     waits: *const SyncPoint,
     wait_count: u32,
-    out: *mut u64,
+    out: *mut NvRmToken,
 ) -> i32 {
+    let id = id.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_submit_sync", object, move || {
@@ -3631,7 +3634,7 @@ pub(crate) unsafe extern "C" fn nv_rm_submit_sync(
         unsafe {
             nv_rm_submit_batch(
                 p,
-                id,
+                NvRmContextId::new(id),
                 pushes,
                 count,
                 waits,
@@ -3652,11 +3655,12 @@ pub(crate) unsafe extern "C" fn nv_rm_submit_sync(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn nv_rm_context_signal(
     p: *mut Bridge,
-    id: u64,
+    id: NvRmContextId,
     signals: *const SyncPoint,
     count: u32,
-    out: *mut u64,
+    out: *mut NvRmToken,
 ) -> i32 {
+    let id = id.get();
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded("nv_rm_context_signal", object, move || {
@@ -3664,7 +3668,7 @@ pub(crate) unsafe extern "C" fn nv_rm_context_signal(
         unsafe {
             nv_rm_submit_batch(
                 p,
-                id,
+                NvRmContextId::new(id),
                 std::ptr::null(),
                 0,
                 std::ptr::null(),
@@ -3676,6 +3680,48 @@ pub(crate) unsafe extern "C" fn nv_rm_context_signal(
         }
     })
 }
+
+// Every exported entry has exactly the type `nv-rm-abi` declares for it, the
+// declarations `mesa/nv_rm.h` is generated from.
+const _: nv_rm_abi::NvRmOpen<Bridge> = nv_rm_open;
+const _: nv_rm_abi::NvRmClose<Bridge> = nv_rm_close;
+const _: nv_rm_abi::NvRmAlloc<Bridge> = nv_rm_alloc;
+const _: nv_rm_abi::NvRmMap<Bridge> = nv_rm_map;
+const _: nv_rm_abi::NvRmUnmap<Bridge> = nv_rm_unmap;
+const _: nv_rm_abi::NvRmFree<Bridge> = nv_rm_free;
+const _: nv_rm_abi::NvRmBind<Bridge> = nv_rm_bind;
+const _: nv_rm_abi::NvRmUnbind<Bridge> = nv_rm_unbind;
+const _: nv_rm_abi::NvRmVaFree<Bridge> = nv_rm_va_free;
+const _: nv_rm_abi::NvRmContextCreate<Bridge> = nv_rm_context_create;
+const _: nv_rm_abi::NvRmContextCreateShared<Bridge> = nv_rm_context_create_shared;
+const _: nv_rm_abi::NvRmContextDestroy<Bridge> = nv_rm_context_destroy;
+const _: nv_rm_abi::NvRmSubmitWaits<Bridge> = nv_rm_submit_waits;
+const _: nv_rm_abi::NvRmSubmit<Bridge> = nv_rm_submit;
+const _: nv_rm_abi::NvRmPoll<Bridge> = nv_rm_poll;
+const _: nv_rm_abi::NvRmWait<Bridge> = nv_rm_wait;
+const _: nv_rm_abi::NvRmContextFence<Bridge> = nv_rm_context_fence;
+const _: nv_rm_abi::NvRmExecFn<Bridge> = nv_rm_exec;
+const _: nv_rm_abi::NvRmCheckStatus<Bridge> = nv_rm_check_status;
+const _: nv_rm_abi::NvRmMarkLost<Bridge> = nv_rm_mark_lost;
+const _: nv_rm_abi::NvRmIsLost<Bridge> = nv_rm_is_lost;
+const _: nv_rm_abi::NvRmTimestamp<Bridge> = nv_rm_timestamp;
+const _: nv_rm_abi::NvRmExport<Bridge> = nv_rm_export;
+const _: nv_rm_abi::NvRmImport<Bridge> = nv_rm_import;
+const _: nv_rm_abi::NvRmSyncCreate<Bridge> = nv_rm_sync_create;
+const _: nv_rm_abi::NvRmSyncDestroy<Bridge> = nv_rm_sync_destroy;
+const _: nv_rm_abi::NvRmSyncDestroyDeferred<Bridge> = nv_rm_sync_destroy_deferred;
+const _: nv_rm_abi::NvRmSyncReset<Bridge> = nv_rm_sync_reset;
+const _: nv_rm_abi::NvRmSyncMove<Bridge> = nv_rm_sync_move;
+const _: nv_rm_abi::NvRmSyncSignal<Bridge> = nv_rm_sync_signal;
+const _: nv_rm_abi::NvRmSyncGetValue<Bridge> = nv_rm_sync_get_value;
+const _: nv_rm_abi::NvRmSyncStatusMany<Bridge> = nv_rm_sync_status_many;
+const _: nv_rm_abi::NvRmSyncWaitMany<Bridge> = nv_rm_sync_wait_many;
+const _: nv_rm_abi::NvRmSyncImportFd<Bridge> = nv_rm_sync_import_fd;
+const _: nv_rm_abi::NvRmSyncExportFd<Bridge> = nv_rm_sync_export_fd;
+const _: nv_rm_abi::NvRmSyncReserve<Bridge> = nv_rm_sync_reserve;
+const _: nv_rm_abi::NvRmSubmitBatch<Bridge> = nv_rm_submit_batch;
+const _: nv_rm_abi::NvRmSubmitSync<Bridge> = nv_rm_submit_sync;
+const _: nv_rm_abi::NvRmContextSignal<Bridge> = nv_rm_context_signal;
 
 #[cfg(test)]
 mod tests {
@@ -4249,13 +4295,16 @@ mod tests {
         unsafe { nv_rm_mark_lost(std::ptr::null()) };
         assert_ne!(
             // SAFETY: a NULL device is rejected before the id is used.
-            unsafe { nv_rm_sync_destroy_deferred(std::ptr::null_mut(), 7) },
+            unsafe { nv_rm_sync_destroy_deferred(std::ptr::null_mut(), NvRmSyncId::new(7)) },
             0
         );
         // SAFETY: as above.
-        assert_ne!(unsafe { nv_rm_sync_reset(std::ptr::null_mut(), 7) }, 0);
+        assert_ne!(
+            unsafe { nv_rm_sync_reset(std::ptr::null_mut(), NvRmSyncId::new(7)) },
+            0
+        );
         // SAFETY: id 0 is rejected before any dereference.
-        assert!(unsafe { sync_ref(0) }.is_err());
+        assert!(unsafe { sync_ref(NvRmSyncId::new(0)) }.is_err());
     }
 }
 

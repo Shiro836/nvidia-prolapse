@@ -130,7 +130,7 @@ impl Work {
         }
         let push = Push {
             address: push_va.address().get(),
-            size: u32::try_from(words.len() * 4).unwrap(),
+            size_B: u32::try_from(words.len() * 4).unwrap(),
             flags: 0,
         };
         Self {

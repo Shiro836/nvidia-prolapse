@@ -31,7 +31,6 @@
     clippy::similar_names,
     clippy::single_match_else,
     clippy::struct_excessive_bools,
-    clippy::struct_field_names,
     clippy::too_many_lines,
     clippy::unreadable_literal,
     clippy::used_underscore_binding,

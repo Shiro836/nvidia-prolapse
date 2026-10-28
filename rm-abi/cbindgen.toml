@@ -1,0 +1,19 @@
+# mesa/nv_rm.h is generated from this crate: mesa/gen-rm-header.py.
+language = "C"
+style = "tag"
+include_guard = "NV_RM_H"
+no_includes = true
+sys_includes = ["stddef.h", "stdint.h"]
+header = """/* SPDX-License-Identifier: MIT
+ * Generated from rm-abi/src/lib.rs by mesa/gen-rm-header.py (cbindgen); do not edit.
+ * The contract of every entry is documented there. */"""
+after_includes = "typedef struct NvRmDevice NvRmDevice;"
+documentation_style = "doxy"
+usize_is_size_t = false
+cpp_compat = false
+
+[export]
+exclude = ["NvRmDevice"]
+
+[fn]
+args = "auto"

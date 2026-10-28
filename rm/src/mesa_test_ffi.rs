@@ -34,7 +34,7 @@ use std::ptr;
 #[must_use = "a sync object is destroyed only by sync_destroy"]
 #[derive(Debug)]
 pub(in crate::mesa) struct SyncHandle {
-    id: u64,
+    id: NvRmSyncId,
 }
 impl SyncHandle {
     /// The payload behind the id, for fixtures that inspect bridge state.
@@ -64,7 +64,7 @@ impl Lowered {
     fn new(points: &[Point<'_>]) -> Self {
         assert!(points.len() <= MAX_POINTS, "{} sync points", points.len());
         let mut lowered = Self {
-            points: [SyncPoint { sync: 0, value: 0 }; MAX_POINTS],
+            points: [SyncPoint::default(); MAX_POINTS],
             count: points.len(),
         };
         for (out, point) in lowered.points.iter_mut().zip(points) {
@@ -102,9 +102,12 @@ fn fd_or_none(fd: Option<BorrowedFd<'_>>) -> RawFd {
 }
 
 pub(in crate::mesa) fn context_create(b: &Bridge, engines: u32, out: &mut u64) -> i32 {
-    // SAFETY: `raw(b)` points to a live bridge for the call; `out` is an
-    // exclusive u64 the call writes once.
-    unsafe { nv_rm_context_create(raw(b), engines, out) }
+    let mut id = NvRmContextId::new(*out);
+    // SAFETY: `raw(b)` points to a live bridge for the call; `id` is an
+    // exclusive local the call writes once.
+    let status = unsafe { nv_rm_context_create(raw(b), engines, &raw mut id) };
+    *out = id.get();
+    status
 }
 pub(in crate::mesa) fn context_create_shared(
     b: &Bridge,
@@ -112,13 +115,18 @@ pub(in crate::mesa) fn context_create_shared(
     share: u64,
     out: &mut u64,
 ) -> i32 {
+    let mut id = NvRmContextId::new(*out);
     // SAFETY: as context_create; `share` is a context id, looked up in the
     // bridge's queue map (never dereferenced).
-    unsafe { nv_rm_context_create_shared(raw(b), engines, share, out) }
+    let status = unsafe {
+        nv_rm_context_create_shared(raw(b), engines, NvRmContextId::new(share), &raw mut id)
+    };
+    *out = id.get();
+    status
 }
 pub(in crate::mesa) fn context_destroy(b: &Bridge, ctx: u64) -> i32 {
     // SAFETY: live bridge; context ids are map keys.
-    unsafe { nv_rm_context_destroy(raw(b), ctx) }
+    unsafe { nv_rm_context_destroy(raw(b), NvRmContextId::new(ctx)) }
 }
 /// A device made by `nv_rm_open` (the path Mesa takes), given back only by
 /// [`OpenedBridge::close`]. Not Send: one thread opens, uses and closes it.
@@ -179,7 +187,14 @@ pub(in crate::mesa) fn check_status(b: &Bridge) -> i32 {
 }
 pub(in crate::mesa) fn wait(b: &Bridge, ctx: u64, token: u64, timeout_ns: u64) -> i32 {
     // SAFETY: live bridge; ids and token are plain values.
-    unsafe { nv_rm_wait(raw(b), ctx, token, timeout_ns) }
+    unsafe {
+        nv_rm_wait(
+            raw(b),
+            NvRmContextId::new(ctx),
+            NvRmToken::new(token),
+            timeout_ns,
+        )
+    }
 }
 pub(in crate::mesa) fn context_fence(
     b: &Bridge,
@@ -190,11 +205,26 @@ pub(in crate::mesa) fn context_fence(
 ) -> i32 {
     // SAFETY: live bridge; `drm` is open for the call; `out` is an exclusive
     // i32 the call writes.
-    unsafe { nv_rm_context_fence(raw(b), ctx, token, drm.as_raw_fd(), out) }
+    unsafe {
+        nv_rm_context_fence(
+            raw(b),
+            NvRmContextId::new(ctx),
+            NvRmToken::new(token),
+            drm.as_raw_fd(),
+            out,
+        )
+    }
 }
 pub(in crate::mesa) fn poll(b: &Bridge, ctx: u64, token: u64, complete: &mut u32) -> i32 {
     // SAFETY: live bridge; `complete` is an exclusive u32 the call writes.
-    unsafe { nv_rm_poll(raw(b), ctx, token, complete) }
+    unsafe {
+        nv_rm_poll(
+            raw(b),
+            NvRmContextId::new(ctx),
+            NvRmToken::new(token),
+            complete,
+        )
+    }
 }
 
 pub(in crate::mesa) fn alloc(
@@ -218,18 +248,31 @@ pub(in crate::mesa) fn bind(
     kind: u32,
     out: &mut u64,
 ) -> i32 {
-    // SAFETY: live bridge; memory ids are map keys; `out` is an exclusive
-    // u64 the call writes.
-    unsafe { nv_rm_bind(raw(b), memory, offset, size, address, kind, out) }
+    let mut id = NvRmMappingId::new(*out);
+    // SAFETY: live bridge; memory ids are map keys; `id` is an exclusive
+    // local the call writes.
+    let status = unsafe {
+        nv_rm_bind(
+            raw(b),
+            NvRmMemoryId::new(memory),
+            offset,
+            size,
+            address,
+            kind,
+            &raw mut id,
+        )
+    };
+    *out = id.get();
+    status
 }
 pub(in crate::mesa) fn unbind(b: &Bridge, mapping: u64) -> i32 {
     // SAFETY: live bridge; mapping ids are map keys.
-    unsafe { nv_rm_unbind(raw(b), mapping) }
+    unsafe { nv_rm_unbind(raw(b), NvRmMappingId::new(mapping)) }
 }
 pub(in crate::mesa) fn free(b: &Bridge, memory: u64) -> i32 {
     // SAFETY: live bridge; memory ids are map keys. The call refuses memory
     // that is still CPU-mapped, so no live CpuMap is invalidated by it.
-    unsafe { nv_rm_free(raw(b), memory) }
+    unsafe { nv_rm_free(raw(b), NvRmMemoryId::new(memory)) }
 }
 
 /// Receiver of deferred VA releases (Mesa's util_vma_heap_free stands here).
@@ -252,7 +295,8 @@ pub(in crate::mesa) fn va_free<T: ReleaseSink>(
     size: u64,
     sink: &'static T,
 ) -> i32 {
-    let (ids, count) = array(mappings);
+    let mappings: Vec<NvRmMappingId> = mappings.iter().copied().map(NvRmMappingId::new).collect();
+    let (ids, count) = array(&mappings);
     // SAFETY: live bridge; `ids` is valid for `count` u64s (or null for 0);
     // the callback/data pair is release_to::<T> with a 'static T, sound
     // whenever and however often the bridge runs it.
@@ -285,7 +329,7 @@ impl<'b> CpuMap<'b> {
     pub(in crate::mesa) fn new(b: &'b Bridge, memory: u64) -> Self {
         let mut address = 0usize;
         // SAFETY: live bridge; `address` is an exclusive usize the call writes.
-        let status = unsafe { nv_rm_map(raw(b), memory, &raw mut address) };
+        let status = unsafe { nv_rm_map(raw(b), NvRmMemoryId::new(memory), &raw mut address) };
         assert_eq!(status, 0, "nv_rm_map");
         // The mapping covers the whole allocation, rounded up to CPU pages
         // (rm.rs Memory::map_once), so the allocation size bounds it.
@@ -366,7 +410,7 @@ impl<'b> CpuMap<'b> {
     pub(in crate::mesa) fn unmap(self) -> i32 {
         // SAFETY: live bridge; this value is consumed, so no access through
         // `base` follows the unmap.
-        unsafe { nv_rm_unmap(raw(self.bridge), self.memory) }
+        unsafe { nv_rm_unmap(raw(self.bridge), NvRmMemoryId::new(self.memory)) }
     }
 }
 
@@ -376,8 +420,8 @@ pub(in crate::mesa) fn sync_create(
     flags: u32,
     initial: u64,
 ) -> std::result::Result<SyncHandle, i32> {
-    let mut id = 0;
-    // SAFETY: live bridge; `id` is an exclusive u64 the call writes.
+    let mut id = NvRmSyncId::new(0);
+    // SAFETY: live bridge; `id` is an exclusive local the call writes.
     let status = unsafe { nv_rm_sync_create(raw(b), flags, initial, &raw mut id) };
     if status == 0 {
         Ok(SyncHandle { id })
@@ -470,22 +514,25 @@ pub(in crate::mesa) fn submit_batch(
     let (pushes, count) = array(pushes);
     let (waits, wait_count) = array(waits.get());
     let (signals, signal_count) = array(signals.get());
+    let mut token = NvRmToken::new(*out);
     // SAFETY: live bridge; each array valid for its count (or null for 0),
-    // every sync id in them borrowed from a live handle; `out` is an
-    // exclusive u64.
-    unsafe {
+    // every sync id in them borrowed from a live handle; `token` is an
+    // exclusive local.
+    let status = unsafe {
         nv_rm_submit_batch(
             raw(b),
-            ctx,
+            NvRmContextId::new(ctx),
             pushes,
             count,
             waits,
             wait_count,
             signals,
             signal_count,
-            out,
+            &raw mut token,
         )
-    }
+    };
+    *out = token.get();
+    status
 }
 pub(in crate::mesa) fn submit_sync(
     b: &Bridge,
@@ -497,14 +544,38 @@ pub(in crate::mesa) fn submit_sync(
     let waits = Lowered::new(waits);
     let (pushes, count) = array(pushes);
     let (waits, wait_count) = array(waits.get());
+    let mut token = NvRmToken::new(*out);
     // SAFETY: as submit_batch.
-    unsafe { nv_rm_submit_sync(raw(b), ctx, pushes, count, waits, wait_count, out) }
+    let status = unsafe {
+        nv_rm_submit_sync(
+            raw(b),
+            NvRmContextId::new(ctx),
+            pushes,
+            count,
+            waits,
+            wait_count,
+            &raw mut token,
+        )
+    };
+    *out = token.get();
+    status
 }
 pub(in crate::mesa) fn submit(b: &Bridge, ctx: u64, pushes: &[Push], out: &mut u64) -> i32 {
     let (pushes, count) = array(pushes);
-    // SAFETY: live bridge; `pushes` valid for `count` (or null for 0); `out`
-    // is an exclusive u64.
-    unsafe { nv_rm_submit(raw(b), ctx, pushes, count, out) }
+    let mut token = NvRmToken::new(*out);
+    // SAFETY: live bridge; `pushes` valid for `count` (or null for 0); `token`
+    // is an exclusive local.
+    let status = unsafe {
+        nv_rm_submit(
+            raw(b),
+            NvRmContextId::new(ctx),
+            pushes,
+            count,
+            &raw mut token,
+        )
+    };
+    *out = token.get();
+    status
 }
 pub(in crate::mesa) fn context_signal(
     b: &Bridge,
@@ -514,8 +585,19 @@ pub(in crate::mesa) fn context_signal(
 ) -> i32 {
     let signals = Lowered::new(signals);
     let (signals, count) = array(signals.get());
+    let mut token = NvRmToken::new(*out);
     // SAFETY: as submit_batch.
-    unsafe { nv_rm_context_signal(raw(b), ctx, signals, count, out) }
+    let status = unsafe {
+        nv_rm_context_signal(
+            raw(b),
+            NvRmContextId::new(ctx),
+            signals,
+            count,
+            &raw mut token,
+        )
+    };
+    *out = token.get();
+    status
 }
 /// `waits` are sync_file descriptors, borrowed for the call (the bridge dups
 /// the ones it keeps).
@@ -529,20 +611,23 @@ pub(in crate::mesa) fn submit_waits(
 ) -> i32 {
     let (pushes, count) = array(pushes);
     let (fds, wait_count) = array(waits);
+    let mut token = NvRmToken::new(*out);
     // SAFETY: live bridge; `pushes` valid for `count`; `fds` points to
     // `wait_count` BorrowedFd values, which are repr(transparent) over RawFd
     // (std::os::fd::BorrowedFd docs), so it reads as that many open i32
-    // descriptors; `out` is an exclusive u64.
-    unsafe {
+    // descriptors; the output is an exclusive local.
+    let status = unsafe {
         nv_rm_submit_waits(
             raw(b),
-            ctx,
+            NvRmContextId::new(ctx),
             pushes,
             count,
             drm.as_raw_fd(),
             fds.cast::<RawFd>(),
             wait_count,
-            out,
+            &raw mut token,
         )
-    }
+    };
+    *out = token.get();
+    status
 }

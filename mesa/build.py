@@ -514,6 +514,8 @@ def main():
     for tool in ("bindgen", "cbindgen"):
         if not (TOOLS / tool).exists():
             parser.error(f"Missing {tool}; run mesa/compiler/build.py --tools-only --download-deps first")
+    # nv_rm.h is generated from rm-abi/: a header that does not match it cannot build.
+    run([sys.executable, ROOT / "mesa/gen-rm-header.py", "--check"])
     if not SOURCE.exists():
         run(["git", "-C", ROOT / "build/mesa-git", "worktree", "add", "--detach", SOURCE, PIN])
         run(["git", "-C", SOURCE, "sparse-checkout", "disable"])

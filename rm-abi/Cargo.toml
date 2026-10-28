@@ -1,0 +1,13 @@
+[package]
+name = "nv-rm-abi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The RM backend's C ABI (nv_rm_*) as Rust: the source mesa/nv_rm.h is generated from"
+
+[dependencies]
+
+[lints]
+workspace = true

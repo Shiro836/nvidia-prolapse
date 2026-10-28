@@ -1000,7 +1000,7 @@ impl Session {
         crate::platform::device_full_barrier();
         let push = Push {
             address: cmd.gpu.address().get(),
-            size: u32::try_from(w.len() * 4)
+            size_B: u32::try_from(w.len() * 4)
                 .expect("copy command buffers hold a few hundred words"),
             flags: 0,
         };

@@ -1486,13 +1486,9 @@ fn bind_zcull(device: &Rc<Device>, space: &AddressSpace, channel: u32) -> Result
     Ok(mapping)
 }
 
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-pub(crate) struct Push {
-    pub address: u64,
-    pub size: u32,
-    pub flags: u32,
-}
+/// One push buffer segment: the C ABI's `NvRmExec` (`nv-rm-abi`), which
+/// callers pass in arrays.
+pub(crate) use nv_rm_abi::NvRmExec as Push;
 impl Queue {
     pub(crate) fn new_with_events(
         device: &Rc<Device>,
@@ -2059,16 +2055,16 @@ impl Queue {
             if p.address & 3 != 0
                 || p.address >= 1 << 40
                 || p.address
-                    .checked_add(u64::from(p.size))
+                    .checked_add(u64::from(p.size_B))
                     .is_none_or(|end| end > (1u64 << 40))
-                || p.size == 0
-                || p.size & 3 != 0
-                || p.size >= 1 << 23
+                || p.size_B == 0
+                || p.size_B & 3 != 0
+                || p.size_B >= 1 << 23
                 || p.flags & !3 != 0
             {
                 return Err(ChannelError::Push {
                     address: p.address,
-                    size: p.size,
+                    size: p.size_B,
                     flags: p.flags,
                 }
                 .into());
@@ -2223,7 +2219,7 @@ impl Queue {
             self.write_entry(address.get(), scratch.prefix.len() * 4, true)?;
         }
         for p in pushes {
-            self.write_entry(p.address, usize_from_u32(p.size), p.flags & 1 != 0)?;
+            self.write_entry(p.address, usize_from_u32(p.size_B), p.flags & 1 != 0)?;
         }
         if let Some((_, gpu)) = &signal_segment {
             let address = gpu.address();

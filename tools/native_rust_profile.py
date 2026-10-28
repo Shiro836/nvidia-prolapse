@@ -35,7 +35,7 @@ def identity(path):
 def source_snapshot(root):
     root = Path(root)
     crate, mesa = root / 'rm', root / 'mesa'
-    crates = [crate, root / 'rm-core', root / 'rm-sys', root / 'video']
+    crates = [crate, root / 'rm-abi', root / 'rm-core', root / 'rm-sys', root / 'video']
     paths = sorted(path for member in crates for path in (member / 'src').rglob('*.rs'))
     paths += [member / 'Cargo.toml' for member in crates]
     paths += [root / 'Cargo.toml', root / 'Cargo.lock', mesa / 'nv_rm.h',

@@ -75,13 +75,9 @@ fn create(b: &Bridge, timeline: bool, initial: u64) -> SyncHandle {
     c::sync_create(b, u32::from(timeline), initial).expect("nv_rm_sync_create status 0")
 }
 fn alloc(b: &Bridge, size: u64, gart: bool) -> u64 {
-    let mut a = Allocation {
-        id: 0,
-        size: 0,
-        cpu_address: 0,
-    };
+    let mut a = Allocation::default();
     assert_eq!(c::alloc(b, size, 4096, u32::from(gart), 0, 0, &mut a), 0);
-    a.id
+    a.id.get()
 }
 fn bind(b: &Bridge, memory: u64, size: u64, address: u64) -> u64 {
     let mut id = 0;
@@ -504,7 +500,7 @@ fn freed_memory_stays_mapped_until_the_gated_batch_retires() {
         ctx,
         &[Push {
             address: va_p,
-            size: u32::try_from(words.len() * 4).unwrap(),
+            size_B: u32::try_from(words.len() * 4).unwrap(),
             flags: 0,
         }],
         &[point(&gate, 1)],
