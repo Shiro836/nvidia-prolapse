@@ -272,10 +272,10 @@ def prepared_stamp(source, inputs):
             h.update(str(f.relative_to(HERE)).encode() + b"\0" + f.read_bytes())
     return Path(source) / ".nv-prepared", h.hexdigest()
 
-def check_prepared(source, inputs, what):
+def check_prepared(source, inputs, what, flags=""):
     stamp, digest = prepared_stamp(source, inputs)
     if not stamp.is_file() or stamp.read_text().strip() != digest:
-        raise SystemExit(f"{source} is not prepared for this checkout ({what}); run build.py --prepare-only first")
+        raise SystemExit(f"{source} is not prepared for this checkout ({what}); run build.py {flags}--prepare-only first")
 
 def mark_prepared(source, inputs):
     stamp, digest = prepared_stamp(source, inputs)
@@ -292,6 +292,206 @@ def write_ndk_zlib_pc(pkgconfig_dir):
     (pkgconfig_dir / "zlib.pc").write_text(
         f"Name: zlib\nDescription: NDK sysroot zlib\nVersion: {zlib_version}\nLibs: -lz\nCflags:\n")
 
+# ---------------------------------------------------------------- nvrm (gallium GL/GLES), --gl
+# The nvrm gallium driver builds from its own Mesa worktree, Cargo target and build dirs: the
+# same pin and NVK patch stack (NAK, nil and nv_rm.h come from there), plus the GL patches and
+# the gallium-nvrm/ overlay. Opt-in beside ANGLE; NVK's trees are never touched.
+# NVRM_GL_DIR_SUFFIX lets parallel branches build without sharing a tree
+# (e.g. "-gles3" -> build/mesa-gl-source-gles3, build/nvrm-host-gles3).
+_GL_SUFFIX = os.environ.get("NVRM_GL_DIR_SUFFIX", "")
+GL_SOURCE = ROOT / f"build/mesa-gl-source{_GL_SUFFIX}"
+GL_RUST = ROOT / f"build/nvrm-rust{_GL_SUFFIX}"
+GL_TRIPLES = {"android": "x86_64-linux-android", "android32": "i686-linux-android"}
+# Android: distinct library names so the image's own Mesa (libEGL_mesa.so,
+# libGLESv*_mesa.so, libgallium_dri.so in /vendor/lib*/egl and /vendor/lib*)
+# is never shadowed: ro.hardware.egl=nvrm selects these.
+GL_ANDROID_SUFFIX = "_nvrm"
+GL_ANDROID_ARTIFACTS = (f"src/egl/libEGL{GL_ANDROID_SUFFIX}.so",
+                        f"src/mesa/glapi/es1api/libGLESv1_CM{GL_ANDROID_SUFFIX}.so",
+                        f"src/mesa/glapi/es2api/libGLESv2{GL_ANDROID_SUFFIX}.so",
+                        f"src/gallium/targets/dri/libgallium_dri{GL_ANDROID_SUFFIX}.so")
+
+
+GL_PREP_INPUTS = [HERE / n for n in NVK_PATCHES + ("gallium-nvrm.patch", "mesa-oes-texture-stencil8.patch",
+                                                  "mesa-nv-polygon-mode.patch", "nak-panic-message.patch",
+                                                  "android-egl-suffix.patch", "nv_rm.h", "nvkmd_rm.h", "nvkmd_rm.c",
+                                                  "gallium-nvrm")]
+
+def gl_build_dir(target):
+    return ROOT / f"build/nvrm-{target}{_GL_SUFFIX}"
+
+def prepare_gl_source(args):
+    """Reset the GL Mesa worktree to the pin and apply the full stack (the
+    worktree is ours alone). Returns the build environment. --skip-prepare: only
+    check that this checkout's stack was applied (a concurrent build prepared it)."""
+    for tool in ("bindgen", "cbindgen"):
+        if not (TOOLS / tool).exists():
+            raise SystemExit(f"Missing {tool}; run mesa/compiler/build.py --tools-only --download-deps first")
+    if getattr(args, "skip_prepare", False):
+        check_prepared(GL_SOURCE, GL_PREP_INPUTS, "GL", "--gl ")
+        return gl_env()
+    stamp = GL_SOURCE / ".nv-prepared"
+    if stamp.exists():
+        stamp.unlink()
+    if not GL_SOURCE.exists():
+        run(["git", "-C", ROOT / "build/mesa-git", "worktree", "add", "--detach", GL_SOURCE, PIN])
+        run(["git", "-C", GL_SOURCE, "sparse-checkout", "disable"])
+    actual = subprocess.check_output(["git", "-C", str(GL_SOURCE), "rev-parse", "HEAD"], text=True).strip()
+    if actual != PIN:
+        raise SystemExit(f"Mesa GL worktree revision mismatch: {actual}")
+    run(["git", "-C", GL_SOURCE, "reset", "-q", "--hard", PIN])
+    run(["git", "-C", GL_SOURCE, "clean", "-qfdx", "-e", "subprojects/packagecache"])
+    # GL-only Mesa core fixes (st/mesa, main/) on top of the NVK stack;
+    # android-egl-suffix.patch only changes Android library naming.
+    for name in NVK_PATCHES + ("gallium-nvrm.patch", "mesa-oes-texture-stencil8.patch",
+                               "mesa-nv-polygon-mode.patch", "nak-panic-message.patch",
+                               "android-egl-suffix.patch", "mesa-glapi-narrow-args.patch"):
+        run(["git", "-C", GL_SOURCE, "apply", HERE / name])
+    rm_source = GL_SOURCE / "src/nouveau/vulkan/nvkmd/rm"
+    rm_source.mkdir(parents=True, exist_ok=True)
+    for name in ("nv_rm.h", "nvkmd_rm.h", "nvkmd_rm.c"):
+        shutil.copy2(HERE / name, rm_source / name)
+    shutil.copytree(HERE / "gallium-nvrm", GL_SOURCE / "src/gallium/drivers/nvrm", dirs_exist_ok=True)
+    cache = GL_SOURCE / "subprojects/packagecache"
+    cache.mkdir(exist_ok=True)
+    for archive in (ROOT / "build/mesa-nak-source/subprojects/packagecache").glob("*.tar.gz"):
+        if not (cache / archive.name).exists():
+            shutil.copy2(archive, cache / archive.name)
+    host_dependencies(args.download_deps)
+    mark_prepared(GL_SOURCE, GL_PREP_INPUTS)
+    return gl_env()
+
+def gl_env():
+    env = dict(os.environ)
+    host_clc = ROOT / "build/nvk-host/src/compiler/clc"
+    host_vtn = ROOT / "build/nvk-host/src/compiler/spirv"
+    if not (host_clc / "mesa_clc").exists():
+        raise SystemExit("Missing host mesa_clc: build the NVK host target first (build.py --target host)")
+    env["PATH"] = ":".join(map(str, (host_clc, host_vtn, TOOLS))) + ":" + env["PATH"]
+    env["PKG_CONFIG_PATH"] = f"{DEPS}/root/usr/lib/pkgconfig:{DEPS}/root/usr/share/pkgconfig"
+    env["LD_LIBRARY_PATH"] = f"{DEPS}/root/usr/lib"
+    cc_launcher.host_env(env)
+    return env
+
+def build_gl(args):
+    """nvrm gallium driver: separate Mesa worktree, Cargo target and build dirs.
+
+    Same pin and the same NVK patch stack as the NVK build (NAK, nil and
+    nv_rm.h come from there), plus gallium-nvrm.patch (meson/loader hookup)
+    and the gallium-nvrm/ overlay. Nothing under build/mesa-rm-source,
+    build/nv-rm-rust, build/nvk-* or android{,32}.ini is read-modified or
+    written. Host -> build/nvrm-host; android/android32 -> build/nvrm-android{,32}."""
+    env = prepare_gl_source(args)
+    if args.prepare_only:
+        print(f"Prepared {GL_SOURCE}")
+        return
+    targets = ("android", "android32") if args.target == "both" else (args.target,)
+    for target in targets:
+        if target == "host":
+            build_gl_host(args, env)
+        else:
+            build_gl_android(args, env, target)
+
+def build_gl_host(args, env):
+    GL_BUILD = gl_build_dir("host")
+    rust_command = ["cargo", "build", "--offline", "--no-default-features", "--target-dir", GL_RUST,
+                    "--manifest-path", ROOT / "rm/Cargo.toml"]
+    if args.rust_profile == "release":
+        rust_command.append("--release")
+    run(rust_command, env=env)
+    rust_lib = GL_RUST / ("debug" if args.rust_profile == "dev" else "release")
+    linker_args = [f"-L{rust_lib}", f"-Wl,-rpath,{rust_lib}"]
+    options = ["-Dvulkan-drivers=nouveau", "-Dgallium-drivers=nvrm", "-Dplatforms=",
+               "-Degl=enabled", "-Dgles1=disabled", "-Dgles2=enabled", "-Dopengl=true",
+               "-Dglx=disabled", "-Dgbm=disabled", "-Dglvnd=disabled", "-Dllvm=disabled", "-Dmesa-clc=system",
+               "-Dbuild-tests=false", "-Dvideo-codecs=", "-Dvalgrind=disabled",
+               "-Dlibunwind=disabled", "-Dbuildtype=release",
+               "-Dc_link_args=" + json.dumps(linker_args), "-Dcpp_link_args=" + json.dumps(linker_args)]
+    setup = cc_launcher.setup_command(GL_BUILD, GL_SOURCE)
+    setup_run(setup + options + ["--wrap-mode=" + ("default" if args.download_deps else "nodownload")], args, env=env)
+    cc_launcher.record(GL_BUILD)
+    run(["ninja", "-C", GL_BUILD, "-j", args.j, *ninja_load()], env=env)
+    for name in ("src/egl/libEGL.so.1", "src/mesa/glapi/es2api/libGLESv2.so.2"):
+        if not (GL_BUILD / name).exists():
+            raise SystemExit(f"Missing {GL_BUILD / name} after the build")
+    print(f"Built nvrm host GL (Rust {args.rust_profile}): {GL_BUILD}")
+
+def build_gl_android(args, env, target):
+    """platform_android EGL + GLES1/2 with u_gralloc (cros backend via the
+    image's gralloc0 module) for one bionic ABI, NDK r29, SDK 33, same
+    sysroot/pkg-config recipe as the NVK Android build."""
+    build = gl_build_dir(target)
+    bits = 32 if target == "android32" else 64
+    triple = GL_TRIPLES[target]
+    runtime = ROOT / "build/nvk-android32/runtime" if bits == 32 else ANDROID / "image-rootfs/system/lib64"
+    target_env = dict(env)
+    # The guest has ONE libnv_bionic_native.so per ABI (/vendor_extra), shared
+    # with NVK, so nvrm links NVK's own Rust build output (build/nv-rm-rust,
+    # profiles.rust_library) instead of a second cargo build: identity by
+    # construction. Refused unless NVK's recorded build is current for this
+    # checkout (profiles.verify_metadata) and was built against the same
+    # nv_rm.h ABI as this checkout's nvrm.
+    try:
+        nvk_record = profiles.verify_metadata(ROOT, target, args.rust_profile)
+    except RuntimeError as error:
+        raise SystemExit(f"nvrm {target}: NVK's Rust backend is not usable: {error}")
+    abi_key = "mesa/nv_rm.h"
+    abi_here = hashlib.sha256((HERE / "nv_rm.h").read_bytes()).hexdigest()
+    if nvk_record["source_sha256"].get(abi_key) != abi_here:
+        raise SystemExit(f"nvrm {target}: {HERE / 'nv_rm.h'} differs from the nv_rm.h NVK's Rust "
+                         f"backend was built with ({ROOT / abi_key}); build both from one checkout")
+    rust_lib = profiles.rust_library(ROOT, target, args.rust_profile).parent
+    if not (rust_lib / "libnv_bionic_native.so").is_file():
+        raise SystemExit(f"Missing {rust_lib / 'libnv_bionic_native.so'}")
+    cross_dir = ROOT / f"build/nvrm-{target}-cross{_GL_SUFFIX}"
+    cross = android_cross_file(bits, out=cross_dir, download=args.download_deps)
+    # nvrm's program cache (Mesa disk_cache, nvrm_shader_cache.c) needs a
+    # compressor: the NDK sysroot ships zlib (an NDK stable library, libz.so in
+    # every image's /system/lib*); libzstd is not in the NDK.
+    write_ndk_zlib_pc(cross_dir / "pkgconfig")
+    linker_args = [f"-L{rust_lib}"]
+    options = ["--cross-file", cross,
+               "-Dvulkan-drivers=nouveau", "-Dgallium-drivers=nvrm",
+               "-Dplatforms=android", "-Dplatform-sdk-version=33", "-Dandroid-stub=false",
+               "-Dandroid-libbacktrace=disabled",
+               "-Degl=enabled", "-Dgles1=enabled", "-Dgles2=enabled", "-Dopengl=true",
+               f"-Degl-lib-suffix={GL_ANDROID_SUFFIX}", f"-Dgles-lib-suffix={GL_ANDROID_SUFFIX}",
+               "-Dglx=disabled", "-Dgbm=disabled", "-Dglvnd=disabled", "-Dllvm=disabled",
+               "-Dmesa-clc=system", "-Dexpat=disabled", "-Dzstd=disabled", "-Dzlib=enabled",
+               "-Dshader-cache=enabled", "-Dbuild-tests=false", "-Dvideo-codecs=",
+               "-Dvalgrind=disabled", "-Dlibunwind=disabled", "-Dbuildtype=release",
+               "-Dc_link_args=" + json.dumps(linker_args),
+               "-Dcpp_link_args=" + json.dumps(linker_args + ["-static-libstdc++", f"-Wl,-rpath-link,{runtime}"])]
+    target_env.pop("PKG_CONFIG_PATH", None)
+    target_env["BINDGEN_EXTRA_CLANG_ARGS"] = f"--sysroot={NDK}/sysroot -isystem {NDK}/sysroot/usr/include/{triple} -D__ANDROID_API__=33"
+    setup = cc_launcher.setup_command(build, GL_SOURCE)
+    setup_run(setup + options + ["--wrap-mode=" + ("default" if args.download_deps else "nodownload")], args, env=target_env)
+    cc_launcher.record(build)
+    run(["ninja", "-C", build, *GL_ANDROID_ARTIFACTS, "-j", args.j, *ninja_load()], env=target_env)
+    for name in GL_ANDROID_ARTIFACTS:
+        if not (build / name).is_file():
+            raise SystemExit(f"Missing {build / name} after the build")
+    # Build record for staging: the guest has ONE libnv_bionic_native.so per ABI
+    # (vendor_extra), shared with NVK, so the stager must prove that the file it
+    # stages is the one nvrm was linked against (sha256), and never mix.
+    def sha(path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    head = subprocess.run(["git", "-C", str(HERE), "rev-parse", "HEAD"], capture_output=True, text=True)
+    dirty = subprocess.run(["git", "-C", str(HERE), "status", "--porcelain", "--untracked-files=no"],
+                           capture_output=True, text=True).stdout.strip() != ""
+    record = {"format": 1, "target": target, "triple": triple, "rust_profile": args.rust_profile,
+              "mesa_pin": PIN, "driver_source_head": head.stdout.strip(), "driver_source_dirty": dirty,
+              "egl_suffix": GL_ANDROID_SUFFIX,
+              "artifacts": {Path(name).name: {"path": str(build / name), "sha256": sha(build / name)}
+                            for name in GL_ANDROID_ARTIFACTS},
+              "rust": {"path": str(rust_lib / "libnv_bionic_native.so"),
+                       "sha256": sha(rust_lib / "libnv_bionic_native.so")},
+              "nvk_rust_build": str(profiles.metadata_path(ROOT, target))}
+    if record["rust"]["sha256"] != nvk_record["rust"]["sha256"]:
+        raise SystemExit(f"nvrm {target}: linked Rust backend changed during the build")
+    (build / "nvrm-build.json").write_text(json.dumps(record, indent=2) + "\n")
+    print(f"Built nvrm {target} GL (Rust {args.rust_profile}): {build}")
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=("host", "android", "android32", "both"), default="both")
@@ -299,13 +499,19 @@ def main():
                         help="Rust Cargo profile (dev keeps the existing debug build)")
     parser.add_argument("--download-deps", action="store_true")
     parser.add_argument("-j", type=int, default=12)
+    parser.add_argument("--gl", action="store_true",
+                        help="build the nvrm gallium GL/GLES driver from its own Mesa worktree into "
+                             "build/nvrm-<target> (--target both = android + android32); NVK trees "
+                             "are not touched")
     prep = parser.add_mutually_exclusive_group()
     prep.add_argument("--prepare-only", action="store_true",
-                      help="apply the patch stack to the Mesa worktree and stop")
+                      help="apply the patch stack to the Mesa worktree (NVK, or nvrm's with --gl) and stop")
     prep.add_argument("--skip-prepare", action="store_true",
                       help="build a target from a worktree an earlier --prepare-only/full run prepared for this "
                            "checkout (lets several targets build concurrently from one worktree)")
     args = parser.parse_args()
+    if args.gl:
+        return build_gl(args)
     sources_before = profiles.source_snapshot(ROOT)
     for tool in ("bindgen", "cbindgen"):
         if not (TOOLS / tool).exists():

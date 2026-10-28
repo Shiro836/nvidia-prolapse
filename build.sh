@@ -68,6 +68,10 @@ say "NVK + the Rust RM backend (host, x86_64, i686)"
 "$PY" mesa/build.py --target android --download-deps --skip-prepare -j "$JOBS" --rust-profile release
 "$PY" mesa/build.py --target android32 --download-deps --skip-prepare -j "$JOBS" --rust-profile release
 
+say "nvrm gallium GL/GLES (opt-in beside ANGLE): Android x86_64 + i686 against the NVK builds' Rust backend, host"
+"$PY" mesa/build.py --gl --target both --download-deps -j "$JOBS" --rust-profile release
+"$PY" mesa/build.py --gl --target host --skip-prepare -j "$JOBS" --rust-profile release
+
 say "Vulkan HAL over NVK (+ its Android test programs)"
 "$PY" hal/build-nvk.py
 "$PY" hal/build-nvk-tests.py

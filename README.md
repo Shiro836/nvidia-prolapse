@@ -2,7 +2,8 @@
 
 An open driver stack for NVIDIA GPUs in Android containers on Linux (Waydroid and similar).
 Android apps get Vulkan from Mesa's NVK and NAK, running on a Rust backend that talks to the
-host's NVIDIA kernel module directly. GLES comes from ANGLE on top of that Vulkan driver.
+host's NVIDIA kernel module directly. GLES comes from ANGLE on top of that Vulkan driver, or, opt-in,
+from nvrm, a gallium GLES driver over the same backend.
 No proprietary NVIDIA userspace library runs inside the container.
 
 This repository is being assembled from the [waydroid-nvidia](https://github.com/Shiro836/waydroid-nvidia)
@@ -16,7 +17,7 @@ they are.
 |---|---|
 | `rm/` | Rust backend that talks to NVIDIA's kernel module (RM ioctls), plus the NVDEC video core |
 | `rm-sys/`, `rm-core/`, `video/` | its raw RM/NVDEC bindings, its syscall-free core (errors, push-buffer encoding, reclamation) and the syscall-free NVDEC codec layer |
-| `mesa/` | Mesa NVK and NAK at a pinned release, our patch stack, and the C adapter (`nvkmd_rm.c`) between NVK and `rm/` |
+| `mesa/` | Mesa NVK and NAK at a pinned release, our patch stack, the C adapter (`nvkmd_rm.c`) between NVK and `rm/`, and the nvrm gallium GL/GLES driver (`mesa/gallium-nvrm/`) |
 | `hal/` | Android Vulkan HAL (`vulkan.nvidia.so`) over NVK: native and hardware buffers, ASTC/ETC2 emulation |
 | `gralloc/` | gralloc backend for minigbm (`libgbm_mesa_wrapper.so`) and the minigbm patches it needs |
 | `media/` | Codec2 hardware video decoder (AVC, HEVC, VP9) over the NVDEC core in `rm/` |

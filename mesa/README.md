@@ -11,6 +11,14 @@ The source pin is **ddaf85e353442d9d7f192fdcf1823e652e3f2ee3** (tag mesa-26.2.5,
 `build/mesa-rm-source` worktree leaves the compiler-only worktree and original
 Mesa checkout unchanged.
 
+## nvrm (gallium GL/GLES)
+
+`build.py --gl` builds nvrm, a gallium GL/GLES driver over NAK, nil and the same Rust backend, from
+its own worktree `build/mesa-gl-source`: the NVK patch stack plus `gallium-nvrm.patch`, the GL-only
+Mesa fixes and the `gallium-nvrm/` sources. It is opt-in beside ANGLE (`ro.hardware.egl=nvrm`).
+Build, host smoke test and the Android integration contract: [ANDROID-GL.md](ANDROID-GL.md); its
+tests: [tests/README.md](tests/README.md).
+
 ## Rebuild
 
 ```sh

@@ -272,3 +272,50 @@ vkCmdCopyImage and read back by vkCmdCopyImageToBuffer, every block compared. Th
 these copies are compute work, and a view that reinterprets a compressed level as blocks gets its layer stride
 from that single level: layers past the first need one view per layer. Exit 77 = no compute-only family.
 10-25 (RTX 5090): PASS on NVK + Rust RM and on the stock driver. 0 Xid.
+
+## nvrm (gallium GL/GLES) tests
+
+Build nvrm for the host after NVK's host build (`python3 mesa/build.py --gl --target host
+--rust-profile release`, see ../ANDROID-GL.md; `./build.sh` does it). Each program's header has its
+cases and arguments. Host build and run, from the repository root:
+
+    B=build/nvrm-host
+    cc -std=c11 -Wall -Wextra -Werror -Ibuild/mesa-gl-source/include mesa/tests/gl-g0a-clear.c \
+       -L$B/src/egl -lEGL -L$B/src/mesa/glapi/es2api -lGLESv2 \
+       -Wl,-rpath,$PWD/$B/src/egl:$PWD/$B/src/mesa/glapi/es2api -o gl-g0a-clear
+    LIBGL_DRIVERS_PATH=$PWD/$B/src/gallium/targets/dri ./gl-g0a-clear
+
+The loader maps the nvidia-drm render node to nvrm by itself; no driver override is needed. A
+reference comes from the same source linked against the host's Mesa through glvnd on llvmpipe
+(`cc ... -lEGL -lGLESv2`, run with
+`__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json LIBGL_ALWAYS_SOFTWARE=1`);
+the `--gl` build has no llvmpipe (LLVM disabled). `NVRM_DEBUG_SHADERS=1` prints st/mesa's NIR and
+NAK's assembly.
+
+| Program | Checks |
+|---|---|
+| `gl-g0a-clear.c` | surfaceless EGL + GLES2 context, glClear readback exact; GL_VENDOR names nvrm |
+| `gl-g0b-triangle.c` | NAK-compiled triangle and indexed quad vs a reference image (`--flat`: 0 mismatching pixels; gradients may differ by 1 LSB) |
+| `gl-lod-switchover.c` | min/mag switch-over point of explicit-LOD vertex lookups |
+| `gl-skia-shaders.c` | SurfaceFlinger RenderEngine (Skia) shader features vs llvmpipe |
+| `gl-dmabuf.c` | dma-buf import/export and native fences, NVK as the second party (`-DNVRM_NO_VULKAN` for the EGL-only part) |
+| `gl-yuv.c` | NV12/P010 EGLImage import + samplerExternalOES vs a CPU reference |
+| `gl-es31-compute.c`, `gl-es31-helper-loads.c`, `gl-cs-sysvals.c` | GLES 3.1 compute, SSBOs, atomics, indirect dispatch, compute system values, helper-invocation loads |
+| `gl-es31-b.c` | GLES 3.1 images, memory barriers, no-attachment FBOs, gather, stencil texturing, MS fetch |
+| `gl-es31-mc.c`, `gl-mc-vis.c`, `gl-polygon-mode.c`, `gl-shader-heap.c` | the GLES 3.1 feature set of Minecraft Bedrock's renderer: clip control, depth clamp, copy_image, GL_NV_polygon_mode, shader heap growth |
+| `gl-linear-zs.c`, `gl-zero-vb.c`, `gl-border-swizzle.c` | LINEAR colour targets with depth / odd pitches, empty vertex and index ranges, border colour with swizzles |
+| `gl-gs.c` | geometry shaders, cube map arrays |
+| `gl-narrow-args.c` | narrow (char/short) GL arguments with garbage upper bits (`mesa-glapi-narrow-args.patch`) |
+| `gl-shader-async.c` | asynchronous shader compile seen from the GL API, shared shader objects |
+| `gl-texpool-rebind.c` | texture/sampler pool rebinds while an earlier batch still samples |
+| `gl-capture-late-arm.c`, `gl-perf-frame.c`, `gl-perf-mc.c` | perf capture armed late, per-frame placement/synchronisation cost, a Minecraft-shaped frame (directional, never timings on a busy GPU) |
+
+Android: `gl-android-smoke.py` (../ANDROID-GL.md) builds and runs the triangle, Skia, dma-buf and
+YUV programs on both bionic ABIs.
+
+dEQP-GLES2/GLES3 on the host build: `deqp-gles2-run.py <deqp binary> <caselist> <outdir> [nvrm|llvmpipe]`
+runs a case list in batches and survives crashes (a crash or watchdog timeout marks the running case
+and resumes after it), writing `results.json`. dEQP is built from VK-GL-CTS with the EGL surfaceless
+platform (`cmake -DDEQP_TARGET=surfaceless`); pass `DEQP_CONFIG=rgba8888d24s8ms0`. Keep case lists in
+dEQP's own (tree) order: the resume logic assumes file order = execution order. `NVRM_GL_DIR_SUFFIX=-x`
+makes both `build.py --gl` and the runner use build/mesa-gl-source-x and build/nvrm-host-x.
