@@ -14,6 +14,7 @@ use std::{
     os::fd::{AsRawFd, RawFd},
     ptr::NonNull,
     rc::{Rc, Weak},
+    sync::Arc,
 };
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
@@ -103,12 +104,14 @@ fn parse_runtime_version(text: &str) -> Result<String> {
 /// allocated on it, and the exact ABI profile of the running driver release. Freeing the
 /// root on drop releases every object the client still owns.
 pub struct Client {
-    pub(crate) control: File,
+    pub(crate) control: Arc<File>,
     pub(crate) root: RmHandle,
     /// The driver release the client was opened against ([`runtime_version`]).
     pub version: String,
     pub(crate) compat: Compat,
     pub(crate) cpu_page_size: usize,
+    /// The client's entry in the list the exit handler frees ([`crate::exit`]).
+    exit: crate::exit::Registration,
 }
 impl Client {
     /// Open `/dev/nvidiactl`, pass RM's strict version check and allocate the root client.
@@ -159,12 +162,29 @@ impl Client {
         if alloc.object == 0 {
             return Err(Error::Contract("RM returned a zero client handle".into()));
         }
+        let root = RmHandle::new(alloc.object);
+        let control = Arc::new(control);
+        let exit_control = Arc::clone(&control);
+        let exit = crate::exit::Registration::new(
+            root,
+            Box::new(move || free_object(&exit_control, compat, root, RmHandle::new(0), root)),
+        );
+        let exit = match exit {
+            Ok(exit) => exit,
+            Err(error) => {
+                if let Err(free) = free_object(&control, compat, root, RmHandle::new(0), root) {
+                    diag!("RM client cleanup: {free}");
+                }
+                return Err(Error::Io("register RM exit teardown", error));
+            }
+        };
         Ok(Rc::new(Self {
             control,
-            root: RmHandle::new(alloc.object),
+            root,
             version,
             compat,
             cpu_page_size,
+            exit,
         }))
     }
     /// The NVIDIA GPUs RM enumerates (`NV_ESC_CARD_INFO`), valid entries only.
@@ -318,21 +338,7 @@ impl Client {
         status("unmap GPU VA", parameters.status)
     }
     pub(crate) fn free(&self, parent: RmHandle, object: RmHandle) -> Result<()> {
-        let mut call = abi::Free {
-            root: self.root.get(),
-            parent: parent.get(),
-            object: object.get(),
-            status: 0,
-        };
-        exchange_wire(
-            self.control.as_raw_fd(),
-            0x29,
-            self.compat,
-            "NVOS00_PARAMETERS",
-            &mut call,
-            "RM free",
-        )?;
-        status("RM free", call.status)
+        free_object(&self.control, self.compat, self.root, parent, object)
     }
     /// Where RM placed `object` for a CPU mapping with NVOS33 `map_flags`
     /// (NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE, public ctrl0000client.h).
@@ -491,10 +497,38 @@ impl ControlPort {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        // The exit handler may already have freed the root on another thread.
+        if !self.exit.withdraw() {
+            return;
+        }
         if let Err(error) = self.free(RmHandle::new(0), self.root) {
             diag!("RM client cleanup: {error}");
         }
     }
+}
+/// NV_ESC_RM_FREE of `object` under `parent` in client `root` (NVOS00, nvos.h).
+fn free_object(
+    control: &File,
+    compat: Compat,
+    root: RmHandle,
+    parent: RmHandle,
+    object: RmHandle,
+) -> Result<()> {
+    let mut call = abi::Free {
+        root: root.get(),
+        parent: parent.get(),
+        object: object.get(),
+        status: 0,
+    };
+    exchange_wire(
+        control.as_raw_fd(),
+        0x29,
+        compat,
+        "NVOS00_PARAMETERS",
+        &mut call,
+        "RM free",
+    )?;
+    status("RM free", call.status)
 }
 
 /// One GPU opened on a [`Client`]: its device and subdevice objects, the open

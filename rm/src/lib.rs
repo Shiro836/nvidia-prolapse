@@ -11,9 +11,12 @@
 //! nv_drm_create_sync_file). Nothing runs at load time; state is created by
 //! the open entry points and owned by the handles they return. A handle used
 //! in a forked child fails as lost and is never torn down there (process.rs).
+//! The first RM client registers one `atexit` handler that frees every RM
+//! client still live at exit on the exiting thread (exit.rs).
 //! The library supports dlclose once every handle is closed: closing joins
 //! the device's watcher thread and releases its mappings and descriptors;
-//! libc drops the atfork handler with the library, and the per-thread
+//! libc drops the atfork handler with the library and runs the atexit
+//! handler (with no live client, a no-op), and the per-thread
 //! nv_video_last_error buffer's destructor keeps the library loaded until
 //! that thread exits (libc's thread-local destructor accounting).
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -59,6 +62,7 @@ pub(crate) mod diag;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
 pub(crate) mod events;
+mod exit;
 mod external;
 mod fences;
 mod ffi;
