@@ -33,6 +33,7 @@
 #include "nv_push.h"
 #include "nv_push_cl9097.h"
 #include "nv_push_cla097.h"
+#include "nv_push_cla0c0.h"
 #include "nv_push_cl90b5.h"
 #include "nv_push_clc1b5.h"
 #include "nv_push_clcab5.h"
@@ -616,16 +617,22 @@ bool
 nvrm_texture_context_init(struct nvrm_context *ctx)
 {
    struct nvrm_screen *screen = nvrm_screen(ctx->base.screen);
-   /* TIC pool then TSC pool, NVRM_TEX_POOL_SLOTS x 32 B each, in VRAM and
-    * CPU-written through BAR1 on every BAR size, as NVK's descriptor tables
-    * (nvk_descriptor_table.c:73, NVKMD_MEM_LOCAL + NVKMD_MEM_MAP_WR). */
+   /* TIC pool then TSC pool, NVRM_TEX_POOL_SLOTS x 32 B each, in video
+    * memory the CPU never maps, as the proprietary GL driver's header and
+    * sampler pools (libnvidia-eglcore 615.78.08: VIDMEM, no CPU mapping);
+    * entries are written by the GPU from the pushbuffer (nvrm_tex_pool_write).
+    * Entries are never read before they are written, so the pools start
+    * uninitialised. */
    for (unsigned r = 0; r < NVRM_BATCH_RING; r++) {
-      if (!nvrm_bo_alloc(screen, 2u * NVRM_TEX_POOL_SLOTS * 32u, NVRM_DOMAIN_VRAM_MAPPED,
+      if (!nvrm_bo_alloc(screen, 2u * NVRM_TEX_POOL_SLOTS * 32u, NVRM_DOMAIN_VRAM,
                          &ctx->ring[r].tex_pool))
          return false;
-      memset(ctx->ring[r].tex_pool.map, 0, 2u * NVRM_TEX_POOL_SLOTS * 32u);
    }
    ctx->tex_pool = ctx->ring[ctx->ring_cur].tex_pool;
+   ctx->tex_pool_written = 0;
+   ctx->tex_shadow = malloc(NVRM_TEX_POOL_SLOTS * sizeof(*ctx->tex_shadow));
+   if (!ctx->tex_shadow)
+      return false;
    /* Driver constant buffer (nvrm_priv.h NVRM_DRV_CB_*): GPU-written only. */
    if (!nvrm_bo_alloc(screen, (uint64_t)NVRM_GFX_STAGES * NVRM_DRV_CB_STAGE_B, NVRM_DOMAIN_VRAM,
                       &ctx->drv_cb))
@@ -671,6 +678,8 @@ nvrm_texture_context_destroy(struct nvrm_context *ctx)
    }
    free(ctx->tex_slots);
    ctx->tex_slots = NULL;
+   free(ctx->tex_shadow);
+   ctx->tex_shadow = NULL;
 }
 
 /* Pool binding, as NVK's nvk_queue_state_update for the 3D class. Emitted
@@ -691,6 +700,73 @@ nvrm_emit_tex_pools(struct nvrm_context *ctx, struct nv_push *p)
    P_NV9097_SET_TEX_SAMPLER_POOL_B(p, tsc);
    P_NV9097_SET_TEX_SAMPLER_POOL_C(p, NVRM_TEX_POOL_SLOTS - 1);
    P_IMMD(p, NV9097, INVALIDATE_SAMPLER_CACHE_NO_WFI, { .lines = LINES_ALL });
+}
+
+/* Pushbuffer space nvrm_tex_pool_write needs for `slots` new entries. */
+unsigned
+nvrm_tex_pool_write_dw(unsigned slots)
+{
+   /* Per pool: LINE_LENGTH_IN..OFFSET_OUT (5), LAUNCH_DMA (2),
+    * LOAD_INLINE_DATA header (1) + 8 words per entry. */
+   return slots ? 2u * (8u + 8u * slots) : 0;
+}
+
+/* Starts one inline-to-memory write of `size_B` bytes at `addr` on the 3D or
+ * the compute class; the caller appends the data words. LAUNCH_DMA as the
+ * proprietary GL driver writes its texture and sampler headers
+ * (libnvidia-eglcore 615.78.08, push capture: I2M LINE_LENGTH_IN 0x20,
+ * LINE_COUNT 1, LAUNCH_DMA 0x1001 = DST PITCH, COMPLETION FLUSH_DISABLE,
+ * SEMAPHORE_STRUCT_SIZE ONE_WORD, LOAD_INLINE_DATA x8, then the header cache
+ * invalidate before the draw that uses them). */
+static void
+nvrm_i2m_begin(struct nv_push *p, bool compute, uint64_t addr, uint32_t size_B)
+{
+   if (compute) {
+      P_MTHD(p, NVA0C0, LINE_LENGTH_IN);
+      P_NVA0C0_LINE_LENGTH_IN(p, size_B);
+      P_NVA0C0_LINE_COUNT(p, 1);
+      P_NVA0C0_OFFSET_OUT_UPPER(p, addr >> 32);
+      P_NVA0C0_OFFSET_OUT(p, addr);
+      P_MTHD(p, NVA0C0, LAUNCH_DMA);
+      P_NVA0C0_LAUNCH_DMA(p, {
+         .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
+         .completion_type = COMPLETION_TYPE_FLUSH_DISABLE,
+         .semaphore_struct_size = SEMAPHORE_STRUCT_SIZE_ONE_WORD,
+      });
+      P_0INC(p, NVA0C0, LOAD_INLINE_DATA);
+   } else {
+      P_MTHD(p, NVA097, LINE_LENGTH_IN);
+      P_NVA097_LINE_LENGTH_IN(p, size_B);
+      P_NVA097_LINE_COUNT(p, 1);
+      P_NVA097_OFFSET_OUT_UPPER(p, addr >> 32);
+      P_NVA097_OFFSET_OUT(p, addr);
+      P_MTHD(p, NVA097, LAUNCH_DMA);
+      P_NVA097_LAUNCH_DMA(p, {
+         .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
+         .completion_type = COMPLETION_TYPE_FLUSH_DISABLE,
+         .semaphore_struct_size = SEMAPHORE_STRUCT_SIZE_ONE_WORD,
+      });
+      P_0INC(p, NVA097, LOAD_INLINE_DATA);
+   }
+}
+
+/* Puts the entries made since the last call into the current pool: the TIC
+ * words of the new slots in one write, their TSC words in another (new slots
+ * are consecutive). Emitted before the header/sampler cache invalidates and
+ * the draw or dispatch that uses them. */
+void
+nvrm_tex_pool_write(struct nvrm_context *ctx, struct nv_push *p, bool compute)
+{
+   const uint32_t first = ctx->tex_pool_written, end = ctx->tex_pool_next;
+   if (first >= end)
+      return;
+   for (unsigned half = 0; half < 2; half++) {
+      const uint64_t base = ctx->tex_pool.va + (uint64_t)half * NVRM_TEX_POOL_SLOTS * 32u;
+      nvrm_i2m_begin(p, compute, base + (uint64_t)first * 32u, (end - first) * 32u);
+      for (uint32_t slot = first; slot < end; slot++)
+         P_INLINE_ARRAY(p, &ctx->tex_shadow[slot][8 * half], 8);
+   }
+   ctx->tex_pool_written = end;
 }
 
 /* Called before nvrm_push_begin of a draw: makes room in the pool (a full
@@ -733,10 +809,7 @@ nvrm_tex_slot(struct nvrm_context *ctx, const uint32_t tic[8], const uint32_t ts
    }
    const uint32_t slot = ctx->tex_pool_next++;
    assert(slot < NVRM_TEX_POOL_SLOTS);
-   uint8_t *tic_pool = ctx->tex_pool.map;
-   uint8_t *tsc_pool = tic_pool + NVRM_TEX_POOL_SLOTS * 32u;
-   memcpy(tic_pool + slot * 32u, tic, 32);
-   memcpy(tsc_pool + slot * 32u, tsc, 32);
+   memcpy(ctx->tex_shadow[slot], words, sizeof(words));
    ctx->inval |= NVRM_INVAL_HEADER;
    if (free_entry) {
       memcpy(free_entry->words, words, sizeof(words));

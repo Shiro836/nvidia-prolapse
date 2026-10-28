@@ -514,6 +514,10 @@ struct nvrm_context {
    struct nvrm_sampler *samplers[MESA_SHADER_STAGES][NVRM_MAX_TEX_UNITS];
    struct nvrm_bo tex_pool; /* current slot's TIC pool, then TSC pool */
    uint32_t tex_pool_next;
+   /* Entries [tex_pool_written, tex_pool_next) are only in tex_shadow yet:
+    * the next nvrm_tex_pool_write puts them into the pool. */
+   uint32_t tex_pool_written;
+   uint32_t (*tex_shadow)[16]; /* per slot: TIC words, then TSC words */
    /* (TIC, TSC) pairs already written into the current batch's pool ->
     * slot: a texture bind reuses its entry instead of writing a new one
     * (stock writes TIC/TSC only on first use).
@@ -734,6 +738,8 @@ void nvrm_texture_context_destroy(struct nvrm_context *ctx);
 void nvrm_init_texture_functions(struct pipe_context *p);
 void nvrm_emit_tex_pools(struct nvrm_context *ctx, struct nv_push *p);
 void nvrm_texture_reserve(struct nvrm_context *ctx, unsigned slots);
+unsigned nvrm_tex_pool_write_dw(unsigned slots);
+void nvrm_tex_pool_write(struct nvrm_context *ctx, struct nv_push *p, bool compute);
 struct nvrm_shader;
 uint64_t nvrm_upload_tex_handles(struct nvrm_context *ctx, mesa_shader_stage stage,
                                  const struct nvrm_shader *shader, uint32_t *size_B);

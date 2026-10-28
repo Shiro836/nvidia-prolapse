@@ -511,6 +511,7 @@ nvrm_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
       }
       ctx->tex_pool = slot->tex_pool;
       ctx->tex_pool_next = 0;
+      ctx->tex_pool_written = 0;
    }
    nvrm_release_kept(ctx);
    /* Deleted shader ranges: free once every submission made so far on the

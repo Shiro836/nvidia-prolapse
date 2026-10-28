@@ -17,6 +17,7 @@
 #include "nil.h"
 #include "nv_push.h"
 #include "nv_push_cl9097.h"
+#include "nv_push_cla097.h"
 #include "nv_push_clb097.h"
 #include "nv_push_clb197.h"
 #include "nv_push_clc597.h"
@@ -1097,16 +1098,31 @@ nvrm_screen_init_channel(struct nvrm_screen *screen)
       return false;
    }
    /* Zero page in VRAM, as NVK's dev->zero_page (nvk_device.c:192-200,
-    * NVKMD_MEM_LOCAL); zeroed once through BAR1 (4 KiB of the window). */
-   if (!nvrm_bo_alloc(screen, 4096, NVRM_DOMAIN_VRAM_MAPPED, &screen->zero_page))
+    * NVKMD_MEM_LOCAL), without a CPU mapping: the driver never writes its own
+    * video memory with the CPU (the proprietary driver does not either). It
+    * is zeroed by the GPU with inline-to-memory in the 3D init submission
+    * below, which completes before any other work is submitted. */
+   if (!nvrm_bo_alloc(screen, 4096, NVRM_DOMAIN_VRAM, &screen->zero_page))
       return false;
-   memset(screen->zero_page.map, 0, 4096);
 
    struct nvrm_bo push_bo;
    if (!nvrm_bo_alloc(screen, 64 * 1024, NVRM_DOMAIN_GART, &push_bo))
       return false;
    struct nv_push push;
    nv_push_init(&push, push_bo.map, 64 * 1024 / 4, SUBC_MASK_ALL);
+   P_MTHD(&push, NVA097, LINE_LENGTH_IN);
+   P_NVA097_LINE_LENGTH_IN(&push, 4096);
+   P_NVA097_LINE_COUNT(&push, 1);
+   P_NVA097_OFFSET_OUT_UPPER(&push, screen->zero_page.va >> 32);
+   P_NVA097_OFFSET_OUT(&push, screen->zero_page.va);
+   P_MTHD(&push, NVA097, LAUNCH_DMA);
+   P_NVA097_LAUNCH_DMA(&push, {
+      .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
+      .completion_type = COMPLETION_TYPE_FLUSH_ONLY,
+   });
+   P_0INC(&push, NVA097, LOAD_INLINE_DATA);
+   for (unsigned i = 0; i < 4096 / 4; i++)
+      P_INLINE_DATA(&push, 0);
    nvrm_push_3d_init(screen, &push);
    const uint32_t size_B = nv_push_dw_count(&push) * 4;
    bool ok = nvrm_submit_wait(screen, push_bo.va, size_B, NULL);

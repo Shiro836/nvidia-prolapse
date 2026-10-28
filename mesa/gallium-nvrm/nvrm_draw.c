@@ -1683,10 +1683,12 @@ nvrm_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                         gs ? gs->bin->info.crs_size : 0));
    /* Pool room first: a full ring flushes, which must not happen inside an
     * open push. */
+   /* Pushbuffer room for the pool entries is counted whether or not textures
+    * are dirty now: a flush in nvrm_push_begin marks them dirty. */
+   const unsigned tex_slots = ctx->vs->tex_units + ctx->vs->image_units + ctx->fs->tex_units +
+                              ctx->fs->image_units + (gs ? gs->tex_units + gs->image_units : 0);
    if (ctx->dirty & NVRM_DIRTY_TEXTURES)
-      nvrm_texture_reserve(ctx, ctx->vs->tex_units + ctx->vs->image_units +
-                                ctx->fs->tex_units + ctx->fs->image_units +
-                                (gs ? gs->tex_units + gs->image_units : 0));
+      nvrm_texture_reserve(ctx, tex_slots);
    /* Append offsets of resumed stream output come from the counters (may
     * flush). */
    nvrm_so_prepare(ctx);
@@ -1739,6 +1741,7 @@ nvrm_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    nvrm_fb_shadow_begin(ctx);
    /* + texture handle loads (nvrm_emit_textures) of three stages. */
    struct nv_push push = nvrm_push_begin(ctx, 2048 + 3 * nvrm_drv_cb_load_dw(NVRM_DRV_CB_HANDLES_B) +
+                                              nvrm_tex_pool_write_dw(tex_slots) +
                                               (uint32_t)draw_dw);
    struct nv_push *p = &push;
 
@@ -1788,6 +1791,7 @@ nvrm_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       if (gs)
          nvrm_emit_textures(ctx, p, MESA_SHADER_GEOMETRY, MESA_SHADER_GEOMETRY, gs);
       nvrm_emit_textures(ctx, p, MESA_SHADER_FRAGMENT, MESA_SHADER_FRAGMENT, ctx->fs);
+      nvrm_tex_pool_write(ctx, p, false);
    }
    /* After the texture tables: they may have written pool entries. */
    nvrm_emit_invalidates(ctx, p);
