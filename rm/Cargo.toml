@@ -37,6 +37,7 @@ name = "nv-nvdec-probe"
 path = "src/bin/nv-nvdec-probe.rs"
 
 [dependencies]
+nv-ffi = { path = "../nv-ffi" }
 nv-rm-abi = { path = "../rm-abi" }
 nv-rm-core = { path = "../rm-core" }
 nv-rm-sys = { path = "../rm-sys" }

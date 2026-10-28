@@ -13,12 +13,17 @@ name = "nv-bionic-native"
 version = "0.1.0"
 dependencies = [
  "log",
+ "nv-ffi",
  "nv-rm-abi",
  "nv-rm-core",
  "nv-rm-sys",
  "nv-video",
  "zerocopy",
 ]
+
+[[package]]
+name = "nv-ffi"
+version = "0.1.0"
 
 [[package]]
 name = "nv-rm-abi"

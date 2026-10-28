@@ -1,52 +1,17 @@
 // SPDX-License-Identifier: MIT
 //! Backend diagnostics sink.
 //!
-//! On Android, a graphics driver's stderr is not connected to anything the
-//! platform keeps (zygote children inherit /dev/null), so loss, watcher and
-//! cleanup diagnostics were invisible in logcat. Android builds write them to
-//! the platform log with liblog's public NDK entry point
-//! `__android_log_write(int prio, const char* tag, const char* text)`
-//! (NDK <android/log.h>; ANDROID_LOG_ERROR = 6), tag `nvk-rm`, and also to
-//! stderr: bionic processes without logd (test harnesses, rented hosts) would
-//! otherwise drop every diagnostic silently (liblog's write fails ENOTCONN).
-//! GNU builds write one line to stderr only. Diagnostics are error paths only: formatting
-//! allocates, the hot paths never call this.
+//! Loss, watcher and cleanup diagnostics go to the driver's shared sink
+//! (`nv_ffi::diag`: the Android log and stderr) under the tag `nvk-rm`.
+//! Diagnostics are error paths only: formatting allocates, the hot paths
+//! never call this.
 
 /// Platform log tag of every backend diagnostic.
-#[cfg(target_os = "android")]
 const TAG: &std::ffi::CStr = c"nvk-rm";
-
-#[cfg(target_os = "android")]
-#[link(name = "log")]
-unsafe extern "C" {
-    fn __android_log_write(
-        priority: std::ffi::c_int,
-        tag: *const std::ffi::c_char,
-        text: *const std::ffi::c_char,
-    ) -> std::ffi::c_int;
-}
 
 /// Write one diagnostic line (no trailing newline needed).
 pub(crate) fn write(message: std::fmt::Arguments<'_>) {
-    #[cfg(target_os = "android")]
-    {
-        // Interior NULs would truncate the C string; replace them instead.
-        let text = message.to_string().replace('\0', "\u{fffd}");
-        if let Ok(text) = std::ffi::CString::new(text) {
-            const ANDROID_LOG_ERROR: std::ffi::c_int = 6;
-            // SAFETY: both pointers are valid NUL-terminated strings for the
-            // duration of the call; liblog copies them.
-            unsafe { __android_log_write(ANDROID_LOG_ERROR, TAG.as_ptr(), text.as_ptr()) };
-        }
-    }
-    {
-        use std::io::Write;
-        // One locked write per line. A closed or full stderr has nowhere to
-        // report to: the line is dropped, deliberately and only here.
-        if let Err(error) = writeln!(std::io::stderr().lock(), "{message}") {
-            drop(error);
-        }
-    }
+    nv_ffi::diag::write(TAG, message);
 }
 
 /// The `log` facade's sink in this library: records from the logic crates

@@ -1,0 +1,13 @@
+[package]
+name = "nv-ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The panic guard every C entry point of the driver's libraries runs its body in"
+
+[dependencies]
+
+[lints]
+workspace = true
