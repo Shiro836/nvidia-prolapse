@@ -1582,7 +1582,8 @@ impl Memory {
                     .resize(u64_from_usize(mapping_size))?;
             }
             // RM associated this fd with its map. VMA ownership and RM ownership
-            // are independent: always munmap before releasing the BAR aperture.
+            // are independent: both are released (NVOS34, then munmap) before the
+            // BAR aperture reservation.
             // SAFETY: a fresh kernel-chosen address (NULL hint, no MAP_FIXED),
             // so no existing mapping or Rust object is replaced; fd and
             // length are the ones RM just associated with this allocation.
@@ -1765,14 +1766,16 @@ struct CpuMappingState {
     rm: bool,
 }
 impl CpuMappingState {
+    /// RM unmap (NVOS34) first, then munmap of the VMA: the order the NVIDIA driver releases
+    /// a host-visible mapping in before the memory's RM free.
     fn cleanup(&mut self, mut release: impl FnMut(CpuCleanupStage) -> Result<()>) -> Result<()> {
-        if self.vma {
-            release(CpuCleanupStage::Vma)?;
-            self.vma = false;
-        }
         if self.rm {
             release(CpuCleanupStage::Rm)?;
             self.rm = false;
+        }
+        if self.vma {
+            release(CpuCleanupStage::Vma)?;
+            self.vma = false;
         }
         Ok(())
     }
@@ -2325,7 +2328,7 @@ mod budget_tests {
     }
     #[test]
     fn cpu_cleanup_faults_preserve_stage_ownership_and_retry_once() {
-        for failure in [CpuCleanupStage::Vma, CpuCleanupStage::Rm] {
+        for failure in [CpuCleanupStage::Rm, CpuCleanupStage::Vma] {
             let mut state = CpuMappingState {
                 vma: true,
                 rm: true,
@@ -2344,16 +2347,16 @@ mod budget_tests {
                     .is_err()
             );
             assert!(
-                state.rm,
-                "RM lease remains live until its successful release"
+                state.vma,
+                "the VMA remains mapped until the RM unmap and its own release succeeded"
             );
-            assert_eq!(state.vma, failure == CpuCleanupStage::Vma);
+            assert_eq!(state.rm, failure == CpuCleanupStage::Rm);
             assert_eq!(
                 calls,
-                if failure == CpuCleanupStage::Vma {
-                    vec![CpuCleanupStage::Vma]
+                if failure == CpuCleanupStage::Rm {
+                    vec![CpuCleanupStage::Rm]
                 } else {
-                    vec![CpuCleanupStage::Vma, CpuCleanupStage::Rm]
+                    vec![CpuCleanupStage::Rm, CpuCleanupStage::Vma]
                 }
             );
             calls.clear();
@@ -2365,10 +2368,10 @@ mod budget_tests {
                 .unwrap();
             assert_eq!(
                 calls,
-                if failure == CpuCleanupStage::Vma {
-                    vec![CpuCleanupStage::Vma, CpuCleanupStage::Rm]
+                if failure == CpuCleanupStage::Rm {
+                    vec![CpuCleanupStage::Rm, CpuCleanupStage::Vma]
                 } else {
-                    vec![CpuCleanupStage::Rm]
+                    vec![CpuCleanupStage::Vma]
                 }
             );
             assert!(!state.vma && !state.rm);
