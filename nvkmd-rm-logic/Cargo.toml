@@ -8,6 +8,7 @@ publish.workspace = true
 description = "Policy of NVK's nvkmd backend over the RM: placement, VA requests, binding rules, push chunking"
 
 [dependencies]
+nv-rm-abi = { path = "../rm-abi" }
 nv-rm-core = { path = "../rm-core" }
 thiserror.workspace = true
 
