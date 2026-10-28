@@ -113,7 +113,7 @@ typedef struct NvRmDevice NvRmDevice;
 
 /**
  * `NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS` field order (ctrl2080gr.h), which is
- * also the order of Mesa's `nv_zcull_device_info`.
+ * also the order of Mesa's `nv_zcull_device_info` (nv_device_info.h:17-30).
  */
 struct NvRmZcullInfo {
   uint32_t width_align_pixels;
@@ -188,7 +188,8 @@ struct NvRmInfo {
    */
   uint32_t shader_pipe_count;
   /**
-   * `NV2080_CTRL_GR_INFO_INDEX_SHADER_PIPE_SUB_COUNT` (the TPC count).
+   * `NV2080_CTRL_GR_INFO_INDEX_SHADER_PIPE_SUB_COUNT` (the TPC count, as
+   * open-gpu-kernel-modules `nv_gpu_ops.c` reads it).
    */
   uint32_t shader_pipe_sub_count;
   /**

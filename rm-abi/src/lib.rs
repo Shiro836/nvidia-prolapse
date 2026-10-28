@@ -119,7 +119,7 @@ impl NvRmToken {
 }
 
 /// `NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS` field order (ctrl2080gr.h), which is
-/// also the order of Mesa's `nv_zcull_device_info`.
+/// also the order of Mesa's `nv_zcull_device_info` (nv_device_info.h:17-30).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[expect(
@@ -186,7 +186,8 @@ pub struct NvRmInfo {
     /// `NV2080_CTRL_GR_INFO_INDEX_SHADER_PIPE_COUNT`: an input of the compute
     /// contexts' `SET_SCG_CONTROL`.
     pub shader_pipe_count: u32,
-    /// `NV2080_CTRL_GR_INFO_INDEX_SHADER_PIPE_SUB_COUNT` (the TPC count).
+    /// `NV2080_CTRL_GR_INFO_INDEX_SHADER_PIPE_SUB_COUNT` (the TPC count, as
+    /// open-gpu-kernel-modules `nv_gpu_ops.c` reads it).
     pub shader_pipe_sub_count: u32,
     /// Contexts that can join another context's channel group
     /// ([`nv_rm_context_create_shared`]): from Volta on RM's subcontext count
