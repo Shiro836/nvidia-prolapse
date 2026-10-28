@@ -1,0 +1,15 @@
+[package]
+name = "nvkmd-rm-logic"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Policy of NVK's nvkmd backend over the RM: placement, VA requests, binding rules, push chunking"
+
+[dependencies]
+nv-rm-core = { path = "../rm-core" }
+thiserror.workspace = true
+
+[lints]
+workspace = true
