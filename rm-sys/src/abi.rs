@@ -204,6 +204,27 @@ pub struct UnmapMemory {
     pub status: u32,
     pub flags: u32,
 }
+/// NVOS56_PARAMETERS (public nvos.h, NV04_UPDATE_DEVICE_MAPPING_INFO): the
+/// same layout on every RM release and on both Android targets, since both
+/// addresses are `NvP64` aligned to 8 bytes.
+#[repr(C, align(8))]
+#[derive(Default, Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct UpdateDeviceMapping {
+    pub client: u32,
+    pub device: u32,
+    pub memory: u32,
+    pub padding: u32,
+    pub old_address: u64,
+    pub new_address: u64,
+    pub status: u32,
+    pub padding2: u32,
+}
+const _: () = {
+    assert!(std::mem::size_of::<UpdateDeviceMapping>() == 0x28);
+    assert!(std::mem::offset_of!(UpdateDeviceMapping, old_address) == 0x10);
+    assert!(std::mem::offset_of!(UpdateDeviceMapping, new_address) == 0x18);
+    assert!(std::mem::offset_of!(UpdateDeviceMapping, status) == 0x20);
+};
 #[repr(C)]
 #[derive(Default, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct PerfBoost {

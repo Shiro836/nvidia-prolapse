@@ -334,6 +334,48 @@ impl Client {
         )?;
         status("RM free", call.status)
     }
+    /// Where RM placed `object` for a CPU mapping with NVOS33 `map_flags`
+    /// (NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE, public ctrl0000client.h).
+    fn address_space(&self, object: RmHandle, map_flags: u32) -> Result<AddressSpace> {
+        // hObject, mapFlags, addrSpaceType.
+        let mut query = [object.get(), map_flags, 0];
+        self.control(self.root, 0xd01, &mut query)?;
+        match query[2] {
+            1 => Ok(AddressSpace::System),
+            2 => Ok(AddressSpace::Video),
+            3 => Ok(AddressSpace::Register),
+            other => Err(Error::Contract(format!(
+                "RM reports address space {other} for CPU mapping of object {:#x}",
+                object.get()
+            ))),
+        }
+    }
+    /// Tell RM the CPU address `mmap` chose for a video-memory mapping
+    /// (NV_ESC_RM_UPDATE_DEVICE_MAPPING_INFO, nv_escape.h; NVOS56, nvos.h).
+    /// RM keys the mapping by this address from then on: NVOS34 must pass it
+    /// (osapi.c RmUpdateDeviceMappingInfo replaces pLinearAddress, which
+    /// rs_server.c serverUnmap matches).
+    fn update_device_mapping(&self, device: u32, memory: u32, old: u64, new: u64) -> Result<()> {
+        let mut call = abi::UpdateDeviceMapping {
+            client: self.root.get(),
+            device,
+            memory,
+            old_address: old,
+            new_address: new,
+            ..Default::default()
+        };
+        exchange(
+            self.control.as_raw_fd(),
+            0x5e,
+            &mut call,
+            "update CPU mapping address",
+        )?;
+        status("update CPU mapping address", call.status)
+    }
+    /// The long-lived `/dev/nvidiaN` of a device, registered with the control
+    /// fd (NV_ESC_REGISTER_FD): the registered file holds a reference on the
+    /// control file until it is closed (escape.c, osapi.c nvidia_close). Never
+    /// mmapped: a mapping's VMA would keep the control file alive past exit.
     pub(crate) fn gpu_fd(&self, minor: u32) -> Result<File> {
         let gpu = open(&format!("/dev/nvidia{minor}"))?;
         let mut ctl_fd = self.control.as_raw_fd();
@@ -661,7 +703,6 @@ impl Device {
             handle,
             parent: self.handle,
             size: POOL_BLOCK_SIZE,
-            system: false,
             owned: true,
             charge_bar: false,
             _mapping_owner: None,
@@ -767,7 +808,6 @@ impl Device {
             handle,
             parent: self.handle,
             size,
-            system,
             owned: true,
             charge_bar: !system,
             _mapping_owner: None,
@@ -870,7 +910,6 @@ impl Device {
             handle,
             parent: self.subdevice,
             size: 65536,
-            system: false,
             owned: true,
             charge_bar: false,
             _mapping_owner: None,
@@ -896,7 +935,6 @@ impl Device {
             handle: channel,
             parent: self.handle,
             size: 512,
-            system: false,
             owned: false,
             charge_bar: true,
             _mapping_owner: Some(owner),
@@ -925,7 +963,6 @@ pub struct Memory {
     pub(crate) handle: RmHandle,
     parent: RmHandle,
     pub(crate) size: usize,
-    system: bool,
     owned: bool,
     charge_bar: bool,
     // USERD belongs to its channel; retain that owner through rollback/quarantine.
@@ -952,7 +989,6 @@ impl Memory {
             handle,
             parent,
             size,
-            system,
             owned: true,
             charge_bar: !system,
             _mapping_owner: None,
@@ -1021,10 +1057,18 @@ impl Memory {
                 0
             },
         )?;
-        let fd = if self.system {
-            open("/dev/nvidiactl")?
-        } else {
-            device.client.gpu_fd(device.card.minor)?
+        let flags = if self.owned { 0 } else { 1 << 17 }; // NVOS33 FIFO_MAPPING_ENABLE
+        let space = device.client.address_space(self.handle, flags)?;
+        // Each mapping gets a fresh, unregistered fd (O_RDWR | O_CLOEXEC),
+        // closed right after mmap: the VMA then pins only that file, never the
+        // control file, so the RM client is freed in this process when its
+        // control fd closes (the stock driver maps the same way,
+        // libnvidia-eglcore.so.615.78.08 E 0xe75300).
+        let fd = match space {
+            AddressSpace::System => open("/dev/nvidiactl")?,
+            AddressSpace::Video | AddressSpace::Register => {
+                open(&format!("/dev/nvidia{}", device.card.minor))?
+            }
         };
         let mut request = abi::MapWithFd {
             parameters: abi::MapMemory {
@@ -1032,7 +1076,7 @@ impl Memory {
                 device: device.handle.get(),
                 memory: self.handle.get(),
                 length: u64_from_usize(self.size),
-                flags: if self.owned { 0 } else { 1 << 17 }, // NVOS33 FIFO_MAPPING_ENABLE
+                flags,
                 ..Default::default()
             },
             fd: fd.as_raw_fd(),
@@ -1116,12 +1160,28 @@ impl Memory {
             // SAFETY: `within_page` < the CPU page size <= `mapping_size`
             // (cpu_mapping_extent), so the offset stays inside this VMA.
             let start = unsafe { base.add(within_page) };
+            if space == AddressSpace::Video {
+                let address = u64_from_usize(start.as_ptr().addr());
+                device.client.update_device_mapping(
+                    request.parameters.device,
+                    request.parameters.memory,
+                    request.parameters.linear_address,
+                    address,
+                )?;
+                lease
+                    .resources
+                    .as_mut()
+                    .expect("a new lease holds its resources until it is released")
+                    .unmap
+                    .linear_address = address;
+            }
             Ok((start.cast::<u32>(), retain_idle))
         })();
         match result {
             Ok((pointer, retain_idle)) => {
-                // The VMA retains its file independently. RM owns a separate
-                // lease keyed by the saved NVOS33 cookie, not this fd number.
+                // The VMA retains its file independently. RM keys the mapping
+                // by the saved NVOS33 address (or the CPU address after the
+                // update above), not by this fd.
                 drop(fd);
                 Ok(Mapping {
                     pointer,
@@ -1145,6 +1205,17 @@ impl Memory {
             }
         }
     }
+}
+/// RM's address space of a mappable object (ctrl0000client.h
+/// NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE_SYSMEM / _VIDMEM / _REGMEM).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddressSpace {
+    /// Mapped through `/dev/nvidiactl`.
+    System,
+    /// BAR1; mapped through `/dev/nvidiaN`, then re-keyed to its CPU address.
+    Video,
+    /// BAR0 registers; mapped through `/dev/nvidiaN`.
+    Register,
 }
 fn map_pressure(error: &Error) -> bool {
     match error {
