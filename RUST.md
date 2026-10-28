@@ -197,6 +197,15 @@ else's process, hangs the GPU or leaks kernel objects. The rules follow from tha
   model. Every public item has a doc comment. Comments explain *why* and cite public sources (Mesa
   file:line, open-gpu-kernel-modules, NVIDIA class headers, Android source); they do not narrate history
   or describe what the next line does.
+- **Comments are written for the next person who reads the code, not about the task that produced it.**
+  This applies to every file in the repo (Rust, C, Python, shell, build files) and to test output. A
+  comment earns its place by saying what the code cannot: why it is this way, an invariant, an ownership,
+  ordering or lifetime contract, a hardware or spec fact with its citation. Keep it short; a paragraph
+  that restates the code, or pads one fact into five lines, gets cut. Never put task context in code:
+  no dates, "now"/"new"/"fixed"/"previously", plan, milestone or step labels (`G0a`, `D1`, "step 0.4",
+  "phase 2"), branch or review-round names, who asked for it, or what the brief said. That belongs in
+  the commit message. A public bug or issue link is fine when it explains *why* the code looks odd.
+  Test output names what was checked (`nvrm triangle: PASS`), not the milestone it once gated.
 - Public means reachable from outside the crate. A cdylib exposes its C entry points and little else, so
   `unreachable_pub` is fixed by making items `pub(crate)`, not by documenting them. A doc comment that
   only restates the name ("Returns the size") is worse than the lint; write what the item owns, what it
