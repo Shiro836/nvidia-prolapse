@@ -576,6 +576,8 @@ def main():
         setup += options + ["--wrap-mode=" + ("default" if args.download_deps else "nodownload")]
         setup_run(setup, args, env=target_env)
         cc_launcher.record(build)
+        # nvkmd-sys is generated from this build's nvkmd.c flags: bindings that do not match them cannot build.
+        run([sys.executable, ROOT / "mesa/gen-nvkmd-bindings.py", "--check", "--target", target])
         artifacts = ["src/nouveau/vulkan/libvulkan_nouveau.so"]
         if target == "host":
             artifacts += ["src/compiler/clc/mesa_clc", "src/compiler/spirv/vtn_bindgen2"]

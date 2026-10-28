@@ -1,0 +1,13 @@
+[package]
+name = "nvkmd-sys"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Raw bindings of the Mesa interfaces NVK's nvkmd backend implements and calls (nvkmd.h, vk_sync.h, util/vma.h)"
+
+[dependencies]
+
+[lints]
+workspace = true
