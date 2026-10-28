@@ -213,6 +213,19 @@ fn miri_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 }
 
+// The x86 barriers below must also order write-combined stores: pushbuffer,
+// GPFIFO entries and USERD are written through write-combined mappings before
+// GP_PUT and the doorbell. A locked instruction orders cacheable memory but not
+// write-combined stores on every CPU, so 32-bit x86 uses the same SSE fences as
+// x86_64 (Linux arch/x86/include/asm/barrier.h: mb()/wmb() are mfence/sfence on
+// SSE2 CPUs; the locked add is only __smp_mb(), for cacheable memory). The
+// proprietary 32-bit driver does the same: libnvidia-eglcore.so.615.78.08
+// (i386) executes sfence at 0xb2596d before the GP_PUT store at 0xb259f8 and
+// sfence at 0xb25a28 before the doorbell store at 0xb25a62. The Android x86
+// ABI includes SSE2.
+#[cfg(all(target_arch = "x86", not(target_feature = "sse2")))]
+compile_error!("32-bit x86 builds need SSE2 for the sfence/mfence device barriers");
+
 /// Order both device and ordinary memory reads/writes; not cache maintenance.
 #[inline]
 pub(crate) fn device_full_barrier() {
@@ -221,22 +234,11 @@ pub(crate) fn device_full_barrier() {
     #[cfg(not(miri))]
     {
         // asm's default memory clobber is intentional: never use nomem/readonly.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         // SAFETY: mfence touches no memory, stack or flags; the default memory
         // clobber keeps the compiler from moving accesses across it.
         unsafe {
             std::arch::asm!("mfence", options(nostack, preserves_flags));
-        }
-        // A locked operation on a real local word also supports CPUs without SSE2.
-        #[cfg(target_arch = "x86")]
-        {
-            let mut scratch = 0u32;
-            // SAFETY: the locked add writes only the local `scratch` (adding 0);
-            // the memory clobber orders every other access around it.
-            unsafe {
-                std::arch::asm!("lock add dword ptr [{word}], 0",
-                word = in(reg) &raw mut scratch, options(nostack));
-            }
         }
         #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
         // SAFETY: a barrier instruction; no memory, stack or flags are changed.
@@ -258,12 +260,12 @@ pub(crate) fn device_read_barrier() {
     miri_barrier();
     #[cfg(not(miri))]
     {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         // SAFETY: a barrier instruction; no memory, stack or flags are changed.
         unsafe {
             std::arch::asm!("lfence", options(nostack, preserves_flags));
         }
-        #[cfg(any(target_arch = "x86", target_arch = "arm"))]
+        #[cfg(target_arch = "arm")]
         device_full_barrier();
         #[cfg(target_arch = "aarch64")]
         // SAFETY: a barrier instruction; no memory, stack or flags are changed.
@@ -285,13 +287,11 @@ pub(crate) fn device_write_barrier() {
     miri_barrier();
     #[cfg(not(miri))]
     {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         // SAFETY: a barrier instruction; no memory, stack or flags are changed.
         unsafe {
             std::arch::asm!("sfence", options(nostack, preserves_flags));
         }
-        #[cfg(target_arch = "x86")]
-        device_full_barrier();
         #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
         // SAFETY: a barrier instruction; no memory, stack or flags are changed.
         unsafe {

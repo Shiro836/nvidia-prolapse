@@ -140,8 +140,7 @@ nvrm_shader_heap_grow(struct nvrm_screen *screen)
       return false;
    const uint64_t min = 1ull << NVRM_SHADER_ARENA_MIN_SIZE_LOG2;
    const uint64_t size = i == 0 ? min : (min >> 1) << i;
-   if (!nvrm_bo_alloc_va(screen, size,
-                         screen->bar_full ? NVRM_DOMAIN_VRAM_MAPPED : NVRM_DOMAIN_VRAM,
+   if (!nvrm_bo_alloc_va(screen, size, NVRM_DOMAIN_VRAM,
                          screen->shader_base + screen->shader_committed,
                          &screen->shader_mem[i]))
       return false;
@@ -155,13 +154,19 @@ nvrm_shader_heap_grow(struct nvrm_screen *screen)
    return true;
 }
 
-/* Small BAR: the shader arena is not CPU-mapped; NVK then uploads through
- * its upload queue (nvk_heap_upload -> nvk_upload_queue_upload,
+/* The shader arena is video memory that is never CPU-mapped, on every BAR
+ * size: program bytes reach it only through the GPU. The proprietary driver
+ * does the same (libnvidia-eglcore.so.615.78.08: the Vulkan shader heap is
+ * never CPU-mapped and every program is copied from system-memory staging
+ * by the copy engine; the GL program code is video memory without a CPU
+ * mapping, written by inline-to-memory from the pushbuffer). NVK's upload
+ * queue is the model (nvk_heap_upload -> nvk_upload_queue_upload,
  * nvk_heap.c:125-150: a GART staging copy + NV90B5 copy on a device-wide
- * queue, ordered before any later submission). nvrm does the same on the
- * screen channel and waits, so every context batch submitted afterwards
- * sees the code; the range was free (freed ranges return to shader_vma
- * only after the work using them retired). Caller holds shader_mutex. */
+ * queue, ordered before any later submission). nvrm copies on the screen
+ * channel and waits, so every context batch submitted afterwards sees the
+ * code; the range was free (freed ranges return to shader_vma only after
+ * the work using them retired). The arena is one contiguous VA range, so a
+ * copy may straddle two memories. */
 static void
 nvrm_shader_heap_upload(struct nvrm_screen *screen, uint64_t va, const void *data,
                         uint64_t size)
@@ -184,27 +189,11 @@ nvrm_shader_heap_upload(struct nvrm_screen *screen, uint64_t va, const void *dat
    nvrm_bo_free(screen, &staging);
 }
 
-/* nvk_mem_arena_copy_to_gpu: an allocation may straddle two memories. */
 void
 nvrm_shader_heap_write(struct nvrm_screen *screen, uint64_t va, const void *data,
                        uint64_t size)
 {
-   if (!screen->bar_full) {
-      nvrm_shader_heap_upload(screen, va, data, size);
-      return;
-   }
-   const uint8_t *src = data;
-   for (unsigned i = 0; i < screen->shader_mem_count && size; i++) {
-      const struct nvrm_bo *m = &screen->shader_mem[i];
-      if (va < m->va || va >= m->va + m->size)
-         continue;
-      const uint64_t n = MIN2(size, m->va + m->size - va);
-      memcpy((uint8_t *)m->map + (va - m->va), src, n);
-      src += n;
-      va += n;
-      size -= n;
-   }
-   assert(size == 0);
+   nvrm_shader_heap_upload(screen, va, data, size);
 }
 
 /* G1 tiled image: VRAM, not CPU-mapped, VA bound with the PTE kind nil
@@ -361,7 +350,7 @@ nvrm_wait_token(struct nvrm_screen *screen, uint64_t token)
    return true;
 }
 
-/* Synchronous submission (screen init, small-BAR shader uploads). */
+/* Synchronous submission (screen init, shader uploads). */
 bool
 nvrm_submit_execs_wait_fds(struct nvrm_screen *screen, const struct NvRmExec *execs,
                            uint32_t exec_count, const int *wait_fds,
@@ -1050,7 +1039,7 @@ static void
 nvrm_screen_destroy(struct pipe_screen *pscreen)
 {
    struct nvrm_screen *screen = nvrm_screen(pscreen);
-   /* Compile workers first: a job may still be using the channel (small-BAR
+   /* Compile workers first: a job may still be using the channel (shader
     * upload), the shader arena, the program cache and the NAK compiler
     * (iris_screen_destroy order, iris_screen.c:524-530). Contexts deleted
     * their shaders (dropping their jobs) before the screen goes. */
@@ -1240,9 +1229,9 @@ nvrm_screen_create(int fd, const struct pipe_screen_config *config)
    /* Shader heap: NVK's contiguous shader arena (nvk_device.c:257-260,
     * nvk_mem_arena.c): reserve the whole 4 GiB VA range now (its base is the
     * pre-Volta SET_PROGRAM_REGION, programmed by the channel init), back it
-    * on demand. GART, like every CPU-written nvrm BO (NVK: VRAM with a CPU
-    * map; placement is a performance question). The first memory is
-    * allocated here so a broken RM fails at screen creation. */
+    * on demand with video memory that is never CPU-mapped (uploads:
+    * nvrm_shader_heap_upload). The first memory is allocated here so a
+    * broken RM fails at screen creation. */
    {
       const uint64_t max = 1ull << NVRM_SHADER_ARENA_MAX_SIZE_LOG2;
       simple_mtx_lock(&screen->va_mutex);
