@@ -1,0 +1,18 @@
+[package]
+name = "nvkmd-rm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "NVK's nvkmd backend over the RM, linked into libvulkan_nouveau as a static library"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+nv-ffi = { path = "../nv-ffi" }
+nvkmd-sys = { path = "../nvkmd-sys" }
+
+[lints]
+workspace = true

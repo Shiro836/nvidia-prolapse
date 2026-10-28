@@ -54,6 +54,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nvkmd-rm"
+version = "0.1.0"
+dependencies = [
+ "nv-ffi",
+ "nvkmd-sys",
+]
+
+[[package]]
 name = "nvkmd-rm-logic"
 version = "0.1.0"
 dependencies = [

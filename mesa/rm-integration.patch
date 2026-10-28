@@ -51,26 +51,78 @@ index ba177e3904087830ebcc6ef0a5c14caaa5f7870d..01b62c156afb63007d7dc6c8534cd997
      }
  
      assert!(*mod_count < max_mod_count);
+diff --git a/meson.options b/meson.options
+index 93a60e3047b91efb89394fddacacf927009f26d6..20d0dc122d7ec9b1dbe5a2152c30dca487e5ad18 100644
+--- a/meson.options
++++ b/meson.options
+@@ -915,3 +915,18 @@ option(
+   value : false,
+   description : 'Build panfrost Rust components.'
+ )
++
++option(
++  'nvk-rm-backend',
++  type : 'combo',
++  value : 'c',
++  choices : ['c', 'rust'],
++  description : 'NVK kernel-driver backend over the Rust RM: nvkmd_rm.c, or the Rust static library named by nvk-rm-rust-lib.'
++)
++
++option(
++  'nvk-rm-rust-lib',
++  type : 'string',
++  value : '',
++  description : 'Path of the Rust nvkmd backend (libnvkmd_rm.a) when nvk-rm-backend is rust.'
++)
 diff --git a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
-index f0bb780fb1fc85a02f6abfb9af4cbc5d3b9556b6..f6df4b5505529810e52b8a72d4c7b8942889f488 100644
+index f0bb780fb1fc85a02f6abfb9af4cbc5d3b9556b6..a265af6d9a8a1df1fa47814527a3659cbe6cfe2e 100644
 --- a/src/nouveau/vulkan/meson.build
 +++ b/src/nouveau/vulkan/meson.build
-@@ -78,6 +78,9 @@ nvk_files = files(
+@@ -1,5 +1,11 @@
+ # Copyright © 2022 Collabora Ltd. and Red Hat Inc.
+ # SPDX-License-Identifier: MIT
++# The nvkmd backend over the RM: nvkmd_rm.c, or the Rust static library at
++# nvk-rm-rust-lib, linked into libvulkan_nouveau below.
++nvk_rm_c_files = []
++if get_option('nvk-rm-backend') == 'c'
++  nvk_rm_c_files = files('nvkmd/rm/nvkmd_rm.c')
++endif
+ nvk_files = files(
+   'nvk_acceleration_structure.c',
+   'nvk_buffer.c',
+@@ -78,6 +84,9 @@ nvk_files = files(
    'nvkmd/nouveau/nvkmd_nouveau_mem.c',
    'nvkmd/nouveau/nvkmd_nouveau_pdev.c',
    'nvkmd/nouveau/nvkmd_nouveau_va.c',
-+  'nvkmd/rm/nvkmd_rm.c',
++) + nvk_rm_c_files + files(
 +  'nvkmd/rm/nvkmd_rm.h',
 +  'nvkmd/rm/nv_rm.h',
    'nvkmd/nvkmd.c',
    'nvkmd/nvkmd.h',
  )
-@@ -184,7 +187,7 @@ libnvk = static_library(
+@@ -181,10 +190,24 @@ libnvk = static_library(
+   gnu_symbol_visibility : 'hidden',
+ )
+ 
++# The Rust backend's own symbols (Rust std included) stay out of the dynamic
++# symbol table; both backends reach the RM in libnv_bionic_native.
++nvk_rm_link_args = []
++nvk_rm_link_depends = []
++if get_option('nvk-rm-backend') == 'rust'
++  nvk_rm_lib = get_option('nvk-rm-rust-lib')
++  if nvk_rm_lib == ''
++    error('nvk-rm-backend=rust needs nvk-rm-rust-lib, the path of libnvkmd_rm.a')
++  endif
++  nvk_rm_link_args = [nvk_rm_lib, '-Wl,--exclude-libs,libnvkmd_rm.a']
++  nvk_rm_link_depends = [nvk_rm_lib]
++endif
++
  libvulkan_nouveau = shared_library(
    'vulkan_nouveau',
    link_whole : [libnvk],
 -  link_args: [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
-+  link_args: [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, '-lnv_bionic_native'],
++  link_args: [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections] + nvk_rm_link_args + ['-lnv_bionic_native'],
++  link_depends : nvk_rm_link_depends,
    gnu_symbol_visibility : 'hidden',
    install : true,
  )

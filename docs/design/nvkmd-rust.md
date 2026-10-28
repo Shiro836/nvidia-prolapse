@@ -164,7 +164,7 @@ the RM ABI, the fallible `Box` helper below, and `unsafe impl Send/Sync` for `Rm
 Vulkan requires the device to outlive every nvkmd call, and Mesa's notify hook contract permits
 calls from any thread). Every entry runs inside the shared panic guard (moved from `rm::ffi`
 into a small `nv-ffi` crate so the RM and the backend use one implementation, each linking its
-own copy). Failure values: the entry's `VkResult`
+own copy; the guard reports through a sink type each library supplies, `nv_ffi::PanicLog`). Failure values: the entry's `VkResult`
 (`VK_ERROR_DEVICE_LOST` for a panic, device marked failed); void callbacks that have a logical
 device publish loss through `vk_device_set_lost`, the same channel their RM-failure path uses
 today; the rest (`pdev destroy`, `get_vram_used`, mem `sync_*`) abort with the message.
@@ -209,8 +209,19 @@ it builds `rm` today in `mesa/build.py:344-357`); meson only links the archive:
   backend and `nv-rm-abi`'s declarations only, never the `rm` crate, so a process has one RM
   (one RM client, fork check and logger) whichever of NVK, gallium-nvrm and Codec2 it loads.
 - `mesa/build.py --nvkmd {c,rust}` (default `c` until the gate), builds `-p nvkmd-rm
-  --target <triple>` first, passes the archive path, and uses separate build dirs
-  (`build/nvk-<target>-<backend>`) so both builds coexist for A/B. `tests/vulkan/run.py` and `capture.py` take the same switch.
+  --target <triple>` first (into `build/nvkmd-rm-rust`), passes the archive path, and uses
+  separate build dirs (`build/nvk-<target>` for `c`, `build/nvk-<target>-rust` for `rust`) so
+  both builds coexist for A/B; the host build that provides `mesa_clc` to the Android builds
+  stays the `c` one. `tests/vulkan/run.py` and `capture.py` take the same switch (step 9).
+- Link check (all three targets; lld for Android, GNU ld for the host): the archive's Rust std
+  objects coexist with NAK's and NIL's only when the archive is built without LTO and by the
+  same rustc as Mesa's Rust: it then carries the same std objects, and the linker takes each
+  once (one `panic_unwind` runtime, since Mesa builds its Rust with the default unwind
+  strategy). With the workspace's thin LTO, both linkers fail on duplicate std symbols, so the
+  archive uses the `release-staticlib` profile (`lto = false`). Mesa's hidden functions resolve
+  at the static link, the dynamic symbol table stays that of the C build, and the backend's
+  symbols are local. One consequence: the Rust std in `libvulkan_nouveau.so` is one copy shared
+  by NAK, NIL and the backend, so process-wide std state there (the panic hook) is shared too.
 - Symbol tests: `nm -D --defined-only libvulkan_nouveau.so` of the two builds is identical
   (the C build already leaks ~2,300 Rust symbols from NAK/NIL; ours adds none), and its
   undefined `nv_rm_*` set under the Rust backend is a subset of the C one. The only global C

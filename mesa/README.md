@@ -33,6 +33,9 @@ this extracts unmodified files from the installed system image read-only into
 `mesa_clc` and `vtn_bindgen2`; the script builds the host first if these are
 absent. `--download-deps` permits downloading missing host build tools. Ordinary
 rebuilds are offline and use cached checksum-pinned Mesa Rust dependencies.
+`--nvkmd rust` links NVK with the Rust nvkmd backend (the `nvkmd-rm` crate) in place
+of `nvkmd_rm.c`, into `build/nvk-<target>-rust`; that build serves no device, and the test
+scripts read the C build.
 
 The script verifies the Mesa revision, applies `build-compat.patch` and
 `rm-integration.patch` idempotently, copies canonical adapter files from this

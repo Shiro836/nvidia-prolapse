@@ -51,9 +51,9 @@ ALLOWLIST_FUNCTIONS = [
 OPAQUE_TYPES = ["vk_device", "vk_object_base", "vk_physical_device", "vk_instance", "list_head"]
 
 
-def nvkmd_flags(target):
-    """Include paths and defines of nvkmd.c in build/nvk-<target>, as absolute clang arguments."""
-    database = ROOT / f"build/nvk-{target}/compile_commands.json"
+def nvkmd_flags(build):
+    """Include paths and defines of nvkmd.c in the NVK build dir `build`, as absolute clang arguments."""
+    database = build / "compile_commands.json"
     if not database.exists():
         return None
     for entry in json.loads(database.read_text()):
@@ -72,9 +72,9 @@ def nvkmd_flags(target):
     return flags
 
 
-def generate(tool, target):
+def generate(tool, target, build):
     module, clang_target, triple = TARGETS[target]
-    flags = nvkmd_flags(target)
+    flags = nvkmd_flags(build)
     if flags is None:
         return None
     command = [str(tool), str(WRAPPER), "--rust-target", RUST_TARGET, "--rust-edition", "2024",
@@ -103,7 +103,11 @@ def main():
     parser.add_argument("--check", action="store_true", help="compare instead of writing")
     parser.add_argument("--target", choices=sorted(TARGETS), action="append",
                         help="only this build (repeatable; default: every configured build)")
+    parser.add_argument("--build", type=Path,
+                        help="the NVK build dir of the single --target (default build/nvk-<target>)")
     args = parser.parse_args()
+    if args.build and len(args.target or []) != 1:
+        parser.error("--build needs exactly one --target")
     tool = Path(os.environ.get("BINDGEN", ROOT / "build/nak-tools/bin/bindgen"))
     if not tool.exists():
         sys.exit(f"gen-nvkmd-bindings: no {tool}; run mesa/compiler/build.py --tools-only --download-deps")
@@ -112,10 +116,11 @@ def main():
         sys.exit(f"gen-nvkmd-bindings: need bindgen {BINDGEN_VERSION}, found {' '.join(version)}")
     stale = []
     for target in args.target or sorted(TARGETS):
-        result = generate(tool, target)
+        build = args.build or ROOT / f"build/nvk-{target}"
+        result = generate(tool, target, build)
         if result is None:
             if args.target:
-                sys.exit(f"gen-nvkmd-bindings: build/nvk-{target} is not configured")
+                sys.exit(f"gen-nvkmd-bindings: {build} is not configured")
             continue
         module, text = result
         path = CRATE / f"src/{module}.rs"

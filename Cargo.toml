@@ -2,7 +2,7 @@
 # Every member uses `[lints] workspace = true` and `edition.workspace = true`.
 [workspace]
 resolver = "3"
-members = ["nv-ffi", "nvkmd-rm-logic", "nvkmd-sys", "rm", "rm-abi", "rm-core", "rm-sys", "video"]
+members = ["nv-ffi", "nvkmd-rm", "nvkmd-rm-logic", "nvkmd-sys", "rm", "rm-abi", "rm-core", "rm-sys", "video"]
 
 [workspace.package]
 edition = "2024"
@@ -85,6 +85,15 @@ overflow-checks = true
 debug = 1
 lto = "thin"
 codegen-units = 1
+
+# The nvkmd backend's static library, linked into libvulkan_nouveau next to Mesa's NAK and NIL
+# static libraries, which carry the standard library's objects as rustc ships them. Without LTO
+# the backend's archive carries the same objects and the linker takes each once; LTO would
+# rewrite its copies, and lld then sees two different definitions of each std symbol. Mesa's
+# Rust and this profile must use the same rustc (rust-toolchain.toml) for the same reason.
+[profile.release-staticlib]
+inherits = "release"
+lto = false
 
 [profile.test]
 overflow-checks = true
