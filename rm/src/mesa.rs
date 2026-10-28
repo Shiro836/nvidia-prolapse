@@ -1980,9 +1980,13 @@ enum Entry {
     /// `nv_rm_sync_create`, `nv_rm_sync_signal`, `nv_rm_sync_reset`: CPU-side
     /// payload operations of `vkCreateFence`/`vkCreateSemaphore`,
     /// `vkSignalSemaphore` and `vkResetFences`, none of which lists
-    /// `DEVICE_LOST`. NVK's payloads (Mesa's DRM syncobj type) report a failed
-    /// signal or reset as `VK_ERROR_UNKNOWN` (vk_drm_syncobj.c:148, :179 at Mesa
-    /// 26.2.5); a lost device is published and reported the same way.
+    /// `DEVICE_LOST`. They do not check the device state: NVK runs them as DRM
+    /// syncobj ioctls that never look at it (vk_drm_syncobj.c:48, :88, :172
+    /// at Mesa 26.2.5), and NVIDIA's driver returns `VK_SUCCESS` for a host
+    /// signal on a lost device, after which a batch blocked on that value
+    /// runs. NVK's payloads report a failed signal or reset as
+    /// `VK_ERROR_UNKNOWN` (vk_drm_syncobj.c:148, :179); an error on the way
+    /// that reports device loss is published and reported the same way.
     Sync,
     /// `nv_rm_sync_import_fd`, `nv_rm_sync_export_fd`:
     /// `vkImport{Semaphore,Fence}FdKHR` and `vkGet{Semaphore,Fence}FdKHR`, whose
@@ -3169,8 +3173,8 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_create(
         if out.is_null() || flags & !7 != 0 {
             return Err(Error::Contract("invalid sync create arguments".into()));
         }
+        // No liveness check: see Entry::Sync.
         let b = present(object)?;
-        b.core.live()?;
         let slot = b.slot()?;
         let sync = match SyncObj::new(&b.core.pool, flags & 1 != 0, initial, slot) {
             Ok(sync) => sync,
@@ -3237,8 +3241,8 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_reset(p: *mut Bridge, id: u64) -> i32
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(Entry::Sync, "nv_rm_sync_reset", object, move || {
+        // No liveness check: see Entry::Sync.
         let b = present(object)?;
-        b.core.live()?;
         // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
         let sync = unsafe { sync_ref(id) }?;
         let mut fresh = if sync.needs_fresh_slot()? {
@@ -3313,8 +3317,8 @@ pub(crate) unsafe extern "C" fn nv_rm_sync_signal(p: *mut Bridge, id: u64, value
     // SAFETY: nv_rm.h: the device argument is NULL or a live nv_rm_open device, kept alive by the caller for the whole call.
     let object = unsafe { p.as_ref() };
     guarded_as(Entry::Sync, "nv_rm_sync_signal", object, move || {
+        // No liveness check: see Entry::Sync.
         let b = present(object)?;
-        b.core.live()?;
         // SAFETY: nv_rm.h: a sync id argument is 0 or a live nv_rm_sync_create payload for the whole call.
         let sync = unsafe { sync_ref(id) }?;
         let mut fresh = if !sync.timeline && sync.needs_fresh_slot()? {

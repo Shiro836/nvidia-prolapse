@@ -275,6 +275,53 @@ fn latched_loss_frees_channels_blocked_on_an_acquire() {
     );
 }
 
+/// Host payload operations keep working after a device loss: creating a
+/// payload, signalling it and resetting it are CPU operations whose Vulkan
+/// commands (vkCreateSemaphore/vkCreateFence, vkSignalSemaphore,
+/// vkResetFences) do not list VK_ERROR_DEVICE_LOST. NVK runs them as DRM
+/// syncobj ioctls that never look at the device state (vk_drm_syncobj.c), and
+/// the stock driver returns VK_SUCCESS for a host signal on a lost device,
+/// after which a batch blocked on that value runs. Here too: the loss stops new
+/// submissions, but a batch already blocked on the acquire still runs once the
+/// host signals its value.
+#[test]
+#[ignore = "local NVIDIA GPU: host sync create/signal/reset after a published loss"]
+fn host_sync_operations_succeed_after_a_loss() {
+    let pci = selected_pci();
+    let bridge = open(pci);
+    let ctx = context(&bridge);
+    let gate = create(&bridge, true, 0);
+    let done = create(&bridge, false, 0);
+    let token = submit(&bridge, ctx, &[], &[point(&gate, 1)], &[point(&done, 0)]);
+    assert_eq!(
+        c::wait(&bridge, ctx, token, 50_000_000),
+        2,
+        "blocked on the gate"
+    );
+    bridge.core.mark_lost();
+    assert_eq!(c::check_status(&bridge), -4, "the loss is published");
+
+    let fresh = c::sync_create(&bridge, 0, 0).expect("vkCreateFence after a loss");
+    assert_eq!(c::sync_signal(&bridge, &fresh, 0), 0, "binary host signal");
+    assert!(fresh.obj().unwrap().ready(0, false).unwrap().0);
+    assert_eq!(c::sync_reset(&bridge, &fresh), 0, "vkResetFences");
+    assert!(!fresh.obj().unwrap().ready(0, false).unwrap().0);
+
+    assert_eq!(c::sync_signal(&bridge, &gate, 1), 0, "vkSignalSemaphore");
+    let start = Instant::now();
+    while !done.obj().unwrap().ready(0, false).unwrap().0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the blocked batch did not run after the host signal"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(c::sync_destroy(&bridge, fresh), 0);
+    assert_eq!(c::context_destroy(&bridge, ctx), 0);
+    assert_eq!(c::sync_destroy(&bridge, gate), 0);
+    assert_eq!(c::sync_destroy(&bridge, done), 0);
+}
+
 /// 5a. The Android cycle: GPU work gated on a foreign sync_file whose producer
 /// signal comes from the thread that frees unrelated memory afterwards. The
 /// former synchronous all-queue drain blocked that thread forever (until a
