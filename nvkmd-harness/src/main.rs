@@ -12,6 +12,7 @@ use std::io::Write as _;
 use std::process::ExitCode;
 
 mod fake;
+mod memory;
 mod mesa;
 mod suites;
 

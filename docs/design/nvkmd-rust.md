@@ -28,7 +28,7 @@ Callers are NVK files in `src/nouveau/vulkan/` (through the `nvkmd.h` inline wra
 | dev `get_drm_fd` (594) | nvk_device.c | render node fd | — |
 | dev `alloc_mem` / `alloc_tiled_mem` (861, 872, policy in 769) | nvk_device_memory.c, nvk_queue.c, nvk_mem_arena.c, nvk_device.c, nvk_cmd_draw.c (+ `alloc_mapped_mem` users) | placement: GART / VRAM / POOL_BLOCK (exactly 2 MiB, kind 0, not GART/mappable/shared, align 2 MiB) / VRAM_COMPRESSIBLE (kind 0, VRAM, not mappable/shared, generic kind 0x06, 64 KiB multiple); VRAM rounded to 64 KiB size and alignment; tiled: kind must be the generic kind, tile `& ~0x70 == 0`, `tile >> 4 <= 5`, pre-Turing mappable block-linear VRAM refused; `nvkmd_mem_init(flags | COHERENT, size, 4096)`; own VA via `nvkmd_dev_alloc_va` + `nvkmd_va_bind_mem`; rollback frees and publishes loss if the free fails | `alloc`, `free` |
 | dev `import_dma_buf` (904) | nvk_device_memory.c | borrows the fd; flags `LOCAL|SHARED|CAN_MAP|COHERENT`; own VA, align 4096 | `import`, `free` |
-| dev `alloc_va` (599) | nvk_buffer.c, nvk_image.c, nvk_mem_arena.c | `SPARSE` unsupported; size ≤ window−4095, rounded to 4 KiB, align ≥ 4 KiB power of two; `ALLOC_FIXED` via `util_vma_heap_alloc_addr`, else `util_vma_heap_alloc`; heap under `va_mutex` | — |
+| dev `alloc_va` (599) | nvk_buffer.c, nvk_image.c, nvk_mem_arena.c | `SPARSE` unsupported; size ≤ window−4095, rounded to 4 KiB, align ≥ 4 KiB power of two; two heaps as `nvkmd_nouveau` (`nvkmd_nouveau_dev.c:51-58`): `[16 GiB, 512 GiB)` ordinary, `[512 GiB, 1 TiB)` for `REPLAY`; `ALLOC_FIXED` only with `REPLAY` (else unsupported), inside the replay range via `util_vma_heap_alloc_addr` (outside or taken: `INVALID_OPAQUE_CAPTURE_ADDRESS`), else `util_vma_heap_alloc`; heaps under `va_mutex`; a released range returns to the heap of its address | — |
 | dev `create_ctx` / `create_shared_ctx` (1326, 1334, 1285) | nvk_queue.c, nvk_upload_queue.c | `BIND` engine → no channel; else context (shared: share must be a channel ctx of the same dev) | `context_create`, `context_create_shared` |
 | mem `free` (950) | via `nvkmd_mem_unref` (10 files) | `nvkmd_va_free`, RM free (loss on failure), destroy `map_mutex` | `free` |
 | mem `map` (962) | via `nvkmd_mem_map` (nvk_heap.c, nvk_host_copy.c, nvk_device_memory.c, nvk_mem_arena.c) | fixed maps unsupported; maps the shared lazy CPU mapping; `DEVICE_LOST` or RM-lost → loss; OOM statuses pass through, rest `MEMORY_MAP_FAILED`; NULL address → unmap + `MEMORY_MAP_FAILED` | `map`, `unmap`, `is_lost` |
@@ -123,9 +123,9 @@ struct, allocated in Rust and handed to Mesa as `&mut base`:
 | object | Rust owner | created / destroyed | holds |
 |---|---|---|---|
 | `RmPdev` | `Box`, raw in Mesa | `try_create_pdev` / pdev `destroy` (the only `Box::from_raw`) | render fd (`OwnedFd`, `O_CLOEXEC`), `CString` render path, `Info`, the two `vk_sync_type`s and the NULL-terminated `sync_types` array |
-| `RmDev` | `Box`, raw in Mesa | `create_dev` / dev `destroy` | `RmDevice` (owns the `NvRmDevice` handle; `Drop` = `nv_rm_close`), `Option<NonNull<vk_device>>` (logical device only), render fd, `Arc<VaHeap>` |
-| `RmMem` | `Box`; lifetime is Mesa's refcount (`nvkmd_mem_unref` → `free`) | alloc / import / `free` | `MemoryId` (owning: freed only by `RmDev::free_memory(self)`) |
-| `RmVa` | `Box` | `alloc_va` / va `free` | `Vec<Binding{offset, size, MappingId}>` in insertion order (C list order; unbind order is preserved) |
+| `RmDev` | `Box`, raw in Mesa | `create_dev` / dev `destroy` | `RmDevice` (owns the `NvRmDevice` handle; `Drop` = `nv_rm_close`), `Option<NonNull<vk_device>>` (logical device only), render fd, `Mutex<VaHeaps>` (the ordinary and the replay `util_vma_heap`, initialised in place) |
+| `RmMem` | `Box`; lifetime is Mesa's refcount (`nvkmd_mem_unref` → `free`) | alloc / import / `free` | the `NvRmAllocation` (id, size); the RM free runs once, in `free` or in the creation rollback |
+| `RmVa` | `Box` | `alloc_va` / va `free` | the bound ranges and their `MappingId`s as two parallel `Vec`s in bind order (C list order, so unbind order is preserved); `free` hands the id array to `nv_rm_va_free` as it is, with no per-call bookkeeping allocation |
 | `RmCtx` | `Box` | `create_ctx` / ctx `destroy` | `Option<rm::ContextId>` (None = bind ctx), `Vec<Push>`, `Vec<WaitPoint>`, `Vec<SignalPoint>` scratch (capacity kept), last `Token` |
 | `RmSync` | in place in Mesa's `vk_sync` allocation (`size = size_of::<RmSync>()`) | `init` writes the `SyncId` from `nv_rm_sync_create`; `finish` passes it to `nv_rm_sync_destroy_deferred` | the `SyncId` |
 
@@ -137,8 +137,8 @@ using bindgen offsets.
 
 Destroy order is written out: dev `destroy` clears `notify_lost`/`notify_lost_data`/
 `check_status`, closes the RM device (which may still release VA ranges into the heap through
-the `VaRelease` callback, whose data pointer is the heap's `Arc`), closes the fd, then finishes
-the heap (as 563-583). Mesa's inline-only helpers (`simple_mtx_init/destroy`, `list_inithead`) get three
+the `VaRelease` callback, whose data pointer is that mutex: `nv_rm_close` runs every outstanding
+release before it returns), closes the fd, then finishes the heaps (as 563-583). Mesa's inline-only helpers (`simple_mtx_init/destroy`, `list_inithead`) get three
 small non-inline functions in `nvkmd.c` next to the existing `nvkmd_mem_init`:
 `nvkmd_dev_init`, `nvkmd_dev_finish`, `nvkmd_mem_finish`, and
 `nvkmd_dev_info_init_shared_mem_sizes` for `nv_device_info.h`'s inline shared-memory table
@@ -250,7 +250,8 @@ diagnostics are compared by content class (the harness checks a word of Mesa's m
 
 Gate per step: every suite passes on both backends and the call log (every RM, render-node and
 libdrm call with arguments and result, plus each case's outcome and the filled device info and
-sync type shapes) is byte-identical between them, suite by suite. Suites: `pdev`, `info`, `loss`.
+sync type shapes) is byte-identical between them, suite by suite. Suites: `pdev`, `info`, `loss`,
+`memory-api`, `memory-cleanup`.
 
 The C preflight harness (`mesa/tests/pdev-preflight.c`, which includes `nvkmd_rm.c`) has no call
 log and builds backend-private objects directly (`nvkmd_rm_mem`, `nvkmd_rm_ctx`, `nvkmd_rm_sync`
@@ -357,7 +358,7 @@ About 48 h before the regression run. Steps 1b-4 are independent of each other a
 - **Header drift on a Mesa pin bump:** stale bindings fail the build (§2.1); the `nvk_device`
   offset is the one layout from a non-nvkmd header and is pinned by the same check.
 - **Lock order** stays RM `Inner` → VA heap mutex; the heap lock is never held across an RM
-  call (the `VaHeap` API takes it internally per operation; the release callback takes it).
+  call (the `VaHeaps` lock is taken per heap operation; the release callback takes it).
 
 ## 6. Open questions
 

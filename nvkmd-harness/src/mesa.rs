@@ -1,20 +1,28 @@
 // SPDX-License-Identifier: MIT
 //! Handles over Mesa's public nvkmd interface: the DRM device NVK probes, the
 //! physical and KMD devices made through `nvkmd_try_create_pdev_for_drm` and
-//! the ops tables, and a stand-in logical `vk_device` that holds the loss
-//! state and hooks the backend installs. The suites reach the backend only
-//! through these, never through its own symbols or structures.
+//! the ops tables, the memory and VA reservations made through Mesa's
+//! `nvkmd_dev_*` wrappers, and a stand-in logical `vk_device` that holds the
+//! loss state and hooks the backend installs. The suites reach the backend
+//! only through these, never through its own symbols or structures.
+//!
+//! Requests Mesa's wrappers would reject with an assertion (a bind outside
+//! the memory, a fixed CPU map) go to the backend's ops table directly, as
+//! the backend must refuse them on its own.
 //!
 //! Single-threaded: the suites run on one thread.
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use nvkmd_sys::{
     _drmDevice, _drmPciBusInfo, _drmPciDeviceInfo, _vk_device_set_lost, DRM_BUS_PCI, DRM_NODE_MAX,
     DRM_NODE_RENDER, NVKMD_SYS_VK_DEVICE_LOST, NVKMD_SYS_VK_DEVICE_QUEUES,
-    NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_SUCCESS, VkResult, nvkmd_dev, nvkmd_pdev, nvkmd_sys_layout,
-    nvkmd_try_create_pdev_for_drm, vk_device, vk_object_base, vk_sync_type,
+    NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_SUCCESS, VkResult, nvkmd_dev, nvkmd_dev_alloc_mem,
+    nvkmd_dev_alloc_tiled_mem, nvkmd_dev_alloc_va, nvkmd_dev_import_dma_buf, nvkmd_mem,
+    nvkmd_mem_map, nvkmd_mem_ops, nvkmd_mem_unmap, nvkmd_mem_unref, nvkmd_pdev, nvkmd_sys_layout,
+    nvkmd_try_create_pdev_for_drm, nvkmd_va, nvkmd_va_free, nvkmd_va_ops, vk_device,
+    vk_object_base, vk_sync_type,
 };
 
 use crate::fake;
@@ -271,6 +279,19 @@ impl Pdev {
 /// A KMD device the backend created.
 pub(crate) struct Dev(NonNull<nvkmd_dev>);
 
+fn log_of(log: Option<&VkDevice>) -> *mut vk_object_base {
+    log.map_or(core::ptr::null_mut(), VkDevice::log_object)
+}
+
+/// A call that hands out an object through `out`: the object on success, the
+/// result otherwise, when the backend must have left `out` alone or NULL.
+fn made<T>(result: VkResult, out: *mut T) -> Result<NonNull<T>, VkResult> {
+    if result == VK_SUCCESS {
+        return Ok(NonNull::new(out).expect("a successful call returns its object"));
+    }
+    Err(result)
+}
+
 impl Dev {
     /// The device's `destroy`.
     pub(crate) fn destroy(self) {
@@ -281,5 +302,254 @@ impl Dev {
         let destroy = ops.destroy.expect("every device has destroy");
         // SAFETY: the backend's own entry; the device is not used afterwards.
         unsafe { destroy(self.0.as_ptr()) };
+    }
+
+    /// Mesa's `nvkmd_dev_alloc_mem`.
+    pub(crate) fn alloc_mem(
+        &self,
+        log: Option<&VkDevice>,
+        size: u64,
+        alignment: u64,
+        flags: u32,
+    ) -> Result<Mem, VkResult> {
+        let mut out = core::ptr::null_mut();
+        // SAFETY: Mesa's wrapper over the backend's entry on its live device;
+        // `out` is a writable local; `log` NULL or a live stand-in device.
+        let result = unsafe {
+            nvkmd_dev_alloc_mem(
+                self.0.as_ptr(),
+                log_of(log),
+                size,
+                alignment,
+                flags,
+                &raw mut out,
+            )
+        };
+        made(result, out).map(Mem)
+    }
+
+    /// Mesa's `nvkmd_dev_alloc_tiled_mem`.
+    pub(crate) fn alloc_tiled_mem(
+        &self,
+        log: Option<&VkDevice>,
+        size: u64,
+        alignment: u64,
+        pte_kind: u8,
+        tile_mode: u16,
+        flags: u32,
+    ) -> Result<Mem, VkResult> {
+        let mut out = core::ptr::null_mut();
+        // SAFETY: as `alloc_mem`.
+        let result = unsafe {
+            nvkmd_dev_alloc_tiled_mem(
+                self.0.as_ptr(),
+                log_of(log),
+                size,
+                alignment,
+                pte_kind,
+                tile_mode,
+                flags,
+                &raw mut out,
+            )
+        };
+        made(result, out).map(Mem)
+    }
+
+    /// Mesa's `nvkmd_dev_import_dma_buf`.
+    pub(crate) fn import_dma_buf(
+        &self,
+        log: Option<&VkDevice>,
+        fd: c_int,
+    ) -> Result<Mem, VkResult> {
+        let mut out = core::ptr::null_mut();
+        // SAFETY: as `alloc_mem`; the fd is only passed on to the fake RM.
+        let result =
+            unsafe { nvkmd_dev_import_dma_buf(self.0.as_ptr(), log_of(log), fd, &raw mut out) };
+        made(result, out).map(Mem)
+    }
+
+    /// Mesa's `nvkmd_dev_alloc_va`.
+    pub(crate) fn alloc_va(
+        &self,
+        log: Option<&VkDevice>,
+        flags: u32,
+        pte_kind: u8,
+        size: u64,
+        alignment: u64,
+        fixed: u64,
+    ) -> Result<Va, VkResult> {
+        let mut out = core::ptr::null_mut();
+        // SAFETY: as `alloc_mem`.
+        let result = unsafe {
+            nvkmd_dev_alloc_va(
+                self.0.as_ptr(),
+                log_of(log),
+                flags,
+                pte_kind,
+                size,
+                alignment,
+                fixed,
+                &raw mut out,
+            )
+        };
+        made(result, out).map(Va)
+    }
+}
+
+/// Memory the backend allocated or imported; Mesa's reference.
+pub(crate) struct Mem(NonNull<nvkmd_mem>);
+
+impl Mem {
+    pub(crate) fn get(&self) -> &nvkmd_mem {
+        // SAFETY: a live allocation; the suites read it between backend calls.
+        unsafe { self.0.as_ref() }
+    }
+
+    fn ops(&self) -> &nvkmd_mem_ops {
+        // SAFETY: a created allocation points to the backend's static table.
+        unsafe { self.get().ops.as_ref() }.expect("a created allocation has ops")
+    }
+
+    /// The allocation's own reservation, which the backend made for it.
+    pub(crate) fn va(&self) -> Va {
+        Va(NonNull::new(self.get().va).expect("every allocation has its VA"))
+    }
+
+    /// Mesa's `nvkmd_mem_map` of the internal mapping (reference counted).
+    pub(crate) fn map(&self, log: Option<&VkDevice>) -> Result<*mut c_void, VkResult> {
+        let mut out = core::ptr::null_mut();
+        // SAFETY: Mesa's wrapper on a live allocation; `out` is writable.
+        let result = unsafe {
+            nvkmd_mem_map(
+                self.0.as_ptr(),
+                log_of(log),
+                nvkmd_sys::NVKMD_MEM_MAP_RDWR,
+                core::ptr::null_mut(),
+                &raw mut out,
+            )
+        };
+        if result != VK_SUCCESS {
+            return Err(result);
+        }
+        Ok(out)
+    }
+
+    /// Mesa's `nvkmd_mem_unmap` of the internal mapping.
+    pub(crate) fn unmap(&self) {
+        // SAFETY: Mesa's wrapper on a live allocation `map` mapped.
+        unsafe { nvkmd_mem_unmap(self.0.as_ptr(), 0) };
+    }
+
+    /// The backend's `map` itself, with what it wrote to its output (which
+    /// starts as a non-NULL sentinel).
+    pub(crate) fn ops_map(
+        &self,
+        log: Option<&VkDevice>,
+        flags: u32,
+        fixed: *mut c_void,
+    ) -> (VkResult, *mut c_void) {
+        let map = self.ops().map.expect("memory maps");
+        let mut out = core::ptr::without_provenance_mut(1);
+        // SAFETY: the backend's entry on its live allocation; `out` writable.
+        let result = unsafe { map(self.0.as_ptr(), log_of(log), flags, fixed, &raw mut out) };
+        (result, out)
+    }
+
+    /// The backend's `unmap` itself.
+    pub(crate) fn ops_unmap(&self, map: *mut c_void) {
+        let unmap = self.ops().unmap.expect("memory unmaps");
+        // SAFETY: the backend's entry on its live allocation.
+        unsafe { unmap(self.0.as_ptr(), 0, map) };
+    }
+
+    /// The backend's `export_dma_buf`.
+    pub(crate) fn export(&self, log: Option<&VkDevice>) -> Result<c_int, VkResult> {
+        let export = self.ops().export_dma_buf.expect("memory exports");
+        let mut fd = -1;
+        // SAFETY: the backend's entry on its live allocation; `fd` writable.
+        let result = unsafe { export(self.0.as_ptr(), log_of(log), &raw mut fd) };
+        if result != VK_SUCCESS {
+            return Err(result);
+        }
+        Ok(fd)
+    }
+
+    /// The backend's `overmap`.
+    pub(crate) fn overmap(&self, log: Option<&VkDevice>) -> VkResult {
+        let overmap = self.ops().overmap.expect("the overmap slot is set");
+        // SAFETY: the backend's entry on its live allocation.
+        unsafe {
+            overmap(
+                self.0.as_ptr(),
+                log_of(log),
+                0,
+                core::ptr::without_provenance_mut(0x1000),
+            )
+        }
+    }
+
+    /// The backend's `log_handle`.
+    pub(crate) fn log_handle(&self) -> u32 {
+        let handle = self.ops().log_handle.expect("memory has a log handle");
+        // SAFETY: the backend's entry on its live allocation.
+        unsafe { handle(self.0.as_ptr()) }
+    }
+
+    /// Mesa's `nvkmd_mem_unref` of the last reference: the backend's `free`.
+    pub(crate) fn unref(self) {
+        // SAFETY: Mesa's wrapper; the suites hold the one reference.
+        unsafe { nvkmd_mem_unref(self.0.as_ptr()) };
+    }
+}
+
+/// A VA reservation the backend made.
+pub(crate) struct Va(NonNull<nvkmd_va>);
+
+impl Va {
+    pub(crate) fn get(&self) -> &nvkmd_va {
+        // SAFETY: a live reservation; the suites read it between backend calls.
+        unsafe { self.0.as_ref() }
+    }
+
+    fn ops(&self) -> &nvkmd_va_ops {
+        // SAFETY: a created reservation points to the backend's static table.
+        unsafe { self.get().ops.as_ref() }.expect("a created reservation has ops")
+    }
+
+    /// The backend's `bind_mem` (Mesa's `nvkmd_va_bind_mem` asserts the
+    /// ranges the backend must check itself).
+    pub(crate) fn bind(
+        &self,
+        log: Option<&VkDevice>,
+        offset: u64,
+        mem: &Mem,
+        mem_offset: u64,
+        size: u64,
+    ) -> VkResult {
+        let bind = self.ops().bind_mem.expect("reservations bind");
+        // SAFETY: the backend's entry on its live reservation and allocation.
+        unsafe {
+            bind(
+                self.0.as_ptr(),
+                log_of(log),
+                offset,
+                mem.0.as_ptr(),
+                mem_offset,
+                size,
+            )
+        }
+    }
+
+    /// The backend's `unbind`.
+    pub(crate) fn unbind(&self, log: Option<&VkDevice>, offset: u64, size: u64) -> VkResult {
+        let unbind = self.ops().unbind.expect("reservations unbind");
+        // SAFETY: the backend's entry on its live reservation.
+        unsafe { unbind(self.0.as_ptr(), log_of(log), offset, size) }
+    }
+
+    /// Mesa's `nvkmd_va_free`.
+    pub(crate) fn free(self) {
+        // SAFETY: Mesa's wrapper; the reservation is not used afterwards.
+        unsafe { nvkmd_va_free(self.0.as_ptr()) };
     }
 }

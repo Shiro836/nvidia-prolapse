@@ -42,9 +42,9 @@ TARGETS = {
 }
 
 # What the backend implements (the nvkmd vtables, vk_sync_type), fills (nv_device_info), recovers its
-# objects from (nvk_device, vk_device's loss hooks) and calls (the functions below), plus the entry the
-# offline harness (nvkmd-harness) drives it through. Everything these reach is generated too;
-# vk_device's other members are left opaque.
+# objects from (nvk_device, vk_device's loss hooks) and calls (the functions below), plus the entries the
+# offline harness (nvkmd-harness) drives it through (the probe, Mesa's memory wrappers). Everything these
+# reach is generated too; vk_device's other members are left opaque.
 ALLOWLIST_TYPES = [
     "nvkmd_.*", "vk_sync", "vk_sync_type", "vk_sync_wait", "vk_sync_signal", "vk_sync_features",
     "vk_sync_wait_flags", "vk_sync_flags", "nv_device_info", "nv_zcull_device_info", "util_vma_heap",
@@ -57,7 +57,8 @@ ALLOWLIST_FUNCTIONS = [
     "util_cache_granularity", "__vk_errorf", "_vk_device_set_lost", "drmGetVersion", "drmFreeVersion",
     "nvkmd_try_create_pdev_for_drm", "nvkmd_dev_init", "nvkmd_dev_finish", "nvkmd_mem_finish",
     "nvkmd_dev_info_init_shared_mem_sizes", "open", "close",
-    "fstat",
+    "fstat", "nvkmd_dev_alloc_mem", "nvkmd_dev_alloc_tiled_mem", "nvkmd_dev_import_dma_buf",
+    "nvkmd_mem_map", "nvkmd_mem_unmap", "nvkmd_mem_unref",
 ]
 # libdrm's device-record constants (xf86drm.h) and the open flags of the render node (fcntl.h): macros.
 ALLOWLIST_VARS = ["DRM_NODE_RENDER", "DRM_NODE_MAX", "DRM_BUS_PCI", "O_RDWR", "O_CLOEXEC"]

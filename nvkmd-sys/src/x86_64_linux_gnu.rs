@@ -1433,6 +1433,36 @@ unsafe extern "C" {
     pub fn nvkmd_dev_info_init_shared_mem_sizes(info: *mut nv_device_info);
 }
 unsafe extern "C" {
+    pub fn nvkmd_dev_alloc_mem(
+        dev: *mut nvkmd_dev,
+        log_obj: *mut vk_object_base,
+        size_B: u64,
+        align_B: u64,
+        flags: nvkmd_mem_flags,
+        mem_out: *mut *mut nvkmd_mem,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn nvkmd_dev_alloc_tiled_mem(
+        dev: *mut nvkmd_dev,
+        log_obj: *mut vk_object_base,
+        size_B: u64,
+        align_B: u64,
+        pte_kind: u8,
+        tile_mode: u16,
+        flags: nvkmd_mem_flags,
+        mem_out: *mut *mut nvkmd_mem,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn nvkmd_dev_import_dma_buf(
+        dev: *mut nvkmd_dev,
+        log_obj: *mut vk_object_base,
+        fd: ::core::ffi::c_int,
+        mem_out: *mut *mut nvkmd_mem,
+    ) -> VkResult;
+}
+unsafe extern "C" {
     pub fn nvkmd_dev_alloc_va(
         dev: *mut nvkmd_dev,
         log_obj: *mut vk_object_base,
@@ -1443,6 +1473,21 @@ unsafe extern "C" {
         fixed_addr: u64,
         va_out: *mut *mut nvkmd_va,
     ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn nvkmd_mem_unref(mem: *mut nvkmd_mem);
+}
+unsafe extern "C" {
+    pub fn nvkmd_mem_map(
+        mem: *mut nvkmd_mem,
+        log_obj: *mut vk_object_base,
+        flags: nvkmd_mem_map_flags,
+        fixed_addr: *mut ::core::ffi::c_void,
+        map_out: *mut *mut ::core::ffi::c_void,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn nvkmd_mem_unmap(mem: *mut nvkmd_mem, flags: nvkmd_mem_map_flags);
 }
 unsafe extern "C" {
     pub fn nvkmd_va_free(va: *mut nvkmd_va);

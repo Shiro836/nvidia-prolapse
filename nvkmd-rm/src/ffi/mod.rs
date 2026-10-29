@@ -16,11 +16,16 @@ use std::fmt;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-use nvkmd_sys::{__vk_errorf, VK_ERROR_FEATURE_NOT_PRESENT, VK_SUCCESS, VkResult, vk_object_base};
+use nvkmd_sys::{
+    __vk_errorf, _vk_device_set_lost, VK_ERROR_FEATURE_NOT_PRESENT, VK_SUCCESS, VkResult,
+    vk_device, vk_object_base,
+};
 
 mod dev;
+mod memory;
 mod pdev;
 mod sync;
+mod va;
 
 /// Platform log tag of this backend's diagnostics.
 const TAG: &CStr = c"nvkmd-rm";
@@ -52,6 +57,29 @@ fn vk_errorf(log: *mut vk_object_base, result: VkResult, message: fmt::Arguments
         __vk_errorf(
             log.cast(),
             result,
+            TAG.as_ptr(),
+            line(),
+            c"%s".as_ptr(),
+            text.as_ptr(),
+        )
+    }
+}
+
+/// Mesa's `vk_device_set_lost` (`vk_device.h`): counts the logical device's
+/// loss, runs its `notify_lost` hook on the first one and reports `message`;
+/// returns `VK_ERROR_DEVICE_LOST`.
+///
+/// # Safety
+/// `vk` is a live logical device.
+#[track_caller]
+unsafe fn set_lost(vk: NonNull<vk_device>, message: fmt::Arguments<'_>) -> VkResult {
+    let text = message.to_string().replace('\0', "\u{fffd}");
+    let text = CString::new(text).expect("interior NULs were replaced");
+    // SAFETY: a live logical device (caller); "%s" reads exactly one
+    // NUL-terminated string, `text`, which outlives the call.
+    unsafe {
+        _vk_device_set_lost(
+            vk.as_ptr(),
             TAG.as_ptr(),
             line(),
             c"%s".as_ptr(),

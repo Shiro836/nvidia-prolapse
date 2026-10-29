@@ -17,7 +17,13 @@ use crate::mesa::{self, Pdev, VkDevice};
 pub(crate) type Suite = (&'static str, fn());
 
 /// Every suite, in run order.
-pub(crate) const SUITES: &[Suite] = &[("pdev", pdev), ("info", info), ("loss", loss)];
+pub(crate) const SUITES: &[Suite] = &[
+    ("pdev", pdev),
+    ("info", info),
+    ("loss", loss),
+    ("memory-api", crate::memory::api),
+    ("memory-cleanup", crate::memory::cleanup),
+];
 
 fn refused(case: &str, expected: VkResult) {
     let result = mesa::try_create_pdev().map(Pdev::destroy);

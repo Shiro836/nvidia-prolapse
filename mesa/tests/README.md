@@ -15,8 +15,13 @@ libc's render-node and allocation calls, libdrm and Mesa's diagnostic sinks
 replaced, and a fake RM. Every RM, render-node and libdrm call is logged; the
 two backends' logs must be identical, suite by suite. Suites: `pdev`
 (probing, refusals, failure cleanup, the filled device info and sync types,
-KMD device creation) and `loss` (loss publication through the hooks and their
-removal before the RM device closes).
+KMD device creation), `info` (RM values too wide for Mesa's fields), `loss`
+(loss publication through the hooks and their removal before the RM device
+closes), `memory-api` (placement of every allocation kind, tiled and imported
+memory, export, CPU maps, VA reservations from the ordinary and the
+capture/replay heap, binds and unbinds) and `memory-cleanup` (map failures,
+failed frees, unmaps and rollbacks publishing the loss, VA frees that fail or
+defer their release).
 
 ## Preflight harness of the C backend
 
