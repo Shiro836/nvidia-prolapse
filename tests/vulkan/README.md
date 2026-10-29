@@ -14,6 +14,11 @@ Small public-API Vulkan programs that load the built driver directly and check r
     tests/vulkan/run.py --target host --rust-profile release           # print the commands
     tests/vulkan/run.py --target host --rust-profile release --run     # run them (needs the GPU)
 
+Both scripts take `--nvkmd {c,rust}` to pick NVK's kernel-driver backend over the RM: the C `nvkmd_rm.c`
+(`build/nvk-<target>`, the default) or the Rust `nvkmd-rm` (`build/nvk-<target>-rust`, built with
+`mesa/build.py --target <target> --nvkmd rust`). Recording the same programs with each and diffing the two
+recordings is the system-level differential test of the Rust backend.
+
 `run.py` checks the build records `mesa/build.py` wrote before it runs anything. The x86_64 programs run under the
 image's unmodified bionic `linker64` (`build/bionic-runtime64`, `mesa/prepare-runtime64.py`). The i686 programs run
 under the image's unmodified bionic linker (`build/nvk-android32/runtime`, `mesa/prepare-runtime32.py`) in a new user

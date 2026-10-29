@@ -508,8 +508,8 @@ def main():
     parser.add_argument("-j", type=int, default=12)
     parser.add_argument("--nvkmd", choices=("c", "rust"), default="c",
                         help="NVK's kernel-driver backend over the RM: nvkmd_rm.c into build/nvk-<target>, or the "
-                             "Rust nvkmd-rm static library into build/nvk-<target>-rust (not read by "
-                             "tests/vulkan/run.py or capture.py)")
+                             "Rust nvkmd-rm static library into build/nvk-<target>-rust (tests/vulkan/run.py and "
+                             "capture.py select it with the same option)")
     parser.add_argument("--gl", action="store_true",
                         help="build the nvrm gallium GL/GLES driver from its own Mesa worktree into "
                              "build/nvrm-<target> (--target both = android + android32); NVK trees "
@@ -523,7 +523,7 @@ def main():
     args = parser.parse_args()
     if args.gl:
         return build_gl(args)
-    sources_before = profiles.source_snapshot(ROOT)
+    sources_before = {backend: profiles.source_snapshot(ROOT, backend) for backend in profiles.BACKENDS}
     for tool in ("bindgen", "cbindgen"):
         if not (TOOLS / tool).exists():
             parser.error(f"Missing {tool}; run mesa/compiler/build.py --tools-only --download-deps first")
@@ -619,15 +619,13 @@ def main():
         for name in ("nv_rm.h", "nvkmd_rm.h", "nvkmd_rm.c"):
             if hashlib.sha256((rm_source / name).read_bytes()).digest() != hashlib.sha256((HERE / name).read_bytes()).digest():
                 raise SystemExit(f"Compiled Mesa bridge copy differs from canonical {name}; rebuild")
-        if rust_backend:
-            print(f"Built {target} NVK with the Rust nvkmd backend (Rust {args.rust_profile}): "
-                  f"{build}/src/nouveau/vulkan/libvulkan_nouveau.so")
-            continue
+        nvkmd = "rust" if rust_backend else "c"
         profiles.write_metadata(ROOT, target, args.rust_profile, rust_command,
                                 subprocess.check_output(["rustc", "--version"], text=True).strip(),
                                 {key: target_env[key] for key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")
-                                 if key in target_env}, sources_before)
-        print(f"Built full {target} NVK (Rust {args.rust_profile}): {build}/src/nouveau/vulkan/libvulkan_nouveau.so")
+                                 if key in target_env}, sources_before[nvkmd], nvkmd)
+        print(f"Built full {target} NVK with the {nvkmd} nvkmd backend (Rust {args.rust_profile}): "
+              f"{build}/src/nouveau/vulkan/libvulkan_nouveau.so")
 
 def prepare_nvk_source(download):
     stamp = SOURCE / ".nv-prepared"
