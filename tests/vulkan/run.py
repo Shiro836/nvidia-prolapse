@@ -5,8 +5,7 @@ Default is a checked dry run: no process is loaded and no GPU work is submitted.
 Build the programs first (tests/vulkan/build.py). The android (x86_64) target runs the
 programs under the image's unmodified bionic linker64/libc/libdl/libm in build/bionic-runtime64
 (mesa/prepare-runtime64.py), android32 under build/nvk-android32/runtime (mesa/prepare-runtime32.py);
-build.sh extracts both. --nvkmd selects NVK's kernel-driver backend: the C one (build/nvk-<target>) or the
-Rust one (build/nvk-<target>-rust, mesa/build.py --nvkmd rust).
+build.sh extracts both. NVK comes from build/nvk-<target> (mesa/build.py --target <target>).
 """
 import argparse
 import os
@@ -21,9 +20,9 @@ import native_rust_profile as profiles
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def cases(target, suite, nvkmd="c"):
+def cases(target, suite):
     """Return existing probe invocations; no shell parsing or implicit fallback."""
-    icd = profiles.nvk_dir(ROOT, target, nvkmd) / "src/nouveau/vulkan/libvulkan_nouveau.so"
+    icd = profiles.nvk_dir(ROOT, target) / "src/nouveau/vulkan/libvulkan_nouveau.so"
     integration = ROOT / "build/source-native-integration" / target
     hal = integration / "vulkan.nvidia.so"
     core = ROOT / "build/native-vulkan-probe"
@@ -56,11 +55,10 @@ def cases(target, suite, nvkmd="c"):
     return result
 
 
-def launch(target, command, rust_profile="dev", nvkmd="c"):
+def launch(target, command, rust_profile="dev"):
     env = {"DISPLAY": "", "WAYLAND_DISPLAY": ""}
-    nvk = profiles.nvk_dir(ROOT, target, nvkmd)
-    # The bionic runtime is prepared once per target, in the C backend's build dir.
-    nvk_runtime = profiles.nvk_dir(ROOT, target) / "runtime"
+    nvk = profiles.nvk_dir(ROOT, target)
+    nvk_runtime = nvk / "runtime"
     rust = profiles.rust_library(ROOT, target, rust_profile).parent
     # The selected Rust directory precedes every other library directory, so a
     # stale colocated bridge cannot shadow the verified profile.
@@ -85,8 +83,6 @@ def main():
     parser.add_argument("--target", choices=("host", "android", "android32", "all"), default="all")
     parser.add_argument("--rust-profile", choices=profiles.PROFILES, default="dev")
     parser.add_argument("--suite", choices=("core", "hal", "all"), default="all")
-    parser.add_argument("--nvkmd", choices=profiles.BACKENDS, default="c",
-                        help="NVK's kernel-driver backend: nvkmd_rm.c or the Rust nvkmd-rm (mesa/build.py --nvkmd)")
     parser.add_argument("--run", action="store_true", help="run serial GPU tests after coordinating the GPU slot")
     parser.add_argument("--logs", type=Path, default=ROOT / "build/native-vulkan-regression")
     args = parser.parse_args()
@@ -95,14 +91,14 @@ def main():
     builds = {}
     for target in targets:
         try:
-            builds[target] = profiles.verify_metadata(ROOT, target, args.rust_profile, args.nvkmd)
+            builds[target] = profiles.verify_metadata(ROOT, target, args.rust_profile)
         except RuntimeError as error:
             parser.error(str(error))
-        for name, command in cases(target, args.suite, args.nvkmd):
+        for name, command in cases(target, args.suite):
             for item in command:
                 if isinstance(item, Path) and not item.is_file():
                     parser.error(f"missing artifact: {item}")
-            env, argv = launch(target, command, args.rust_profile, args.nvkmd)
+            env, argv = launch(target, command, args.rust_profile)
             for item in argv:
                 if item.startswith("/") and not Path(item).is_file():
                     parser.error(f"missing launch artifact: {item}")
@@ -111,7 +107,7 @@ def main():
         args.logs.mkdir(parents=True, exist_ok=True)
         import json
         (args.logs / "rust-builds.json").write_text(json.dumps(builds, indent=2) + "\n")
-    print(f"Rust profile: {args.rust_profile}; nvkmd backend: {args.nvkmd}; "
+    print(f"Rust profile: {args.rust_profile}; "
           "successful build identities verified", flush=True)
     for target, name, env, argv in plan:
         printed = shlex.join(["env", *(f"{k}={v}" for k, v in env.items()), *argv])
@@ -129,7 +125,7 @@ def main():
             print(log.read_text()[-12000:], file=sys.stderr)
             return result.returncode
     for target, expected in builds.items():
-        if profiles.verify_metadata(ROOT, target, args.rust_profile, args.nvkmd) != expected:
+        if profiles.verify_metadata(ROOT, target, args.rust_profile) != expected:
             parser.error(f"{target}: Rust build metadata changed during regression gate")
     print(f"{'Completed' if args.run else 'Prepared'} {len(plan)} tests; "
           "Android AHB and presentation require separate real-guest gates.")

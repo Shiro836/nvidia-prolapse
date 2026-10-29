@@ -1,0 +1,976 @@
+== pdev
+open(/fake/render, 0o2000002) = -1 EACCES
+render node open fails: probe = Err(-9)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NULL
+close(3) = 0
+DRM driver Missing: probe = Err(-9)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = Nouveau
+drmFreeVersion
+close(3) = 0
+DRM driver Nouveau: probe = Err(-9)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = Unnamed
+drmFreeVersion
+close(3) = 0
+DRM driver Unnamed: probe = Err(-9)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+close(3) = 0
+device allocation fails: probe = Err(-1)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = -1 EIO
+close(3) = 0
+render node stat fails: probe = Err(-3)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = -3 (no device)
+close(3) = 0
+RM open fails: probe = Err(-3)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = -3 (device)
+nv_rm_close(42)
+close(3) = 0
+RM open fails after creating its device: probe = Err(-3)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+pdev type=1 device_id=0x2204 chipset=0x172 name="NVIDIA Fake GPU" chipset_name="NV172" pci=1:2:3.4 rev=0 sm=86 gpc=7 tpc=41 mp_per_tpc=2 warps=48 transfer=false nc_atom=64 cls=0xc7b5/0x902d/0xc797/0xa140/0xc7c0/0x0 vram=0x600000000 bar=0x10000000 smem_max=100 smem=[0, 8, 16, 32, 64, 100, 0, 0, 0, 0]/6 zcull=true [32 16 0x100010 0x1200 0x20 0x780 0xc0 16 512 64 0x5d000 0x1000] kmd=[dma_buf=true sparse=false vram_used=false tiled=true map_fixed=false overmap=false compression=false rm_compression=true shared_ctx=63 isa=0x806 pipes=82/41] bind_align=4096 render_dev=0x1234 primary_dev=0x0 debug=0
+sync_type[0] size=24 features=0x3f7 callbacks=init,finish,signal,get_value,reset,move,reserve_signal,wait_many,import_opaque_fd,export_opaque_fd
+sync_type[1] size=24 features=0x3f5 callbacks=init,finish,signal,reset,move,reserve_signal,wait_many,import_sync_file,export_sync_file
+device allocation fails: create_dev = Err(-1)
+open(/fake/render, 0o2000002) = -1 EACCES
+render node open fails: create_dev = Err(-3)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = -3 (device)
+nv_rm_close(42)
+close(3) = 0
+RM open fails after creating its device: create_dev = Err(-3)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+create_dev = Ok
+nv_rm_close(42)
+close(3) = 0
+close(3) = 0
+PASS pdev
+== info
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+close(3) = 0
+3D class wider than 16 bits: probe = Err(-9)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+close(3) = 0
+PCI domain wider than 16 bits: probe = Err(-9)
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+close(3) = 0
+SM version wider than 8 bits: probe = Err(-9)
+PASS info
+== loss
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_mark_lost(42)
+vk_device_set_lost = -4
+vk_device_set_lost again = -4
+nv_rm_close(42)
+close(3) = 0
+vk_device_set_lost after destroy = -4
+close(3) = 0
+PASS loss
+== memory-api
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+-- system memory
+nv_rm_alloc(size=0x1000, align=0x1000, placement=1, kind=0x0, tile=0) = 0 (memory 55)
+nv_rm_bind(memory 55, offset=0x0, size=0x1000, va=0x7ffffff000, kind=0x0) = 0 (mapping 1000)
+system memory: mem flags=0x2a size=0x1000 bind_align=4096 va=[0x7ffffff000, +0x1000) kind=0x0 va_flags=0x0
+nv_rm_va_free(mappings [1000], va=0x7ffffff000, size=0x1000) = 0
+release(va=0x7ffffff000, size=0x1000)
+nv_rm_free(55) = 0
+-- mappable device memory
+nv_rm_alloc(size=0x10000, align=0x10000, placement=0, kind=0x0, tile=0) = 0 (memory 56)
+nv_rm_bind(memory 56, offset=0x0, size=0x10000, va=0x7fffff0000, kind=0x0) = 0 (mapping 1001)
+mappable device memory: mem flags=0x2d size=0x10000 bind_align=4096 va=[0x7fffff0000, +0x10000) kind=0x0 va_flags=0x0
+nv_rm_va_free(mappings [1001], va=0x7fffff0000, size=0x10000) = 0
+release(va=0x7fffff0000, size=0x10000)
+nv_rm_free(56) = 0
+-- private device memory
+nv_rm_alloc(size=0x20000, align=0x10000, placement=2, kind=0x0, tile=0) = 0 (memory 57)
+nv_rm_bind(memory 57, offset=0x0, size=0x20000, va=0x7ffffe0000, kind=0x0) = 0 (mapping 1002)
+private device memory: mem flags=0x25 size=0x20000 bind_align=4096 va=[0x7ffffe0000, +0x20000) kind=0x0 va_flags=0x0
+nv_rm_va_free(mappings [1002], va=0x7ffffe0000, size=0x20000) = 0
+release(va=0x7ffffe0000, size=0x20000)
+nv_rm_free(57) = 0
+-- shared device memory
+nv_rm_alloc(size=0x10000, align=0x200000, placement=0, kind=0x0, tile=0) = 0 (memory 58)
+nv_rm_bind(memory 58, offset=0x0, size=0x10000, va=0x7fffe00000, kind=0x0) = 0 (mapping 1003)
+shared device memory: mem flags=0x35 size=0x10000 bind_align=4096 va=[0x7fffe00000, +0x10000) kind=0x0 va_flags=0x0
+nv_rm_va_free(mappings [1003], va=0x7fffe00000, size=0x10000) = 0
+release(va=0x7fffe00000, size=0x10000)
+nv_rm_free(58) = 0
+-- pool block
+nv_rm_alloc(size=0x200000, align=0x200000, placement=3, kind=0x0, tile=0) = 0 (memory 59)
+nv_rm_bind(memory 59, offset=0x0, size=0x200000, va=0x7fffe00000, kind=0x0) = 0 (mapping 1004)
+pool block: mem flags=0x60 size=0x200000 bind_align=4096 va=[0x7fffe00000, +0x200000) kind=0x0 va_flags=0x0
+nv_rm_va_free(mappings [1004], va=0x7fffe00000, size=0x200000) = 0
+release(va=0x7fffe00000, size=0x200000)
+nv_rm_free(59) = 0
+-- pool block outside its contract
+pool block of 1 MiB: Err(-13)
+-- RM allocation fails
+nv_rm_alloc(size=0x10000, align=0x10000, placement=2, kind=0x0, tile=0) = -2
+RM allocation fails: Err(-2)
+-- device memory too large to round
+device memory too large to round: Err(-2)
+-- no modifier
+nv_rm_alloc(size=0x10000, align=0x10000, placement=2, kind=0x0, tile=0) = 0 (memory 60)
+nv_rm_bind(memory 60, offset=0x0, size=0x10000, va=0x7fffff0000, kind=0x0) = 0 (mapping 1005)
+no modifier: mem flags=0x25 size=0x10000 bind_align=4096 va=[0x7fffff0000, +0x10000) kind=0x0 va_flags=0x0
+nv_rm_va_free(mappings [1005], va=0x7fffff0000, size=0x10000) = 0
+release(va=0x7fffff0000, size=0x10000)
+nv_rm_free(60) = 0
+-- generic kind, block height 2
+nv_rm_alloc(size=0x10000, align=0x10000, placement=0, kind=0x6, tile=0) = 0 (memory 61)
+nv_rm_bind(memory 61, offset=0x0, size=0x10000, va=0x7fffff0000, kind=0x6) = 0 (mapping 1006)
+generic kind, block height 2: mem flags=0x25 size=0x10000 bind_align=4096 va=[0x7fffff0000, +0x10000) kind=0x6 va_flags=0x0
+nv_rm_va_free(mappings [1006], va=0x7fffff0000, size=0x10000) = 0
+release(va=0x7fffff0000, size=0x10000)
+nv_rm_free(61) = 0
+-- block height past the 2D modifier
+block height past the 2D modifier: -8
+-- kind other than the generic one
+kind other than the generic one: -8
+-- import
+nv_rm_import(fd=22) = 0 (memory 62, size 0x20000)
+nv_rm_bind(memory 62, offset=0x0, size=0x20000, va=0x7ffffe0000, kind=0x0) = 0 (mapping 1007)
+import: mem flags=0x39 size=0x20000 bind_align=4096 va=[0x7ffffe0000, +0x20000) kind=0x0 va_flags=0x0
+nv_rm_export(62) = 0
+export: Ok(123)
+nv_rm_export(62) = -10
+export fails: Err(-10)
+nv_rm_va_free(mappings [1007], va=0x7ffffe0000, size=0x20000) = 0
+release(va=0x7ffffe0000, size=0x20000)
+nv_rm_free(62) = 0
+-- import fails
+nv_rm_import(fd=22) = -1000072003
+import fails: Err(-1000072003)
+-- maps
+nv_rm_alloc(size=0x1000, align=0x1000, placement=1, kind=0x0, tile=0) = 0 (memory 63)
+nv_rm_bind(memory 63, offset=0x0, size=0x1000, va=0x7ffffff000, kind=0x0) = 0 (mapping 1008)
+nv_rm_map(63) = 0 (0x12345000)
+map, map: 0x12345000, 0x12345000
+nv_rm_unmap(63) = 0
+overmap: -8
+log handle: 63
+nv_rm_va_free(mappings [1008], va=0x7ffffff000, size=0x1000) = 0
+release(va=0x7ffffff000, size=0x1000)
+nv_rm_free(63) = 0
+-- reservations
+sparse: Err(-8)
+empty: Err(-2)
+larger than the window: Err(-2)
+alignment not a power of two: Err(-8)
+ordinary: va [0x7fffff0000, +0x2000) kind=0x0 flags=0x0
+capture: va [0xfffffff000, +0x1000) kind=0x6 flags=0x2
+fixed address without replay: -8
+replay of a taken address: -1000257000
+replay of an ordinary address: -1000257000
+replay of an unaligned address: -1000257000
+replay of a free address: va [0x8000000000, +0x10000) kind=0x0 flags=0x6
+nv_rm_va_free(mappings [], va=0x8000000000, size=0x10000) = 0
+release(va=0x8000000000, size=0x10000)
+nv_rm_va_free(mappings [], va=0x7fffff0000, size=0x2000) = 0
+release(va=0x7fffff0000, size=0x2000)
+nv_rm_va_free(mappings [], va=0xfffffff000, size=0x1000) = 0
+release(va=0xfffffff000, size=0x1000)
+-- binds
+nv_rm_alloc(size=0x10000, align=0x1000, placement=1, kind=0x0, tile=0) = 0 (memory 64)
+nv_rm_bind(memory 64, offset=0x0, size=0x10000, va=0x7fffff0000, kind=0x0) = 0 (mapping 1009)
+nv_rm_bind(memory 64, offset=0x8000, size=0x4000, va=0x7ffffe8000, kind=0x6) = 0 (mapping 1010)
+nv_rm_bind(memory 64, offset=0x0, size=0x4000, va=0x7ffffe0000, kind=0x6) = 0 (mapping 1011)
+nv_rm_bind(memory 64, offset=0x4000, size=0x4000, va=0x7ffffe4000, kind=0x6) = 0 (mapping 1012)
+bind past the memory: -8
+partial unbind: -8
+empty unbind: -8
+unbind past the reservation: -8
+nv_rm_unbind(mapping 1010) = 0
+nv_rm_unbind(mapping 1011) = 0
+nv_rm_unbind(mapping 1012) = 0
+unbind of three bindings: 0
+nv_rm_bind(memory 64, offset=0x0, size=0x4000, va=0x7ffffe0000, kind=0x6) = -2
+RM bind fails: -2
+nv_rm_bind(memory 64, offset=0x0, size=0x4000, va=0x7ffffe0000, kind=0x6) = 0 (mapping 1013)
+nv_rm_bind(memory 64, offset=0x0, size=0x4000, va=0x7ffffe4000, kind=0x6) = 0 (mapping 1014)
+nv_rm_unbind(mapping 1013) = -3
+RM unbind fails: -3
+nv_rm_va_free(mappings [1013, 1014], va=0x7ffffe0000, size=0x10000) = 0
+release(va=0x7ffffe0000, size=0x10000)
+VA free hands over [1013, 1014]
+nv_rm_va_free(mappings [1009], va=0x7fffff0000, size=0x10000) = 0
+release(va=0x7fffff0000, size=0x10000)
+nv_rm_free(64) = 0
+nv_rm_close(42)
+close(3) = 0
+close(3) = 0
+PASS memory-api
+== memory-cleanup
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+-- map failures
+nv_rm_alloc(size=0x1000, align=0x1000, placement=1, kind=0x0, tile=0) = 0 (memory 55)
+nv_rm_bind(memory 55, offset=0x0, size=0x1000, va=0x7ffffff000, kind=0x0) = 0 (mapping 1000)
+nv_rm_map(55) = -1 (0x12345000)
+nv_rm_is_lost(42) = 0
+RM map fails -1: -1
+nv_rm_map(55) = -2 (0x12345000)
+nv_rm_is_lost(42) = 0
+RM map fails -2: -2
+nv_rm_map(55) = -3 (0x12345000)
+nv_rm_is_lost(42) = 0
+RM map fails -3: -5
+fixed map: -8
+-- RM map reports the loss
+nv_rm_map(55) = -4 (0x12345000)
+nv_rm_mark_lost(42)
+RM map reports the loss: -5
+-- RM map lost the device
+nv_rm_map(55) = -3 (0x12345000)
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+RM map lost the device: -5
+-- RM map returns no address
+nv_rm_map(55) = 0 (0x0)
+nv_rm_unmap(55) = 0
+null map: -5
+-- null map rollback fails
+nv_rm_map(55) = 0 (0x0)
+nv_rm_unmap(55) = -3
+nv_rm_mark_lost(42)
+null map, failed rollback: -5
+-- unmap fails
+nv_rm_unmap(55) = -1
+nv_rm_mark_lost(42)
+-- map failures done
+nv_rm_va_free(mappings [1000], va=0x7ffffff000, size=0x1000) = 0
+release(va=0x7ffffff000, size=0x1000)
+nv_rm_free(55) = 0
+-- free
+nv_rm_alloc(size=0x1000, align=0x1000, placement=1, kind=0x0, tile=0) = 0 (memory 56)
+nv_rm_bind(memory 56, offset=0x0, size=0x1000, va=0x7ffffff000, kind=0x0) = 0 (mapping 1001)
+nv_rm_va_free(mappings [1001], va=0x7ffffff000, size=0x1000) = 0
+release(va=0x7ffffff000, size=0x1000)
+nv_rm_free(56) = 0
+-- free fails
+nv_rm_alloc(size=0x1000, align=0x1000, placement=1, kind=0x0, tile=0) = 0 (memory 57)
+nv_rm_bind(memory 57, offset=0x0, size=0x1000, va=0x7ffffff000, kind=0x0) = 0 (mapping 1002)
+nv_rm_va_free(mappings [1002], va=0x7ffffff000, size=0x1000) = 0
+release(va=0x7ffffff000, size=0x1000)
+nv_rm_free(57) = -3
+nv_rm_mark_lost(42)
+-- allocation whose VA bookkeeping fails, rollback
+nv_rm_alloc(size=0x10000, align=0x10000, placement=0, kind=0x0, tile=0) = 0 (memory 58)
+nv_rm_free(58) = 0
+allocation whose VA bookkeeping fails, rollback: Err(-1)
+-- allocation whose VA bookkeeping fails, rollback fails
+nv_rm_alloc(size=0x10000, align=0x10000, placement=0, kind=0x0, tile=0) = 0 (memory 59)
+nv_rm_free(59) = -3
+nv_rm_mark_lost(42)
+allocation whose VA bookkeeping fails, rollback fails: Err(-1)
+-- import whose VA bookkeeping fails, rollback
+nv_rm_import(fd=22) = 0 (memory 60, size 0x20000)
+nv_rm_free(60) = 0
+import whose VA bookkeeping fails, rollback: Err(-1)
+-- import whose VA bookkeeping fails, rollback fails
+nv_rm_import(fd=22) = 0 (memory 61, size 0x20000)
+nv_rm_free(61) = -3
+nv_rm_mark_lost(42)
+import whose VA bookkeeping fails, rollback fails: Err(-1)
+-- VA frees
+nv_rm_alloc(size=0x1000, align=0x1000, placement=1, kind=0x0, tile=0) = 0 (memory 62)
+nv_rm_bind(memory 62, offset=0x0, size=0x1000, va=0x7ffffff000, kind=0x0) = 0 (mapping 1003)
+-- VA free
+nv_rm_bind(memory 62, offset=0x0, size=0x1000, va=0xfffffff000, kind=0x0) = 0 (mapping 1004)
+nv_rm_va_free(mappings [1004], va=0xfffffff000, size=0x1000) = 0
+release(va=0xfffffff000, size=0x1000)
+VA free: replay of the range: va [0xfffffff000, +0x1000) kind=0x0 flags=0x6
+nv_rm_va_free(mappings [], va=0xfffffff000, size=0x1000) = 0
+release(va=0xfffffff000, size=0x1000)
+-- VA free fails
+nv_rm_bind(memory 62, offset=0x0, size=0x1000, va=0xfffffff000, kind=0x0) = 0 (mapping 1005)
+nv_rm_va_free(mappings [1005], va=0xfffffff000, size=0x1000) = -3
+nv_rm_mark_lost(42)
+VA free fails: replay of the range: -1000257000
+-- deferred release
+nv_rm_bind(memory 62, offset=0x0, size=0x1000, va=0xffffffe000, kind=0x0) = 0 (mapping 1006)
+nv_rm_va_free(mappings [1006], va=0xffffffe000, size=0x1000) = 0
+replay before the release: Err(-1000257000)
+release(va=0xffffffe000, size=0x1000)
+nv_rm_va_free(mappings [], va=0xffffffe000, size=0x1000) = 0
+release(va=0xffffffe000, size=0x1000)
+-- rebind
+nv_rm_bind(memory 62, offset=0x0, size=0x1000, va=0x7fffffe000, kind=0x0) = 0 (mapping 1007)
+nv_rm_unbind(mapping 1007) = 0
+nv_rm_bind(memory 62, offset=0x0, size=0x1000, va=0x7fffffe000, kind=0x0) = 0 (mapping 1008)
+nv_rm_va_free(mappings [1008], va=0x7fffffe000, size=0x1000) = 0
+release(va=0x7fffffe000, size=0x1000)
+-- VA frees done
+nv_rm_va_free(mappings [1003], va=0x7ffffff000, size=0x1000) = 0
+release(va=0x7ffffff000, size=0x1000)
+nv_rm_free(62) = 0
+nv_rm_close(42)
+close(3) = 0
+close(3) = 0
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+-- unmap fails on the probe's device
+nv_rm_alloc(size=0x1000, align=0x1000, placement=1, kind=0x0, tile=0) = 0 (memory 55)
+nv_rm_bind(memory 55, offset=0x0, size=0x1000, va=0x7ffffff000, kind=0x0) = 0 (mapping 1000)
+nv_rm_unmap(55) = -3
+nv_rm_mark_lost(42)
+nv_rm_va_free(mappings [1000], va=0x7ffffff000, size=0x1000) = 0
+release(va=0x7ffffff000, size=0x1000)
+nv_rm_free(55) = 0
+nv_rm_close(42)
+close(3) = 0
+close(3) = 0
+PASS memory-cleanup
+== sync-api
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+-- create
+nv_rm_sync_create(flags=0x2, initial=0) = 0 (sync 77)
+nv_rm_sync_create(flags=0x0, initial=0) = 0 (sync 78)
+nv_rm_sync_create(flags=0x1, initial=5) = 0 (sync 79)
+nv_rm_sync_create(flags=0x0, initial=0) = 0 (sync 80)
+-- create fails
+nv_rm_sync_create(flags=0x0, initial=0) = -2
+vk_sync_init: Err(-2)
+-- host operations
+nv_rm_sync_reset(77) = 0
+nv_rm_sync_signal(77, 0) = 0
+nv_rm_sync_signal(79, 9) = 0
+nv_rm_sync_get_value(79) = 0
+vk_sync_get_value: Ok(8)
+nv_rm_sync_move(77, 78, shared=0) = 0
+nv_rm_sync_move(77, 78, shared=1) = 0
+nv_rm_sync_reserve(77, 78) = 0 (reserved 1)
+reserve_signal: (0, true)
+nv_rm_sync_reserve(77, 78) = 0 (reserved 0)
+reserve_signal: (0, false)
+-- sync file of -1
+nv_rm_sync_signal(80, 0) = 0
+-- sync file
+nv_rm_sync_import_fd(80, fd=66, opaque=0) = 0
+nv_rm_sync_export_fd(80, opaque=0) = 0
+vk_sync_export_sync_file: Ok(88)
+-- opaque fd
+nv_rm_sync_import_fd(77, fd=66, opaque=1) = 0
+nv_rm_sync_export_fd(77, opaque=1) = 0
+vk_sync_export_opaque_fd: Ok(88)
+-- signal sync payload fails
+nv_rm_sync_signal(79, 10) = -1
+signal sync payload: -1
+-- query sync value fails
+nv_rm_sync_get_value(79) = -4
+query sync value: -4
+-- reset sync payload fails
+nv_rm_sync_reset(77) = -1
+reset sync payload: -1
+-- move sync payload fails
+nv_rm_sync_move(77, 78, shared=0) = -1
+move sync payload: -1
+-- reserve binary signal fails
+nv_rm_sync_reserve(77, 78) = -1 (reserved 1)
+reserve binary signal: -1
+-- import sync file fails
+nv_rm_sync_import_fd(80, fd=66, opaque=0) = -1000072003
+import sync file: -1000072003
+-- import opaque sync fd fails
+nv_rm_sync_import_fd(77, fd=66, opaque=1) = -1000072003
+import opaque sync fd: -1000072003
+-- export sync file fails
+nv_rm_sync_export_fd(80, opaque=0) = -10
+export sync file: -10
+-- export opaque sync fd fails
+nv_rm_sync_export_fd(77, opaque=1) = -10
+export opaque sync fd: -10
+-- finish fails
+nv_rm_sync_destroy_deferred(77) = -13
+nv_rm_mark_lost(42)
+nv_rm_sync_destroy_deferred(77) = 0
+-- finish
+nv_rm_sync_destroy_deferred(77) = 0
+nv_rm_sync_destroy_deferred(78) = 0
+nv_rm_sync_destroy_deferred(79) = 0
+nv_rm_sync_destroy_deferred(80) = 0
+nv_rm_close(42)
+close(3) = 0
+close(3) = 0
+PASS sync-api
+== wait-loss
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+-- syncs
+nv_rm_sync_create(flags=0x0, initial=0) = 0 (sync 77)
+nv_rm_sync_create(flags=0x0, initial=0) = 0 (sync 78)
+nv_rm_sync_create(flags=0x1, initial=0) = 0 (sync 79)
+nv_rm_sync_create(flags=0x1, initial=0) = 0 (sync 80)
+-- Binary any=false MesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x0, timeout=18446744073709551615) = -4
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Binary any=false Deadline
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x0, timeout=2000000) = 2
+nv_rm_is_lost(42) = 0
+wait_many: 2
+-- Binary any=false Complete
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- Binary any=false RmError
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x0, timeout=18446744073709551615) = -13
+nv_rm_is_lost(42) = 0
+wait_many: -13
+-- Binary any=false CompleteWithMesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Binary any=false RmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x0, timeout=18446744073709551615) = -4
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Binary any=false CompleteWithRmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Binary any=true MesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x2, timeout=18446744073709551615) = -4
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Binary any=true Deadline
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x2, timeout=2000000) = 2
+nv_rm_is_lost(42) = 0
+wait_many: 2
+-- Binary any=true Complete
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x2, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- Binary any=true RmError
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x2, timeout=18446744073709551615) = -13
+nv_rm_is_lost(42) = 0
+wait_many: -13
+-- Binary any=true CompleteWithMesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x2, timeout=18446744073709551615) = 0
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Binary any=true RmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x2, timeout=18446744073709551615) = -4
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Binary any=true CompleteWithRmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x2, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Timeline any=false MesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x0, timeout=18446744073709551615) = -4
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Timeline any=false Deadline
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x0, timeout=2000000) = 2
+nv_rm_is_lost(42) = 0
+wait_many: 2
+-- Timeline any=false Complete
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- Timeline any=false RmError
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x0, timeout=18446744073709551615) = -13
+nv_rm_is_lost(42) = 0
+wait_many: -13
+-- Timeline any=false CompleteWithMesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Timeline any=false RmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x0, timeout=18446744073709551615) = -4
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Timeline any=false CompleteWithRmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Timeline any=true MesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x2, timeout=18446744073709551615) = -4
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Timeline any=true Deadline
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x2, timeout=2000000) = 2
+nv_rm_is_lost(42) = 0
+wait_many: 2
+-- Timeline any=true Complete
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x2, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- Timeline any=true RmError
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x2, timeout=18446744073709551615) = -13
+nv_rm_is_lost(42) = 0
+wait_many: -13
+-- Timeline any=true CompleteWithMesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x2, timeout=18446744073709551615) = 0
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Timeline any=true RmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x2, timeout=18446744073709551615) = -4
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- Timeline any=true CompleteWithRmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x2, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- TimelinePending any=false MesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x1, timeout=18446744073709551615) = -4
+nv_rm_mark_lost(42)
+wait_many: -4
+-- TimelinePending any=false Deadline
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x1, timeout=2000000) = 2
+nv_rm_is_lost(42) = 0
+wait_many: 2
+-- TimelinePending any=false Complete
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x1, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- TimelinePending any=false RmError
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x1, timeout=18446744073709551615) = -13
+nv_rm_is_lost(42) = 0
+wait_many: -13
+-- TimelinePending any=false CompleteWithMesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x1, timeout=18446744073709551615) = 0
+nv_rm_mark_lost(42)
+wait_many: -4
+-- TimelinePending any=false RmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x1, timeout=18446744073709551615) = -4
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- TimelinePending any=false CompleteWithRmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x1, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- TimelinePending any=true MesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x3, timeout=18446744073709551615) = -4
+nv_rm_mark_lost(42)
+wait_many: -4
+-- TimelinePending any=true Deadline
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x3, timeout=2000000) = 2
+nv_rm_is_lost(42) = 0
+wait_many: 2
+-- TimelinePending any=true Complete
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x3, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- TimelinePending any=true RmError
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x3, timeout=18446744073709551615) = -13
+nv_rm_is_lost(42) = 0
+wait_many: -13
+-- TimelinePending any=true CompleteWithMesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x3, timeout=18446744073709551615) = 0
+nv_rm_mark_lost(42)
+wait_many: -4
+-- TimelinePending any=true RmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x3, timeout=18446744073709551615) = -4
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- TimelinePending any=true CompleteWithRmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([79:3, 80:3], flags=0x3, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- BinaryPending any=false MesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x1, timeout=18446744073709551615) = -4
+nv_rm_mark_lost(42)
+wait_many: -4
+-- BinaryPending any=false Deadline
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x1, timeout=2000000) = 2
+nv_rm_is_lost(42) = 0
+wait_many: 2
+-- BinaryPending any=false Complete
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x1, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- BinaryPending any=false RmError
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x1, timeout=18446744073709551615) = -13
+nv_rm_is_lost(42) = 0
+wait_many: -13
+-- BinaryPending any=false CompleteWithMesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x1, timeout=18446744073709551615) = 0
+nv_rm_mark_lost(42)
+wait_many: -4
+-- BinaryPending any=false RmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x1, timeout=18446744073709551615) = -4
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- BinaryPending any=false CompleteWithRmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x1, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- BinaryPending any=true MesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x3, timeout=18446744073709551615) = -4
+nv_rm_mark_lost(42)
+wait_many: -4
+-- BinaryPending any=true Deadline
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x3, timeout=2000000) = 2
+nv_rm_is_lost(42) = 0
+wait_many: 2
+-- BinaryPending any=true Complete
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x3, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- BinaryPending any=true RmError
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x3, timeout=18446744073709551615) = -13
+nv_rm_is_lost(42) = 0
+wait_many: -13
+-- BinaryPending any=true CompleteWithMesaLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x3, timeout=18446744073709551615) = 0
+nv_rm_mark_lost(42)
+wait_many: -4
+-- BinaryPending any=true RmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x3, timeout=18446744073709551615) = -4
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- BinaryPending any=true CompleteWithRmLoss
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 78:0], flags=0x3, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+wait_many: -4
+-- expired deadline
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0], flags=0x0, timeout=0) = 2
+nv_rm_is_lost(42) = 0
+vk_sync_wait: 2
+-- Mesa already lost
+vk_sync_wait: -4
+-- RM already lost
+nv_rm_is_lost(42) = 1
+nv_rm_mark_lost(42)
+vk_sync_wait: -4
+-- completion after six seconds
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+vk_sync_wait: 0
+-- empty wait
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- empty wait on a lost device
+wait_many: -4
+-- 16 points
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- 17 points
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0, 77:0], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+wait_many: 0
+-- 17 points, allocation fails
+nv_rm_is_lost(42) = 0
+wait_many: -1
+-- host operations after loss
+nv_rm_mark_lost(42)
+nv_rm_sync_create(flags=0x2, initial=0) = 0 (sync 81)
+nv_rm_sync_signal(77, 0) = 0
+nv_rm_sync_reset(77) = 0
+nv_rm_sync_move(77, 78, shared=0) = 0
+nv_rm_sync_import_fd(81, fd=66, opaque=1) = 0
+nv_rm_sync_export_fd(81, opaque=1) = 0
+signal: 0
+reset: 0
+move: 0
+import: 0
+export: 0
+vk_sync_wait: -4
+nv_rm_sync_destroy_deferred(81) = 0
+-- finish
+nv_rm_sync_destroy_deferred(77) = 0
+nv_rm_sync_destroy_deferred(78) = 0
+nv_rm_sync_destroy_deferred(79) = 0
+nv_rm_sync_destroy_deferred(80) = 0
+nv_rm_close(42)
+close(3) = 0
+close(3) = 0
+PASS wait-loss
+== submit-fusion
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+-- create
+nv_rm_context_create(engines=0x1) = 0 (context 33)
+nv_rm_context_create_shared(engines=0x10, share=33) = 0 (context 34)
+shared context: 0
+shared context without a share: Err(-3)
+shared context of a bind context: Err(-3)
+bind-only shared context: Err(-3)
+nv_rm_context_create(engines=0x4) = -2
+RM context creation fails: Err(-2)
+nv_rm_context_create_shared(engines=0x10, share=33) = -2
+RM shared context creation fails: Err(-2)
+context allocation fails: Err(-1)
+nv_rm_context_destroy(34) = 0
+nv_rm_context_destroy(33) = -4
+nv_rm_sync_create(flags=0x1, initial=0) = 0 (sync 77)
+nv_rm_sync_create(flags=0x0, initial=0) = 0 (sync 78)
+nv_rm_context_create(engines=0x14) = 0 (context 35)
+-- 0 pushes
+nv_rm_submit_batch(35, pushes=0, waits=[77:8], signals=[77:9, 78:0]) = 0 (token 100)
+signal: 0
+-- 1 pushes
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[77:8], signals=[77:9, 78:0]) = 0 (token 100)
+signal: 0
+-- 1000 pushes
+nv_rm_submit_batch(35, pushes=1000 [0x1000..0x1f9c] sum=0xdd6969dad0058f25, waits=[77:8], signals=[77:9, 78:0]) = 0 (token 100)
+signal: 0
+-- 1001 pushes
+nv_rm_submit_batch(35, pushes=1000 [0x1000..0x1f9c] sum=0xdd6969dad0058f25, waits=[77:8], signals=[]) = 0 (token 100)
+nv_rm_submit_batch(35, pushes=1 [0x1fa0..0x1fa0] sum=0x951fa721934a46a4, waits=[], signals=[77:9, 78:0]) = 0 (token 101)
+signal: 0
+-- 2000 pushes
+nv_rm_submit_batch(35, pushes=1000 [0x1000..0x1f9c] sum=0xdd6969dad0058f25, waits=[77:8], signals=[]) = 0 (token 100)
+nv_rm_submit_batch(35, pushes=1000 [0x1fa0..0x2f3c] sum=0xf917bbcd7f867025, waits=[], signals=[77:9, 78:0]) = 0 (token 101)
+signal: 0
+-- continuation across the cut
+nv_rm_submit_batch(35, pushes=999 [0x1000..0x1f98] sum=0x8535ff1aa42945f8, waits=[77:8], signals=[]) = 0 (token 100)
+nv_rm_submit_batch(35, pushes=2 [0x1f9c..0x1fa0] sum=0x0e1d89538017f3ff, waits=[], signals=[77:9, 78:0]) = 0 (token 101)
+-- signals only
+nv_rm_submit_batch(35, pushes=0, waits=[], signals=[77:9, 78:0]) = 0 (token 100)
+-- waits only
+nv_rm_submit_batch(35, pushes=0, waits=[77:8], signals=[]) = 0 (token 100)
+-- empty flush
+-- zero-signal call
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[], signals=[]) = 0 (token 100)
+-- timeline wait for 0
+-- ring pressure
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[77:8], signals=[77:9, 78:0]) = 1 (token 9)
+nv_rm_wait(35, token 9, timeout=0xffffffffffffffff) = 0
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[77:8], signals=[77:9, 78:0]) = 0 (token 101)
+-- ring pressure on both batches of a split list
+nv_rm_submit_batch(35, pushes=1000 [0x1000..0x1f9c] sum=0xdd6969dad0058f25, waits=[77:8], signals=[]) = 1 (token 9)
+nv_rm_wait(35, token 9, timeout=0xffffffffffffffff) = 0
+nv_rm_submit_batch(35, pushes=1000 [0x1000..0x1f9c] sum=0xdd6969dad0058f25, waits=[77:8], signals=[]) = 0 (token 101)
+nv_rm_submit_batch(35, pushes=1 [0x1fa0..0x1fa0] sum=0x951fa721934a46a4, waits=[], signals=[77:9, 78:0]) = 1 (token 9)
+nv_rm_wait(35, token 9, timeout=0xffffffffffffffff) = 0
+nv_rm_submit_batch(35, pushes=1 [0x1fa0..0x1fa0] sum=0x951fa721934a46a4, waits=[], signals=[77:9, 78:0]) = 0 (token 103)
+nv_rm_wait(35, token 103, timeout=0xffffffffffffffff) = 0
+-- batch refused
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[77:8], signals=[77:9, 78:0]) = -4 (token 100)
+signal: -4
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[77:8], signals=[]) = 0 (token 101)
+-- ring wait fails
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[77:8], signals=[77:9, 78:0]) = 1 (token 9)
+nv_rm_wait(35, token 9, timeout=0xffffffffffffffff) = -4
+signal: -4
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[77:8], signals=[]) = 0 (token 101)
+-- failure after an accepted batch
+nv_rm_submit_batch(35, pushes=1000 [0x1000..0x1f9c] sum=0xdd6969dad0058f25, waits=[77:8], signals=[]) = 0 (token 100)
+nv_rm_submit_batch(35, pushes=1 [0x1fa0..0x1fa0] sum=0x951fa721934a46a4, waits=[], signals=[77:9, 78:0]) = -4 (token 101)
+nv_rm_submit_batch(35, pushes=1 [0x1fa0..0x1fa0] sum=0x951fa721934a46a4, waits=[], signals=[77:9, 78:0]) = 0 (token 102)
+-- continuation chain longer than a batch
+nv_rm_context_create(engines=0x4) = 0 (context 36)
+signal: -8
+flush after the chain ends: -8
+nv_rm_context_destroy(36) = 0
+-- foreign signal
+signal: -8
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[], signals=[]) = 0 (token 100)
+-- foreign wait
+binary foreign wait: -8
+foreign timeline wait for 0: 0
+RM wait then foreign wait: -8
+nv_rm_submit_batch(35, pushes=0, waits=[77:8], signals=[]) = 0 (token 100)
+-- invalid push ranges
+push 0x1002+0x4: -8
+push 0x1000+0x6: -8
+push 0x1000+0x0: -8
+push 0x1000+0x800000: -8
+-- exec refused after an incomplete push
+exec: -8
+flush: 0
+nv_rm_submit_batch(35, pushes=3 [0x1000..0x1008] sum=0x403e6c8247017a5e, waits=[], signals=[]) = 0 (token 100)
+-- wait after pushes
+nv_rm_submit_batch(35, pushes=3 [0x1000..0x1008] sum=0x39969f3a906fbefd, waits=[], signals=[]) = 0 (token 100)
+nv_rm_submit_batch(35, pushes=2 [0x1000..0x1004] sum=0x30a1f2bbe7cd32e1, waits=[77:8, 78:0], signals=[77:9, 78:0]) = 0 (token 101)
+fused waits: [(77, 8), (78, 0)]
+-- sync
+nv_rm_submit_batch(35, pushes=1 [0x1000..0x1000] sum=0xb5927a23bba6a851, waits=[], signals=[]) = 0 (token 100)
+nv_rm_wait(35, token 100, timeout=0xffffffffffffffff) = 0
+-- sync fails
+nv_rm_submit_batch(35, pushes=0, waits=[], signals=[77:9, 78:0]) = 0 (token 100)
+nv_rm_wait(35, token 100, timeout=0xffffffffffffffff) = -4
+sync: -4
+-- destroy
+nv_rm_context_destroy(35) = 0
+-- bind context
+nv_rm_is_lost(42) = 0
+nv_rm_sync_wait_many([77:8], flags=0x0, timeout=18446744073709551615) = 0
+nv_rm_is_lost(42) = 0
+CPU wait: 0
+nv_rm_sync_signal(77, 9) = 0
+CPU signal: 0
+nv_rm_sync_signal(77, 9) = -4
+CPU signal fails: -4
+nv_rm_alloc(size=0x10000, align=0x1000, placement=1, kind=0x0, tile=0) = 0 (memory 55)
+nv_rm_bind(memory 55, offset=0x0, size=0x10000, va=0x7fffff0000, kind=0x0) = 0 (mapping 1000)
+nv_rm_bind(memory 55, offset=0x0, size=0x4000, va=0x7ffffe0000, kind=0x6) = 0 (mapping 1001)
+nv_rm_bind(memory 55, offset=0x4000, size=0x4000, va=0x7ffffe4000, kind=0x6) = 0 (mapping 1002)
+binds: 0
+nv_rm_bind(memory 55, offset=0x8000, size=0x4000, va=0x7ffffe8000, kind=0x6) = -2
+bind fails: -2
+nv_rm_unbind(mapping 1001) = 0
+unbind: 0
+nv_rm_va_free(mappings [1002], va=0x7ffffe0000, size=0x10000) = 0
+release(va=0x7ffffe0000, size=0x10000)
+nv_rm_va_free(mappings [1000], va=0x7fffff0000, size=0x10000) = 0
+release(va=0x7fffff0000, size=0x10000)
+nv_rm_free(55) = 0
+-- finish
+nv_rm_sync_destroy_deferred(77) = 0
+nv_rm_sync_destroy_deferred(78) = 0
+nv_rm_close(42)
+close(3) = 0
+close(3) = 0
+PASS submit-fusion

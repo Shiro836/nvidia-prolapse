@@ -290,7 +290,29 @@ def mark_prepared(source, inputs):
     stamp, digest = prepared_stamp(source, inputs)
     stamp.write_text(digest + "\n")
 
-NVK_PREP_INPUTS = NVK_PATCH_LIST + [HERE / n for n in ("nv_rm.h", "nvkmd_rm.h", "nvkmd_rm.c")]
+# Copied into src/nouveau/vulkan/nvkmd/rm: the RM C ABI and the declaration of the Rust nvkmd backend's
+# entry points (nvkmd.c calls nvkmd_rm_try_create_pdev).
+RM_HEADERS = ("nv_rm.h", "nvkmd_rm.h")
+NVK_PREP_INPUTS = NVK_PATCH_LIST + [HERE / n for n in RM_HEADERS]
+
+# NVK's kernel-driver backend over the RM: the nvkmd-rm static library, linked into
+# libvulkan_nouveau with its symbols kept out of the dynamic table (rm-integration.patch).
+# No LTO for an archive that shares libvulkan_nouveau with NAK and NIL (Cargo.toml release-staticlib).
+NVKMD_RUST = ROOT / "build/nvkmd-rm-rust"
+NVKMD_PROFILES = {"dev": "dev", "release": "release-staticlib"}
+
+def nvkmd_archive(target, rust_profile):
+    triple = profiles.TARGETS[target]
+    directory = NVKMD_RUST / triple if triple else NVKMD_RUST
+    return directory / ("debug" if rust_profile == "dev" else NVKMD_PROFILES[rust_profile]) / "libnvkmd_rm.a"
+
+def nvkmd_options(target, rust_profile):
+    """Meson options linking NVK's build of the backend archive. The GL trees configure NVK too
+    (-Dvulkan-drivers=nouveau brings NAK and nil); nvrm itself does not link the archive."""
+    archive = nvkmd_archive(target, rust_profile)
+    if not archive.is_file():
+        raise SystemExit(f"Missing {archive}: build NVK first (build.py --target {target} --rust-profile {rust_profile})")
+    return ["-Dnvk-rm-backend=rust", "-Dnvk-rm-rust-lib=" + str(archive)]
 
 def write_ndk_zlib_pc(pkgconfig_dir):
     """zlib.pc for the NDK sysroot zlib (an NDK stable library, libz.so in
@@ -326,7 +348,7 @@ GL_ANDROID_ARTIFACTS = (f"src/egl/libEGL{GL_ANDROID_SUFFIX}.so",
 GL_PATCHES = NVK_PATCHES + ("gallium-nvrm.patch", "mesa-oes-texture-stencil8.patch", "mesa-nv-polygon-mode.patch",
                             "nak-panic-message.patch", "android-egl-suffix.patch", "mesa-glapi-narrow-args.patch")
 # Everything the preparation applies or copies: a change to any of them invalidates the stamp.
-GL_PREP_INPUTS = [HERE / n for n in GL_PATCHES + ("nv_rm.h", "nvkmd_rm.h", "nvkmd_rm.c", "gallium-nvrm")]
+GL_PREP_INPUTS = [HERE / n for n in GL_PATCHES + RM_HEADERS + ("gallium-nvrm",)]
 
 def gl_build_dir(target):
     return ROOT / f"build/nvrm-{target}{_GL_SUFFIX}"
@@ -356,7 +378,7 @@ def prepare_gl_source(args):
         run(["git", "-C", GL_SOURCE, "apply", HERE / name])
     rm_source = GL_SOURCE / "src/nouveau/vulkan/nvkmd/rm"
     rm_source.mkdir(parents=True, exist_ok=True)
-    for name in ("nv_rm.h", "nvkmd_rm.h", "nvkmd_rm.c"):
+    for name in RM_HEADERS:
         shutil.copy2(HERE / name, rm_source / name)
     shutil.copytree(HERE / "gallium-nvrm", GL_SOURCE / "src/gallium/drivers/nvrm", dirs_exist_ok=True)
     cache = GL_SOURCE / "subprojects/packagecache"
@@ -408,7 +430,8 @@ def build_gl_host(args, env):
     run(rust_command, env=env)
     rust_lib = GL_RUST / ("debug" if args.rust_profile == "dev" else "release")
     linker_args = [f"-L{rust_lib}", f"-Wl,-rpath,{rust_lib}"]
-    options = ["-Dvulkan-drivers=nouveau", "-Dgallium-drivers=nvrm", "-Dplatforms=",
+    options = nvkmd_options("host", args.rust_profile) + [
+               "-Dvulkan-drivers=nouveau", "-Dgallium-drivers=nvrm", "-Dplatforms=",
                "-Degl=enabled", "-Dgles1=disabled", "-Dgles2=enabled", "-Dopengl=true",
                "-Dglx=disabled", "-Dgbm=disabled", "-Dglvnd=disabled", "-Dllvm=disabled", "-Dmesa-clc=system",
                "-Dbuild-tests=false", "-Dvideo-codecs=", "-Dvalgrind=disabled",
@@ -457,7 +480,8 @@ def build_gl_android(args, env, target):
     # every image's /system/lib*); libzstd is not in the NDK.
     write_ndk_zlib_pc(cross_dir / "pkgconfig")
     linker_args = [f"-L{rust_lib}"]
-    options = ["--cross-file", cross,
+    options = nvkmd_options(target, args.rust_profile) + [
+               "--cross-file", cross,
                "-Dvulkan-drivers=nouveau", "-Dgallium-drivers=nvrm",
                "-Dplatforms=android", "-Dplatform-sdk-version=33", "-Dandroid-stub=false",
                "-Dandroid-libbacktrace=disabled",
@@ -506,10 +530,6 @@ def main():
                         help="Rust Cargo profile (dev keeps the existing debug build)")
     parser.add_argument("--download-deps", action="store_true")
     parser.add_argument("-j", type=int, default=12)
-    parser.add_argument("--nvkmd", choices=("c", "rust"), default="c",
-                        help="NVK's kernel-driver backend over the RM: nvkmd_rm.c into build/nvk-<target>, or the "
-                             "Rust nvkmd-rm static library into build/nvk-<target>-rust (tests/vulkan/run.py and "
-                             "capture.py select it with the same option)")
     parser.add_argument("--gl", action="store_true",
                         help="build the nvrm gallium GL/GLES driver from its own Mesa worktree into "
                              "build/nvrm-<target> (--target both = android + android32); NVK trees "
@@ -523,7 +543,7 @@ def main():
     args = parser.parse_args()
     if args.gl:
         return build_gl(args)
-    sources_before = {backend: profiles.source_snapshot(ROOT, backend) for backend in profiles.BACKENDS}
+    sources_before = profiles.source_snapshot(ROOT)
     for tool in ("bindgen", "cbindgen"):
         if not (TOOLS / tool).exists():
             parser.error(f"Missing {tool}; run mesa/compiler/build.py --tools-only --download-deps first")
@@ -556,12 +576,8 @@ def main():
     if args.target.startswith("android") and not (host_clc / "mesa_clc").exists():
         targets.insert(0, "host")
     for target in targets:
-        # The host build provides mesa_clc to the Android builds, so it always uses the C backend's dir.
-        rust_backend = args.nvkmd == "rust" and not (target == "host" and args.target != "host")
-        build = ROOT / (f"build/nvk-{target}-rust" if rust_backend else f"build/nvk-{target}")
-        # The C backend is meson's default; build dirs configured before the option existed only learn
-        # it on reconfigure, so it is passed only for the Rust backend.
-        options = list(common) + (["-Dnvk-rm-backend=rust"] if rust_backend else [])
+        build = profiles.nvk_dir(ROOT, target)
+        options = list(common)
         target_env = dict(env)
         rust_build = ROOT / "build/nv-rm-rust"
         rust_command = ["cargo", "build", "--offline", "--no-default-features", "--target-dir", rust_build,
@@ -576,19 +592,12 @@ def main():
             rust_command += ["--target", triple]
             target_env["CARGO_TARGET_" + triple.upper().replace("-", "_") + "_LINKER"] = str(NDK / f"bin/{triple}33-clang")
         run(rust_command, env=target_env)
-        if rust_backend:
-            backend_dir = ROOT / "build/nvkmd-rm-rust"
-            backend_command = ["cargo", "build", "--offline", "-p", "nvkmd-rm", "--target-dir", backend_dir,
-                               "--manifest-path", ROOT / "Cargo.toml"]
-            # No LTO for an archive that shares libvulkan_nouveau with NAK and NIL (Cargo.toml).
-            profile = "release-staticlib" if args.rust_profile == "release" else "dev"
-            backend_command += ["--profile", profile]
-            if target.startswith("android"):
-                backend_command += ["--target", triple]
-                backend_dir /= triple
-            run(backend_command, env=target_env)
-            backend = backend_dir / ("release-staticlib" if profile == "release-staticlib" else "debug") / "libnvkmd_rm.a"
-            options += ["-Dnvk-rm-rust-lib=" + str(backend)]
+        backend_command = ["cargo", "build", "--offline", "-p", "nvkmd-rm", "--target-dir", NVKMD_RUST,
+                           "--manifest-path", ROOT / "Cargo.toml", "--profile", NVKMD_PROFILES[args.rust_profile]]
+        if target.startswith("android"):
+            backend_command += ["--target", triple]
+        run(backend_command, env=target_env)
+        options += nvkmd_options(target, args.rust_profile)
         linker_args = [f"-L{rust_lib}", f"-Wl,-rpath,{rust_lib}"]
         options += ["-Dc_link_args=" + json.dumps(linker_args)]
         if target == "host":
@@ -616,15 +625,14 @@ def main():
         compiler = "cc" if target == "host" else NDK / f"bin/{triple}33-clang"
         run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", HERE / "inspect.c", "-ldl", "-o", build / "inspect"])
         run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", HERE / "abi-check.c", "-o", build / "abi-check"])
-        for name in ("nv_rm.h", "nvkmd_rm.h", "nvkmd_rm.c"):
+        for name in RM_HEADERS:
             if hashlib.sha256((rm_source / name).read_bytes()).digest() != hashlib.sha256((HERE / name).read_bytes()).digest():
                 raise SystemExit(f"Compiled Mesa bridge copy differs from canonical {name}; rebuild")
-        nvkmd = "rust" if rust_backend else "c"
         profiles.write_metadata(ROOT, target, args.rust_profile, rust_command,
                                 subprocess.check_output(["rustc", "--version"], text=True).strip(),
                                 {key: target_env[key] for key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")
-                                 if key in target_env}, sources_before[nvkmd], nvkmd)
-        print(f"Built full {target} NVK with the {nvkmd} nvkmd backend (Rust {args.rust_profile}): "
+                                 if key in target_env}, sources_before)
+        print(f"Built full {target} NVK (Rust {args.rust_profile}): "
               f"{build}/src/nouveau/vulkan/libvulkan_nouveau.so")
 
 def prepare_nvk_source(download):
@@ -641,8 +649,9 @@ def prepare_nvk_source(download):
     for patch in patches:
         apply(patch)
     rm_source = SOURCE / "src/nouveau/vulkan/nvkmd/rm"
-    rm_source.mkdir(parents=True, exist_ok=True)
-    for name in ("nv_rm.h", "nvkmd_rm.h", "nvkmd_rm.c"):
+    shutil.rmtree(rm_source, ignore_errors=True)
+    rm_source.mkdir(parents=True)
+    for name in RM_HEADERS:
         shutil.copy2(HERE / name, rm_source / name)
     cache = SOURCE / "subprojects/packagecache"
     cache.mkdir(exist_ok=True)

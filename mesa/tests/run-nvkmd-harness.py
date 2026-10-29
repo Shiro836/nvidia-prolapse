@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Offline differential test of the nvkmd backends: nvkmd-harness, linked once against each backend.
+"""Offline test of NVK's nvkmd backend: nvkmd-harness, linked against the host NVK build.
 
-    mesa/tests/run-nvkmd-harness.py                    both backends, compare their call logs
-    mesa/tests/run-nvkmd-harness.py --backend c        one backend, its own checks only
+    mesa/tests/run-nvkmd-harness.py                    every suite, call log compared with the golden one
     mesa/tests/run-nvkmd-harness.py pdev loss          only these suites
+    mesa/tests/run-nvkmd-harness.py --update           rewrite the golden log (an intended change)
 
-The harness binary links the objects of the host NVK build of each backend (build/nvk-host for the C
-backend, build/nvk-host-rust for the Rust one: `mesa/build.py --target host [--nvkmd rust]`), exactly as
+The harness binary links the objects of build/nvk-host (`mesa/build.py --target host`) exactly as
 libvulkan_nouveau.so links them, with libc's open/fstat/close/calloc/free, libdrm's version and syncobj
 calls, Mesa's diagnostic sinks and Mesa's clock replaced by the harness (--wrap) and the RM entries
 defined by it.
-Each suite checks its outcomes on every backend; with both backends the call logs (every RM, render
-node and libdrm call, with arguments and results) must be byte-identical, suite by suite.
+Each suite checks its outcomes, and its call log (every RM, render node and libdrm call, with arguments
+and results) must equal the suite's part of nvkmd-harness.calls byte for byte. That file is the log of
+the C backend the Rust one was ported from, on the same suites; it changes only with a deliberate
+behaviour change, in the commit that makes it.
 No device file is opened and no GPU is touched.
 """
 import argparse
@@ -25,7 +26,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "build/nvkmd-harness"
-BUILDS = {"c": ROOT / "build/nvk-host", "rust": ROOT / "build/nvk-host-rust"}
+BUILD = ROOT / "build/nvk-host"
+GOLDEN = Path(__file__).resolve().parent / "nvkmd-harness.calls"
 # What the harness answers in place of libc, libdrm, Mesa's diagnostics and Mesa's clock.
 WRAPS = ["open64", "close", "fstat64", "calloc", "free", "drmGetVersion", "drmFreeVersion", "drmGetCap",
          "drmSyncobjCreate", "drmSyncobjWait", "drmSyncobjDestroy", "drmSyncobjTimelineWait",
@@ -55,19 +57,16 @@ def link_args(build):
     return out + [f"-Wl,--wrap={name}" for name in WRAPS]
 
 
-def build_harness(backend):
-    build = BUILDS[backend]
-    if not (build / "build.ninja").exists():
-        sys.exit(f"run-nvkmd-harness: {build} is not configured; run mesa/build.py --target host"
-                 + (" --nvkmd rust" if backend == "rust" else ""))
-    work = OUT / backend
-    work.mkdir(parents=True, exist_ok=True)
-    args_file = work / "link-args.txt"
-    args_file.write_text("\n".join(link_args(build)) + "\n")
-    env = dict(os.environ, NVKMD_HARNESS_LINK=str(args_file), CARGO_TARGET_DIR=str(work / "target"))
+def build_harness():
+    if not (BUILD / "build.ninja").exists():
+        sys.exit(f"run-nvkmd-harness: {BUILD} is not configured; run mesa/build.py --target host")
+    OUT.mkdir(parents=True, exist_ok=True)
+    args_file = OUT / "link-args.txt"
+    args_file.write_text("\n".join(link_args(BUILD)) + "\n")
+    env = dict(os.environ, NVKMD_HARNESS_LINK=str(args_file), CARGO_TARGET_DIR=str(OUT / "target"))
     subprocess.run(["cargo", "build", "--locked", "--offline", "-p", "nvkmd-harness", "--features", "mesa"],
                    cwd=ROOT, env=env, check=True)
-    return work / "target/debug/nvkmd-harness"
+    return OUT / "target/debug/nvkmd-harness"
 
 
 def split_suites(log):
@@ -82,35 +81,37 @@ def split_suites(log):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--backend", choices=["c", "rust", "both"], default="both")
+    parser.add_argument("--update", action="store_true",
+                        help="write the log of every suite to nvkmd-harness.calls instead of comparing")
     parser.add_argument("suites", nargs="*", help="suite names (default: all)")
     args = parser.parse_args()
-    backends = ["c", "rust"] if args.backend == "both" else [args.backend]
-    logs = {}
-    for backend in backends:
-        binary = build_harness(backend)
-        run = subprocess.run([str(binary), *args.suites], capture_output=True, text=True, timeout=120)
-        (OUT / backend / "calls.log").write_text(run.stdout)
-        if run.returncode != 0:
-            sys.stderr.write(run.stderr)
-            sys.exit(f"nvkmd harness ({backend} backend): FAIL (exit {run.returncode}); "
-                     f"calls so far in {OUT / backend / 'calls.log'}")
-        logs[backend] = split_suites(run.stdout)
-        print(f"nvkmd harness ({backend} backend): PASS {' '.join(logs[backend])}")
-    if len(backends) == 2:
-        failed = False
-        for suite in logs["c"]:
-            if logs["c"][suite] == logs["rust"].get(suite):
-                print(f"nvkmd harness call log {suite}: C == Rust ({len(logs['c'][suite])} lines)")
-                continue
-            failed = True
-            print(f"nvkmd harness call log {suite}: C != Rust")
-            logs["c"][suite] = [line + "\n" for line in logs["c"][suite]]
-            logs["rust"][suite] = [line + "\n" for line in logs["rust"].get(suite, [])]
-            sys.stdout.writelines(difflib.unified_diff(logs["c"][suite], logs["rust"].get(suite, []),
-                                                       "c", "rust", lineterm="\n", n=2))
-        if failed:
-            sys.exit(1)
+    if args.update and args.suites:
+        parser.error("--update records every suite")
+    binary = build_harness()
+    run = subprocess.run([str(binary), *args.suites], capture_output=True, text=True, timeout=120)
+    (OUT / "calls.log").write_text(run.stdout)
+    if run.returncode != 0:
+        sys.stderr.write(run.stderr)
+        sys.exit(f"nvkmd harness: FAIL (exit {run.returncode}); calls so far in {OUT / 'calls.log'}")
+    logs = split_suites(run.stdout)
+    print(f"nvkmd harness: PASS {' '.join(logs)}")
+    if args.update:
+        GOLDEN.write_text(run.stdout)
+        print(f"nvkmd harness call log written to {GOLDEN}")
+        return 0
+    golden = split_suites(GOLDEN.read_text())
+    failed = False
+    for suite, lines in logs.items():
+        if lines == golden.get(suite):
+            print(f"nvkmd harness call log {suite}: identical to the golden log ({len(lines)} lines)")
+            continue
+        failed = True
+        print(f"nvkmd harness call log {suite}: differs from the golden log")
+        sys.stdout.writelines(difflib.unified_diff([line + "\n" for line in golden.get(suite, [])],
+                                                   [line + "\n" for line in lines],
+                                                   "golden", "harness", lineterm="\n", n=2))
+    if failed:
+        sys.exit(1)
     return 0
 
 

@@ -33,13 +33,13 @@ this extracts unmodified files from the installed system image read-only into
 `mesa_clc` and `vtn_bindgen2`; the script builds the host first if these are
 absent. `--download-deps` permits downloading missing host build tools. Ordinary
 rebuilds are offline and use cached checksum-pinned Mesa Rust dependencies.
-`--nvkmd rust` links NVK with the Rust nvkmd backend (the `nvkmd-rm` crate) in place
-of `nvkmd_rm.c`, into `build/nvk-<target>-rust`; that build serves no device, and the test
-scripts read the C build.
+NVK's kernel-driver backend over the RM is the `nvkmd-rm` crate: a static library
+(`build/nvkmd-rm-rust`) linked into `libvulkan_nouveau` with its symbols kept out of the
+dynamic table; it reaches the RM through the `nv_rm.h` C ABI of `libnv_bionic_native`.
 
 The script verifies the Mesa revision, applies `build-compat.patch` and
-`rm-integration.patch` idempotently, copies canonical adapter files from this
-directory, builds the correct Rust backend, regenerates Android dependency
+`rm-integration.patch` idempotently, copies `nv_rm.h` and `nvkmd_rm.h` (the backend's
+entry points) from this directory, builds the Rust RM and the nvkmd backend, regenerates Android dependency
 metadata, and configures/builds Mesa and the independent artifact inspector.
 It does not install, deploy, mount files, or start Waydroid.
 
@@ -67,8 +67,8 @@ proprietary NVIDIA userspace.
 
 `build-compat.patch` adapts the host glibc C11 thread definitions (26.2.5 already
 handles LLVM 22/23 in clc_helpers.cpp). All code generation remains in the pinned source.
-`rm-integration.patch` and the canonical `nvkmd_rm.*` implement backend
-selection and report only capabilities actually provided by the adapter.
+`rm-integration.patch` hooks the RM backend into NVK's nvkmd layer (the backend
+reports only capabilities it actually provides).
 On 26.2 it also moves nouveau's shared-memory derivation into
 `nv_device_info_init_shared_mem_sizes` (nv_device_info.h) so the RM backends fill
 `sm_smem_sizes_kB`/`max_smem_per_wg_kB` exactly as the nouveau winsys; keeps
@@ -77,7 +77,7 @@ On 26.2 it also moves nouveau's shared-memory derivation into
 stock-driver compression policy (`kmd_info.has_rm_compression`, compressible kind on
 the image VA) next to upstream's dedicated-allocation compression
 (`has_compression`, off for RM).
-`nvkmd_rm.c` allocates device-local memory in whole 64 KiB big pages (size and
+The backend allocates device-local memory in whole 64 KiB big pages (size and
 alignment), as the stock driver does and as NVK itself did up to 25.2: Mesa 26's
 nvk_AllocateMemory passes only bind_align_B (upstream 7a492e102ff2), which shrank
 exported dma-bufs to 4 KiB granularity (failed the HAL ahb-yuv gate) and silently

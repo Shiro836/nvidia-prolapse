@@ -1,20 +1,21 @@
 # Offline Mesa transport regression
 
-## Differential harness of the nvkmd backends
+## Offline harness of the nvkmd backend
 
 ```sh
-python3 mesa/tests/run-nvkmd-harness.py            # C and Rust backend, call logs compared
-python3 mesa/tests/run-nvkmd-harness.py --backend c
+python3 mesa/tests/run-nvkmd-harness.py            # every suite, call log compared with the golden one
+python3 mesa/tests/run-nvkmd-harness.py --update   # an intended behaviour change: rewrite the golden log
 ```
 
-`nvkmd-harness` (a workspace crate) drives a backend only through Mesa's
+`nvkmd-harness` (a workspace crate) drives the backend only through Mesa's
 public nvkmd interface: `nvkmd_try_create_pdev_for_drm`, the ops tables, the
 `vk_sync_type`s through Mesa's `vk_sync_*` wrappers and the hooks a backend
-installs in a `vk_device`. It is linked against the host NVK build of each
-backend (`build/nvk-host`, `build/nvk-host-rust`) with libc's render-node and
-allocation calls, libdrm, Mesa's diagnostic sinks and Mesa's clock replaced,
-and a fake RM. Every RM, render-node and libdrm call is logged; the
-two backends' logs must be identical, suite by suite. Suites: `pdev`
+installs in a `vk_device`. It is linked against the host NVK build
+(`build/nvk-host`) with libc's render-node and allocation calls, libdrm,
+Mesa's diagnostic sinks and Mesa's clock replaced, and a fake RM. Every RM,
+render-node and libdrm call is logged, and the log must equal
+`nvkmd-harness.calls` suite by suite: the log of the C backend the Rust one
+replaced, on the same suites. Suites: `pdev`
 (probing, refusals, failure cleanup, the filled device info and sync types,
 KMD device creation), `info` (RM values too wide for Mesa's fields), `loss`
 (loss publication through the hooks and their removal before the RM device
@@ -33,80 +34,7 @@ batches cut at 1000 pushes and before a continuation; ring-pressure retries;
 failures that keep exactly the unaccepted work; refusals before anything is
 submitted; `sync`; CPU waits, signals and VA binds of bind-only contexts).
 
-## Preflight harness of the C backend
-
-Run from the repository root after configuring the pinned host Mesa build:
-
-```sh
-python3 mesa/tests/run-pdev-preflight.py
-```
-
-The harness compiles the canonical adapter and selected actual pinned Mesa
-runtime sources. Fake RM/DRM calls check arguments; unexpected device access
-and DRM syncobj create/wait/destroy operations abort. It requires no GPU and
-does not establish runtime support on any driver.
-
-Coverage includes selected NVIDIA node checks, partial initialization cleanup,
-absent legacy syncobj capabilities, wait deadlines/ANY/ALL/pending, a simulated
-6.251-second valid dependency, maintenance and submit-thread loss, ring retries,
-sync reset/move, FD forwarding, and destruction without infinite pre-drain.
-`submit-on-demand.inc` drives the patched `vk_queue.c` in THREADED_ON_DEMAND
-mode with a minimal timeline sync: `driver_submit` asserts that every wait it
-receives is already pending (fails under the former IMMEDIATE mode), a
-same-thread wait-before-signal and the work behind it wait in the submit
-thread until the host signal, order is kept, and a drained queue submits on
-the caller again, and a binary signal of a deferred submission is reserved so
-a binary wait submitted behind it does not block vkQueueSubmit.
-VA teardown hands every binding to one `nv_rm_va_free` (no synchronous unbind):
-a deferred release keeps the range reserved until the backend's callback runs,
-a failed call publishes loss and retains the range, and an application rebind
-over a live binding unbinds immediately.
-
-Void sync destruction uses the historical `nv_rm_sync_destroy_deferred` ABI
-(immediate caller-side disposal since the caller-side backend); the synchronous
-entrypoint is a harness tripwire. Cleanup after loss is checked, and an injected
-disposal failure must log a diagnostic, publish Mesa/Rust loss and wake the
-eventfd through the installed nonblocking loss hook. Rust CPU and hardware tests
-separately exercise slot lifetime across retire, detach-on-wait, reset, move
-and import.
-
-`submit-fusion.inc` exercises the actual adapter's combined push/wait/signal
-call. Exact mock expectations cover empty, signal-only, wait-only and
-0/1/1000/1001/2000-entry submissions, continuation boundaries, first/final
-ring-pressure retries, failed waits, rejected batches, and an accepted prefix
-followed by failure. Signals appear only on the final chunk and waits only on
-the first accepted chunk. Invalid signal types, allocation failure, and an
-oversized continuation chain reject before any submission. Bind-only contexts
-continue to signal through the CPU path. This checks C-to-Rust call contracts,
-not GPU execution or Rust ownership internals.
-
-Loss notification checks invoke the actual Mesa device and queue setters through
-the adapter's installed callback. They require loss publication before the wake,
-exercise the callback under a submit mutex, and verify hook removal before the
-backend is freed. Scripted waits require one blocking backend call, reject status
-polling, preserve caller deadlines, and give loss precedence over racing success.
-The threaded loss tests use real eventfd wakeups; no GPU or device nodes are used.
-
-`sync-properties.inc` invokes the actual public Mesa fence/semaphore property
-queries. It asserts these masks, rather than deriving them from a second model:
-
-| Object | Requested handle | Compatible / export-from-imported | Features |
-| --- | --- | --- | --- |
-| Fence | OPAQUE_FD | OPAQUE_FD only | Import + export |
-| Fence | SYNC_FD | SYNC_FD only | Import + export |
-| Binary semaphore | OPAQUE_FD | OPAQUE_FD only | Import + export |
-| Binary semaphore | SYNC_FD | SYNC_FD only | Import + export |
-| Timeline semaphore | OPAQUE_FD | OPAQUE_FD only | Import + export |
-| Timeline semaphore | SYNC_FD | None | None |
-
-`sync-timeline-mode.c` compiles the pinned `vk_device.c` and exposes its static
-selector only to this test. It verifies that the two adapter types provide
-exactly one timeline implementation and select native timeline mode. Opaque
-sharing and sync-file copy transfer use separate callback sets while retaining
-the same RM completion operations. Cross-handle conversion is not advertised.
-
-The runner stores its executable and objects under
-`build/gpu-coverage/pdev-preflight/`. Actual GPU probe results are separate.
+## pascal-a-clear.c
 
 `pascal-a-clear.c` (build line in its header) compiles the patched
 `nvk_pascal_a.h` from `build/mesa-rm-source` and checks the PASCAL_A clear

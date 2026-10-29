@@ -1,7 +1,9 @@
 # nvkmd backend in Rust (design)
 
-Status: design, not started. Replaces `mesa/nvkmd_rm.c` (1,353 lines) with a Rust crate that
-implements NVK's `nvkmd` vtable and calls the RM through its C ABI. The RM stays one shared
+Status: implemented (steps 1-10 of §5). The `nvkmd-rm` crate replaced the C backend
+`mesa/nvkmd_rm.c` (1,353 lines; removed after the switch gate, last version at e589e44): it
+implements NVK's `nvkmd` vtable and calls the RM through its C ABI. References to `nvkmd_rm.c`
+below are to that file in history. The RM stays one shared
 instance per process in `libnv_bionic_native.so`, the router for every driver that uses it: NVK,
 the gallium-nvrm GL driver and the Codec2 decoder. Pinned Mesa: `ddaf85e` (26.2.5) plus the patch stack in `mesa/`
 (`rm-integration.patch` adds `has_sparse`, `has_rm_compression`, the `notify_lost` hook,
@@ -203,17 +205,15 @@ targets). Our crate depends on Cargo packages (`nv-rm-abi`, `nv-ffi`), so Cargo 
 it builds `rm` today in `mesa/build.py:344-357`); meson only links the archive:
 
 - `rm-integration.patch` adds a meson option `nvk-rm-backend` (`c` | `rust`) and
-  `nvk-rm-rust-lib` (path). `c`: `nvkmd/rm/nvkmd_rm.c` compiled as now. `rust`: no C source;
+  `nvk-rm-rust-lib` (path). `mesa/build.py` always passes `rust` (the `c` source is gone);
   `libvulkan_nouveau` gets `link_args: [<path>/libnvkmd_rm.a, '-Wl,--exclude-libs,libnvkmd_rm.a']`
   so nothing from our archive (Rust std, `nv-ffi`) enters the dynamic symbol table.
 - Both backends keep `-lnv_bionic_native` on `libvulkan_nouveau`: the archive holds the
   backend and `nv-rm-abi`'s declarations only, never the `rm` crate, so a process has one RM
   (one RM client, fork check and logger) whichever of NVK, gallium-nvrm and Codec2 it loads.
-- `mesa/build.py --nvkmd {c,rust}` (default `c` until the gate), builds `-p nvkmd-rm
-  --target <triple>` first (into `build/nvkmd-rm-rust`), passes the archive path, and uses
-  separate build dirs (`build/nvk-<target>` for `c`, `build/nvk-<target>-rust` for `rust`) so
-  both builds coexist for A/B; the host build that provides `mesa_clc` to the Android builds
-  stays the `c` one. `tests/vulkan/run.py` and `capture.py` take the same switch.
+- `mesa/build.py` builds `-p nvkmd-rm --target <triple>` first (into `build/nvkmd-rm-rust`) and
+  passes the archive path; NVK builds into `build/nvk-<target>`. Until the switch gate a
+  `--nvkmd {c,rust}` option kept both backends (`build/nvk-<target>-rust` for `rust`) for A/B.
 - Link check (all three targets; lld for Android, GNU ld for the host): the archive's Rust std
   objects coexist with NAK's and NIL's only when the archive is built without LTO and by the
   same rustc as Mesa's Rust: it then carries the same std objects, and the linker takes each
@@ -257,12 +257,15 @@ The C preflight harness (`mesa/tests/pdev-preflight.c`, which includes `nvkmd_rm
 log and builds backend-private objects directly (`nvkmd_rm_mem`, `nvkmd_rm_ctx`, `nvkmd_rm_sync`
 with chosen ids, the pending push array), so its scenarios are re-expressed through the public
 interface rather than replayed: objects come from `alloc_mem`/`create_ctx`/`vk_sync_init`, state
-is observed through later calls. Its backend suites move into the Rust harness with the steps
-that port their entries (`memory-api`, `memory-cleanup`: 6; `sync-api`, `wait-loss`: 7;
-`submit-fusion`: 8); its tests of Mesa's runtime and our patches to it, which reach no backend
-entry (`submit-on-demand`, `sync-properties`, the queue part of `loss-notification`, the
-`nvk_mem_stream` and sync-provider checks), stay a C test of the Mesa build. The C backend's part
-of it is deleted once the last backend suite has moved.
+is observed through later calls. Its backend suites moved into the Rust harness with the steps
+that ported their entries (`memory-api`, `memory-cleanup`: 6; `sync-api`, `wait-loss`: 7;
+`submit-fusion`: 8). It was removed with the C backend it was built on, including its tests of
+Mesa's runtime and our patches to it over the C backend's sync types (`submit-on-demand`,
+`sync-properties`, the queue part of `loss-notification`, the `nvk_mem_stream` and
+sync-provider checks); those are to be re-expressed as harness suites over the Rust backend.
+
+Since the C backend is gone, the harness compares the Rust backend's call log with
+`mesa/tests/nvkmd-harness.calls`, the C backend's log on the same suites.
 
 ### 4.2 Differential, system level: capture
 
@@ -328,7 +331,7 @@ suites on the C backend, and the checks named. Estimates are focused working hou
 | 7 | sync types | sync-api, wait-loss scenarios ported; call logs | 5 h |
 | 8 | ctx entries (hot path) | submit-fusion scenarios ported; call logs | 5 h |
 | 9 | switch gate: both backends on 3 targets | capture 0/42, run.py all, `nm -D`, submit-cost bench (idle GPU), Miri, then dEQP sample + live | 4 h + regression run |
-| 10 | after the gate: delete `nvkmd_rm.c`/`nvkmd_rm.h` and the `c` option; every `nv_rm_*` entry stays (gallium-nvrm, Codec2's library); the harness keeps the C fake (or a Rust one) | gate, capture 0/42 | 2 h |
+| 10 | after the gate: delete `nvkmd_rm.c` and the `c` option (`nvkmd_rm.h` stays: it declares the Rust entry `nvkmd.c` calls); every `nv_rm_*` entry stays (gallium-nvrm, Codec2's library); the harness compares with the C backend's recorded call log (done) | gate, capture 0/42 | 2 h |
 | 11 | separate later commits, each with its own test: Rust VA heap (differential vs `util_vma_heap` on recorded alloc/free sequences), DRM version query by ioctl in Rust, bugs found during 1–8 | own tests | — |
 
 About 48 h before the regression run. Steps 1b-4 are independent of each other after step 1.

@@ -3,7 +3,7 @@
 such recordings.
 
   tests/vulkan/capture.py record [--target all|host|android|android32] [--rust-profile release]
-                                 [--nvkmd c|rust] --out build/capture/<name>
+                                 --out build/capture/<name>
   tests/vulkan/capture.py diff build/capture/<a> build/capture/<b>
   tests/vulkan/capture.py normalise build/capture/<name>     (re-derive the text files from the raw ones)
 
@@ -221,10 +221,10 @@ def normalise(out, case):
 
 
 def record_target(out, target, args):
-    identity = profiles.verify_metadata(ROOT, target, args.rust_profile, args.nvkmd)
+    identity = profiles.verify_metadata(ROOT, target, args.rust_profile)
     failed = []
-    for name, command in run.cases(target, args.suite, args.nvkmd):
-        env, argv = run.launch(target, command, args.rust_profile, args.nvkmd)
+    for name, command in run.cases(target, args.suite):
+        env, argv = run.launch(target, command, args.rust_profile)
         case = f"{target}-{name}"
         capture = out / case
         capture.mkdir()
@@ -250,7 +250,7 @@ def record_target(out, target, args):
         for trace in traces.iterdir():
             trace.rename(traces / trace.name.removeprefix("t."))
         normalise(out, case)
-    if profiles.verify_metadata(ROOT, target, args.rust_profile, args.nvkmd) != identity:
+    if profiles.verify_metadata(ROOT, target, args.rust_profile) != identity:
         raise SystemExit(f"{target}: Rust build metadata changed during the recording")
     return identity, failed
 
@@ -268,7 +268,7 @@ def record(args):
         builds[target], target_failed = record_target(out, target, args)
         failed += target_failed
     (out / "recording.json").write_text(json.dumps({"checkout": head, "rust_profile": args.rust_profile,
-                                                     "nvkmd": args.nvkmd, "rust_builds": builds},
+                                                     "rust_builds": builds},
                                                     indent=2) + "\n")
     if failed:
         raise SystemExit(f"failed: {' '.join(failed)}")
@@ -312,8 +312,6 @@ def main():
     rec.add_argument("--target", choices=("host", "android", "android32", "all"), default="all")
     rec.add_argument("--rust-profile", choices=profiles.PROFILES, default="release")
     rec.add_argument("--suite", choices=("core", "hal", "all"), default="all")
-    rec.add_argument("--nvkmd", choices=profiles.BACKENDS, default="c",
-                     help="NVK's kernel-driver backend (run.py --nvkmd)")
     rec.add_argument("--out", type=Path, required=True)
     dif = sub.add_parser("diff")
     dif.add_argument("a", type=Path)
