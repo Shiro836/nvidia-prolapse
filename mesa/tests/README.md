@@ -27,7 +27,11 @@ reservation, sync-file and opaque-fd import/export, every RM failure, a failed
 finish publishing the loss) and `wait-loss` (CPU waits in every mode against
 loss from either side, deadlines, completion racing loss, RM errors, waits
 past six seconds, empty, stack-sized and allocated point lists, host
-operations on a lost device).
+operations on a lost device) and `submit-fusion` (channel, bind-only and
+shared contexts and their failures; pushes, GPU waits and signals fused into
+batches cut at 1000 pushes and before a continuation; ring-pressure retries;
+failures that keep exactly the unaccepted work; refusals before anything is
+submitted; `sync`; CPU waits, signals and VA binds of bind-only contexts).
 
 ## Preflight harness of the C backend
 

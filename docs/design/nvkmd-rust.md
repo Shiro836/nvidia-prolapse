@@ -213,7 +213,7 @@ it builds `rm` today in `mesa/build.py:344-357`); meson only links the archive:
   --target <triple>` first (into `build/nvkmd-rm-rust`), passes the archive path, and uses
   separate build dirs (`build/nvk-<target>` for `c`, `build/nvk-<target>-rust` for `rust`) so
   both builds coexist for A/B; the host build that provides `mesa_clc` to the Android builds
-  stays the `c` one. `tests/vulkan/run.py` and `capture.py` take the same switch (step 9).
+  stays the `c` one. `tests/vulkan/run.py` and `capture.py` take the same switch.
 - Link check (all three targets; lld for Android, GNU ld for the host): the archive's Rust std
   objects coexist with NAK's and NIL's only when the archive is built without LTO and by the
   same rustc as Mesa's Rust: it then carries the same std objects, and the linker takes each
@@ -251,7 +251,7 @@ diagnostics are compared by content class (the harness checks a word of Mesa's m
 Gate per step: every suite passes on both backends and the call log (every RM, render-node and
 libdrm call with arguments and result, plus each case's outcome and the filled device info and
 sync type shapes) is byte-identical between them, suite by suite. Suites: `pdev`, `info`, `loss`,
-`memory-api`, `memory-cleanup`, `sync-api`, `wait-loss`.
+`memory-api`, `memory-cleanup`, `sync-api`, `wait-loss`, `submit-fusion`.
 
 The C preflight harness (`mesa/tests/pdev-preflight.c`, which includes `nvkmd_rm.c`) has no call
 log and builds backend-private objects directly (`nvkmd_rm_mem`, `nvkmd_rm_ctx`, `nvkmd_rm_sync`

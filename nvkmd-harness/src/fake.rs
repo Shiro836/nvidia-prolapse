@@ -113,6 +113,8 @@ pub(crate) struct State {
     pub(crate) mem: Memory,
     /// The fake RM's sync payload entries and Mesa's clock.
     pub(crate) sync: crate::fake_sync::Syncs,
+    /// The fake RM's context entries.
+    pub(crate) ctx: crate::fake_ctx::Contexts,
     sysfs: Vec<c_int>,
 }
 
@@ -228,6 +230,7 @@ impl State {
             allow_no_vk_loss: false,
             mem: Memory::new(),
             sync: crate::fake_sync::Syncs::new(),
+            ctx: crate::fake_ctx::Contexts::new(),
             sysfs: Vec::new(),
         }
     }
@@ -276,6 +279,7 @@ pub(crate) fn reset_case() {
     let (memory, mapping) = (state.mem.next_allocation, state.mem.next_mapping);
     state.mem = Memory::new();
     state.sync = state.sync.next_case();
+    state.ctx = state.ctx.next_case();
     state.mem.next_allocation = memory;
     state.mem.next_mapping = mapping;
     state.loss_calls = 0;
@@ -1152,21 +1156,16 @@ macro_rules! rm_tripwires {
 }
 rm_tripwires!(
     nv_rm_check_status,
-    nv_rm_context_create,
-    nv_rm_context_create_shared,
-    nv_rm_context_destroy,
     nv_rm_context_fence,
     nv_rm_context_signal,
     nv_rm_exec,
     nv_rm_poll,
     nv_rm_submit,
-    nv_rm_submit_batch,
     nv_rm_submit_sync,
     nv_rm_submit_waits,
     nv_rm_sync_destroy,
     nv_rm_sync_status_many,
-    nv_rm_timestamp,
-    nv_rm_wait
+    nv_rm_timestamp
 );
 
 /// Formats the fields of a created physical device the backend filled, for

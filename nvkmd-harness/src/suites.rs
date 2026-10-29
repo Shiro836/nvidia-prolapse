@@ -25,6 +25,7 @@ pub(crate) const SUITES: &[Suite] = &[
     ("memory-cleanup", crate::memory::cleanup),
     ("sync-api", crate::sync::api),
     ("wait-loss", crate::sync::wait_loss),
+    ("submit-fusion", crate::ctx::submit_fusion),
 ];
 
 fn refused(case: &str, expected: VkResult) {

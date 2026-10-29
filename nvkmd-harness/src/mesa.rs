@@ -3,8 +3,9 @@
 //! physical and KMD devices made through `nvkmd_try_create_pdev_for_drm` and
 //! the ops tables, the memory and VA reservations made through Mesa's
 //! `nvkmd_dev_*` wrappers, sync objects made through Mesa's `vk_sync_*`
-//! wrappers, and a stand-in NVK device that holds the loss state and hooks the
-//! backend installs. The suites reach the backend
+//! wrappers, contexts made through the device's ops and driven through the
+//! context ops (Mesa's `nvkmd_ctx_*` wrappers are those calls), and a stand-in
+//! NVK device that holds the loss state and hooks the backend installs. The suites reach the backend
 //! only through these, never through its own symbols or structures.
 //!
 //! Requests Mesa's wrappers would reject with an assertion (a bind outside
@@ -19,14 +20,15 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use nvkmd_sys::{
     _drmDevice, _drmPciBusInfo, _drmPciDeviceInfo, _vk_device_set_lost, DRM_BUS_PCI, DRM_NODE_MAX,
     DRM_NODE_RENDER, NVKMD_SYS_NVK_DEVICE_NVKMD, NVKMD_SYS_NVK_DEVICE_VK, NVKMD_SYS_VK_DEVICE_LOST,
-    NVKMD_SYS_VK_DEVICE_QUEUES, NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_SUCCESS, VkResult, nvkmd_dev,
-    nvkmd_dev_alloc_mem, nvkmd_dev_alloc_tiled_mem, nvkmd_dev_alloc_va, nvkmd_dev_import_dma_buf,
-    nvkmd_mem, nvkmd_mem_map, nvkmd_mem_ops, nvkmd_mem_unmap, nvkmd_mem_unref, nvkmd_pdev,
-    nvkmd_sys_layout, nvkmd_try_create_pdev_for_drm, nvkmd_va, nvkmd_va_free, nvkmd_va_ops,
-    vk_device, vk_object_base, vk_sync, vk_sync_export_opaque_fd, vk_sync_export_sync_file,
-    vk_sync_finish, vk_sync_flags, vk_sync_get_value, vk_sync_import_opaque_fd,
-    vk_sync_import_sync_file, vk_sync_init, vk_sync_move, vk_sync_reset, vk_sync_signal,
-    vk_sync_type, vk_sync_wait, vk_sync_wait_flags,
+    NVKMD_SYS_VK_DEVICE_QUEUES, NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_SUCCESS, VkResult, nvkmd_ctx,
+    nvkmd_ctx_bind, nvkmd_ctx_exec, nvkmd_ctx_ops, nvkmd_dev, nvkmd_dev_alloc_mem,
+    nvkmd_dev_alloc_tiled_mem, nvkmd_dev_alloc_va, nvkmd_dev_import_dma_buf, nvkmd_dev_ops,
+    nvkmd_engines, nvkmd_mem, nvkmd_mem_map, nvkmd_mem_ops, nvkmd_mem_unmap, nvkmd_mem_unref,
+    nvkmd_pdev, nvkmd_sys_layout, nvkmd_try_create_pdev_for_drm, nvkmd_va, nvkmd_va_free,
+    nvkmd_va_ops, vk_device, vk_object_base, vk_sync, vk_sync_export_opaque_fd,
+    vk_sync_export_sync_file, vk_sync_finish, vk_sync_flags, vk_sync_get_value,
+    vk_sync_import_opaque_fd, vk_sync_import_sync_file, vk_sync_init, vk_sync_move, vk_sync_reset,
+    vk_sync_signal, vk_sync_signal as VkSyncSignal, vk_sync_type, vk_sync_wait, vk_sync_wait_flags,
 };
 
 use crate::fake;
@@ -441,6 +443,185 @@ impl Dev {
             )
         };
         made(result, out).map(Va)
+    }
+
+    fn ops(&self) -> &nvkmd_dev_ops {
+        // SAFETY: a live device the backend created.
+        let ops = unsafe { self.0.as_ref() }.ops;
+        // SAFETY: a created device points to the backend's static table.
+        unsafe { ops.as_ref() }.expect("a created device has ops")
+    }
+
+    /// Mesa's `nvkmd_dev_create_ctx`.
+    pub(crate) fn create_ctx(
+        &self,
+        log: Option<&VkDevice>,
+        engines: nvkmd_engines,
+    ) -> Result<Ctx, VkResult> {
+        let create = self
+            .ops()
+            .create_ctx
+            .expect("every device creates contexts");
+        let mut out = core::ptr::null_mut();
+        // SAFETY: the backend's entry on its live device; `out` is a writable
+        // local; `log` NULL or a live stand-in device.
+        let result = unsafe { create(self.0.as_ptr(), log_of(log), engines, &raw mut out) };
+        made(result, out).map(Ctx)
+    }
+
+    /// Mesa's `nvkmd_dev_create_shared_ctx` (the fake RM reports shared
+    /// contexts, so Mesa's assertion holds).
+    pub(crate) fn create_shared_ctx(
+        &self,
+        log: Option<&VkDevice>,
+        engines: nvkmd_engines,
+        share: Option<&Ctx>,
+    ) -> Result<Ctx, VkResult> {
+        let create = self
+            .ops()
+            .create_shared_ctx
+            .expect("the backend creates shared contexts");
+        let share = share.map_or(core::ptr::null_mut(), |share| share.0.as_ptr());
+        let mut out = core::ptr::null_mut();
+        // SAFETY: as `create_ctx`; `share` NULL or a live context.
+        let result = unsafe { create(self.0.as_ptr(), log_of(log), engines, share, &raw mut out) };
+        made(result, out).map(Ctx)
+    }
+}
+
+/// A context the backend created.
+pub(crate) struct Ctx(NonNull<nvkmd_ctx>);
+
+impl Ctx {
+    fn ops(&self) -> &nvkmd_ctx_ops {
+        // SAFETY: a live context the backend created.
+        let ops = unsafe { self.0.as_ref() }.ops;
+        // SAFETY: a created context points to the backend's static table.
+        unsafe { ops.as_ref() }.expect("a created context has ops")
+    }
+
+    /// Mesa's `nvkmd_ctx_destroy`.
+    pub(crate) fn destroy(self) {
+        let destroy = self.ops().destroy.expect("every context has destroy");
+        // SAFETY: the backend's entry; the context is not used afterwards.
+        unsafe { destroy(self.0.as_ptr()) };
+    }
+
+    /// Mesa's `nvkmd_ctx_wait` on `(sync, value)` pairs.
+    pub(crate) fn wait(&self, log: &VkDevice, waits: &[(*mut vk_sync, u64)]) -> VkResult {
+        let list: Vec<vk_sync_wait> = waits
+            .iter()
+            .map(|&(sync, value)| vk_sync_wait {
+                sync,
+                stage_mask: !0,
+                wait_value: value,
+            })
+            .collect();
+        let wait = self.ops().wait.expect("every context waits");
+        // SAFETY: the backend's entry; `list` holds live syncs.
+        unsafe {
+            wait(
+                self.0.as_ptr(),
+                log.log_object(),
+                count(&list),
+                list.as_ptr(),
+            )
+        }
+    }
+
+    /// Mesa's `nvkmd_ctx_exec` (with no push debugging, the backend's entry).
+    pub(crate) fn exec(&self, log: &VkDevice, execs: &[nvkmd_ctx_exec]) -> VkResult {
+        let exec = self.ops().exec.expect("every context executes");
+        // SAFETY: the backend's entry; `execs` holds `count` entries.
+        unsafe {
+            exec(
+                self.0.as_ptr(),
+                log.log_object(),
+                count(execs),
+                execs.as_ptr(),
+            )
+        }
+    }
+
+    /// Mesa's `nvkmd_ctx_bind` (its checks hold for the suites' binds).
+    pub(crate) fn bind(&self, log: &VkDevice, binds: &[nvkmd_ctx_bind]) -> VkResult {
+        let bind = self.ops().bind.expect("every context binds");
+        // SAFETY: the backend's entry; `binds` names live reservations and memory.
+        unsafe {
+            bind(
+                self.0.as_ptr(),
+                log.log_object(),
+                count(binds),
+                binds.as_ptr(),
+            )
+        }
+    }
+
+    /// Mesa's `nvkmd_ctx_signal` of `(sync, value)` pairs.
+    pub(crate) fn signal(&self, log: &VkDevice, signals: &[(*mut vk_sync, u64)]) -> VkResult {
+        let list: Vec<VkSyncSignal> = signals
+            .iter()
+            .map(|&(sync, value)| VkSyncSignal {
+                sync,
+                stage_mask: !0,
+                signal_value: value,
+            })
+            .collect();
+        let signal = self.ops().signal.expect("every context signals");
+        let pointer = if list.is_empty() {
+            core::ptr::null()
+        } else {
+            list.as_ptr()
+        };
+        // SAFETY: the backend's entry; `list` holds live syncs.
+        unsafe { signal(self.0.as_ptr(), log.log_object(), count(&list), pointer) }
+    }
+
+    /// Mesa's `nvkmd_ctx_flush`.
+    pub(crate) fn flush(&self, log: &VkDevice) -> VkResult {
+        let flush = self.ops().flush.expect("every context flushes");
+        // SAFETY: the backend's entry.
+        unsafe { flush(self.0.as_ptr(), log.log_object()) }
+    }
+
+    /// Mesa's `nvkmd_ctx_sync`.
+    pub(crate) fn sync(&self, log: &VkDevice) -> VkResult {
+        let sync = self.ops().sync.expect("every context syncs");
+        // SAFETY: the backend's entry.
+        unsafe { sync(self.0.as_ptr(), log.log_object()) }
+    }
+}
+
+fn count<T>(items: &[T]) -> u32 {
+    u32::try_from(items.len()).expect("the suites pass short lists")
+}
+
+/// A `vk_sync` of a type no physical device lists (Mesa's own types, such
+/// as `vk_sync_dummy`, reach a queue this way), with the given flags.
+pub(crate) struct ForeignSync {
+    sync: Box<vk_sync>,
+    _type: Box<vk_sync_type>,
+}
+
+impl ForeignSync {
+    pub(crate) fn new(flags: vk_sync_flags) -> Self {
+        // SAFETY: all-zero is a valid `vk_sync_type` (a size, features and
+        // NULL callbacks) and `vk_sync` (NULL type, no flags) before the
+        // fields below are set.
+        let mut sync_type: Box<vk_sync_type> = Box::new(unsafe { core::mem::zeroed() });
+        sync_type.size = size_of::<vk_sync>();
+        // SAFETY: as above.
+        let mut sync: Box<vk_sync> = Box::new(unsafe { core::mem::zeroed() });
+        sync.type_ = &raw const *sync_type;
+        sync.flags = flags;
+        Self {
+            sync,
+            _type: sync_type,
+        }
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut vk_sync {
+        (&raw const *self.sync).cast_mut()
     }
 }
 
