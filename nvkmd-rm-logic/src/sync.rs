@@ -7,17 +7,18 @@
 pub const FOREVER: u64 = u64::MAX;
 
 /// The relative timeout of a wait whose absolute `deadline` (Mesa's
-/// monotonic clock, `os_time_get_nano`) is `deadline`, at `now`: infinite
-/// stays infinite, a past deadline polls once (`nvkmd_rm.c`
-/// `rm_sync_wait_many`). The RM's wait owns the deadline; nothing here
-/// shortens or extends it.
+/// monotonic clock, `os_time_get_nano`) is `deadline`: infinite stays
+/// infinite, a past deadline polls once (`nvkmd_rm.c` `rm_sync_wait_many`).
+/// The RM's wait owns the deadline; nothing here shortens or extends it.
+/// `now` reads the clock, only for a finite deadline: an infinite wait (the
+/// common `UINT64_MAX` one) costs no clock read (RUST.md §14).
 #[must_use]
-pub const fn wait_timeout(deadline: u64, now: u64) -> u64 {
+pub fn wait_timeout(deadline: u64, now: impl FnOnce() -> u64) -> u64 {
     if deadline == FOREVER {
         return FOREVER;
     }
     // Saturating: a deadline already passed is a zero timeout.
-    deadline.saturating_sub(now)
+    deadline.saturating_sub(now())
 }
 
 /// Mesa's clock reading (`int64_t os_time_get_nano()`, `CLOCK_MONOTONIC`) as
@@ -74,18 +75,18 @@ mod tests {
     #[test]
     fn infinite_deadlines_stay_infinite() {
         // nvkmd_rm.c rm_sync_wait_many: the timeout.
-        assert_eq!(wait_timeout(FOREVER, 0), FOREVER);
-        assert_eq!(wait_timeout(FOREVER, FOREVER - 1), FOREVER);
+        let unread = || -> u64 { panic!("an infinite wait reads no clock") };
+        assert_eq!(wait_timeout(FOREVER, unread), FOREVER);
     }
 
     #[test]
     fn finite_deadlines_become_the_remaining_time() {
         // nvkmd_rm.c rm_sync_wait_many: deadline > now ? deadline - now : 0.
-        assert_eq!(wait_timeout(1_002_000_000, 1_000_000_000), 2_000_000);
-        assert_eq!(wait_timeout(1_000_000_001, 1_000_000_000), 1);
-        assert_eq!(wait_timeout(1_000_000_000, 1_000_000_000), 0);
-        assert_eq!(wait_timeout(0, 1_000_000_000), 0);
-        assert_eq!(wait_timeout(FOREVER - 1, 0), FOREVER - 1);
+        assert_eq!(wait_timeout(1_002_000_000, || 1_000_000_000), 2_000_000);
+        assert_eq!(wait_timeout(1_000_000_001, || 1_000_000_000), 1);
+        assert_eq!(wait_timeout(1_000_000_000, || 1_000_000_000), 0);
+        assert_eq!(wait_timeout(0, || 1_000_000_000), 0);
+        assert_eq!(wait_timeout(FOREVER - 1, || 0), FOREVER - 1);
     }
 
     #[test]

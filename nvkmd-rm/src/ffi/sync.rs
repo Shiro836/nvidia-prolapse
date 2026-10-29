@@ -478,8 +478,10 @@ unsafe extern "C" fn sync_wait_many(
                 value: wait.wait_value,
             });
         }
-        // SAFETY: Mesa's clock (util/os_time.c), no preconditions.
-        let now = clock_reading(unsafe { os_time_get_nano() });
+        let timeout = wait_timeout(deadline, || {
+            // SAFETY: Mesa's clock (util/os_time.c), no preconditions.
+            clock_reading(unsafe { os_time_get_nano() })
+        });
         // SAFETY: the device's live RM device; `points` holds `count` entries,
         // every one written above.
         let status = unsafe {
@@ -488,7 +490,7 @@ unsafe extern "C" fn sync_wait_many(
                 points.as_ptr().cast::<NvRmSyncPoint>(),
                 count,
                 flags,
-                wait_timeout(deadline, now),
+                timeout,
             )
         };
         // SAFETY: the sync's live logical device.
