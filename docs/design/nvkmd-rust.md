@@ -251,7 +251,7 @@ diagnostics are compared by content class (the harness checks a word of Mesa's m
 Gate per step: every suite passes on both backends and the call log (every RM, render-node and
 libdrm call with arguments and result, plus each case's outcome and the filled device info and
 sync type shapes) is byte-identical between them, suite by suite. Suites: `pdev`, `info`, `loss`,
-`memory-api`, `memory-cleanup`.
+`memory-api`, `memory-cleanup`, `sync-api`, `wait-loss`.
 
 The C preflight harness (`mesa/tests/pdev-preflight.c`, which includes `nvkmd_rm.c`) has no call
 log and builds backend-private objects directly (`nvkmd_rm_mem`, `nvkmd_rm_ctx`, `nvkmd_rm_sync`
