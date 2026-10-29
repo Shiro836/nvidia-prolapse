@@ -600,3 +600,35 @@ unsafe extern "C" fn sync_export_sync_file(
         unsafe { export(vk, sync, out, Handle::SyncFile, "export sync file") }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timelines_are_read_from_the_flags() {
+        let mut sync = vk_sync {
+            type_: core::ptr::null(),
+            flags: VK_SYNC_IS_TIMELINE,
+        };
+        // SAFETY: a live vk_sync.
+        assert!(unsafe { is_timeline(NonNull::from(&mut sync)) });
+        sync.flags = 0;
+        // SAFETY: as above.
+        assert!(!unsafe { is_timeline(NonNull::from(&mut sync)) });
+    }
+
+    #[test]
+    fn the_payload_id_follows_the_base() {
+        let mut sync = RmSync {
+            base: vk_sync {
+                type_: core::ptr::null(),
+                flags: 0,
+            },
+            id: NvRmSyncId::new(42),
+        };
+        let sync = NonNull::from(&mut sync);
+        // SAFETY: the id member of a live RmSync.
+        assert_eq!(unsafe { id_of(sync).read() }, NvRmSyncId::new(42));
+    }
+}

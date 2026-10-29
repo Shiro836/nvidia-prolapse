@@ -22,6 +22,7 @@ use nvkmd_sys::{
     util_cache_granularity, vk_object_base, vk_sync_type,
 };
 
+use super::object::{self, Object};
 use super::sync::{SYNC_FILE_TYPE, SYNC_TYPE};
 use super::{Diag, dev, rm_result, try_alloc_zeroed, vk_error, vk_errorf};
 
@@ -52,6 +53,19 @@ pub(super) static PDEV_OPS: nvkmd_pdev_ops = nvkmd_pdev_ops {
     create_dev: Some(dev::dev_create),
 };
 
+// SAFETY: `#[repr(C)]` with its `nvkmd_pdev` first; only this module hands out
+// bases with `PDEV_OPS`, each inside a boxed `RmPdev`.
+unsafe impl Object for RmPdev {
+    type Base = nvkmd_pdev;
+    type Ops = nvkmd_pdev_ops;
+    fn ops(base: &nvkmd_pdev) -> *const nvkmd_pdev_ops {
+        base.ops
+    }
+    fn ours() -> *const nvkmd_pdev_ops {
+        &raw const PDEV_OPS
+    }
+}
+
 impl RmPdev {
     /// Our physical device behind Mesa's pointer, or `None` when `base` is
     /// NULL or another backend's (its ops are not ours).
@@ -59,14 +73,9 @@ impl RmPdev {
     /// # Safety
     /// `base` is NULL or points to a live `nvkmd_pdev`.
     pub(super) unsafe fn from_base<'a>(base: *mut nvkmd_pdev) -> Option<&'a Self> {
-        // SAFETY: NULL or a live nvkmd_pdev (caller).
-        let pdev = unsafe { base.as_ref() }?;
-        if !core::ptr::eq(pdev.ops, &raw const PDEV_OPS) {
-            return None;
-        }
-        // SAFETY: a pdev with our ops was made by `nvkmd_rm_try_create_pdev`
-        // as the first field of a live, `#[repr(C)]` `RmPdev`.
-        Some(unsafe { &*base.cast::<Self>() })
+        // SAFETY: NULL or a live nvkmd_pdev (caller); a physical device is
+        // only read.
+        unsafe { object::recover(base) }
     }
 
     pub(super) fn base_ptr(&self) -> *mut nvkmd_pdev {

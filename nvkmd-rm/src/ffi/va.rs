@@ -30,6 +30,7 @@ use nvkmd_sys::{
 
 use super::dev::RmDev;
 use super::memory::RmMem;
+use super::object::{self, Object};
 use super::{Diag, rm_result, try_alloc_zeroed, unsupported, vk_error, vk_errorf};
 
 /// The window's two heaps (`nvkmd_rm.c` `heap`, `replay_heap`). Each points
@@ -115,6 +116,19 @@ static VA_OPS: nvkmd_va_ops = nvkmd_va_ops {
     unbind: Some(va_unbind),
 };
 
+// SAFETY: `#[repr(C)]` with its `nvkmd_va` first; only this module hands out
+// bases with `VA_OPS`, each inside a boxed `RmVa`.
+unsafe impl Object for RmVa {
+    type Base = nvkmd_va;
+    type Ops = nvkmd_va_ops;
+    fn ops(base: &nvkmd_va) -> *const nvkmd_va_ops {
+        base.ops
+    }
+    fn ours() -> *const nvkmd_va_ops {
+        &raw const VA_OPS
+    }
+}
+
 impl RmVa {
     /// Our reservation behind Mesa's pointer, or `None` for NULL or another
     /// backend's.
@@ -123,14 +137,8 @@ impl RmVa {
     /// `base` is NULL or points to a live `nvkmd_va` that no other call uses
     /// during the borrow (Mesa serialises calls per object).
     unsafe fn from_base<'a>(base: *mut nvkmd_va) -> Option<&'a mut Self> {
-        // SAFETY: NULL or a live nvkmd_va (caller).
-        let va = unsafe { base.as_ref() }?;
-        if !core::ptr::eq(va.ops, &raw const VA_OPS) {
-            return None;
-        }
-        // SAFETY: a va with our ops is the first field of a live `RmVa`,
-        // borrowed by this call alone (caller).
-        Some(unsafe { &mut *base.cast::<Self>() })
+        // SAFETY: NULL or a live nvkmd_va used by this call alone (caller).
+        unsafe { object::recover_mut(base) }
     }
 
     /// Takes back the reservation behind Mesa's pointer, or `None` for NULL
@@ -139,11 +147,8 @@ impl RmVa {
     /// # Safety
     /// `base` is NULL or points to a live `nvkmd_va` that is not used again.
     unsafe fn owned(base: *mut nvkmd_va) -> Option<Box<Self>> {
-        // SAFETY: NULL or a live nvkmd_va, used by this call alone (caller).
-        unsafe { Self::from_base(base) }?;
-        // SAFETY: a va with our ops is the first field of an `RmVa` that
-        // `alloc_va` leaked with Box::into_raw; the caller gives it up.
-        Some(unsafe { Box::from_raw(base.cast::<Self>()) })
+        // SAFETY: NULL or a live nvkmd_va, not used again (caller).
+        unsafe { object::take(base) }
     }
 
     fn dev(&self) -> &RmDev {

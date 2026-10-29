@@ -24,6 +24,7 @@ use nvkmd_sys::{
 mod ctx;
 mod dev;
 mod memory;
+mod object;
 mod pdev;
 mod sync;
 mod va;
@@ -163,4 +164,36 @@ fn try_alloc_zeroed_slice<T>(count: usize) -> Option<Box<[MaybeUninit<T>]>> {
     // `[T; count]`, so the box owns it and frees it with the same layout;
     // `MaybeUninit` needs no initialisation.
     Some(unsafe { Box::from_raw(slice) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_objects_are_zeroed_and_freed() {
+        let object = try_alloc_zeroed::<[u64; 4]>().expect("host memory");
+        // SAFETY: all-zero bytes are a valid `[u64; 4]`.
+        assert_eq!(*unsafe { object.assume_init() }, [0; 4]);
+    }
+
+    #[test]
+    fn arrays_are_zeroed_and_sized() {
+        assert_eq!(
+            try_alloc_zeroed_slice::<u64>(0).map(|slice| slice.len()),
+            Some(0)
+        );
+        let array = try_alloc_zeroed_slice::<u32>(37).expect("host memory");
+        assert_eq!(array.len(), 37);
+        let zero = |value: &MaybeUninit<u32>| {
+            // SAFETY: all-zero bytes are a valid `u32`.
+            unsafe { value.assume_init() == 0 }
+        };
+        assert!(array.iter().all(zero));
+    }
+
+    #[test]
+    fn oversized_arrays_are_refused() {
+        assert!(try_alloc_zeroed_slice::<u64>(usize::MAX / 4).is_none());
+    }
 }

@@ -30,6 +30,7 @@ use nvkmd_sys::{
 };
 
 use super::dev::RmDev;
+use super::object::{self, Object};
 use super::{Diag, diag, rm_result, try_alloc_zeroed, unsupported, vk_error, vk_errorf};
 
 /// An allocation. Mesa holds `&base`; [`mem_free`] frees it.
@@ -53,6 +54,19 @@ static MEM_OPS: nvkmd_mem_ops = nvkmd_mem_ops {
 /// The page size Mesa binds allocations of this backend in (`bind_align_B`).
 const BIND_ALIGN: u32 = 4096;
 
+// SAFETY: `#[repr(C)]` with its `nvkmd_mem` first; only this module hands out
+// bases with `MEM_OPS`, each inside a boxed `RmMem`.
+unsafe impl Object for RmMem {
+    type Base = nvkmd_mem;
+    type Ops = nvkmd_mem_ops;
+    fn ops(base: &nvkmd_mem) -> *const nvkmd_mem_ops {
+        base.ops
+    }
+    fn ours() -> *const nvkmd_mem_ops {
+        &raw const MEM_OPS
+    }
+}
+
 impl RmMem {
     /// Our allocation behind Mesa's pointer, or `None` for NULL or another
     /// backend's.
@@ -60,13 +74,9 @@ impl RmMem {
     /// # Safety
     /// `base` is NULL or points to a live `nvkmd_mem`.
     pub(super) unsafe fn from_base<'a>(base: *mut nvkmd_mem) -> Option<&'a Self> {
-        // SAFETY: NULL or a live nvkmd_mem (caller).
-        let mem = unsafe { base.as_ref() }?;
-        if !core::ptr::eq(mem.ops, &raw const MEM_OPS) {
-            return None;
-        }
-        // SAFETY: a mem with our ops is the first field of a live `RmMem`.
-        Some(unsafe { &*base.cast::<Self>() })
+        // SAFETY: NULL or a live nvkmd_mem (caller); entries only read an
+        // allocation until `free` takes it back.
+        unsafe { object::recover(base) }
     }
 
     /// Takes back the allocation behind Mesa's pointer, or `None` for NULL or
@@ -75,11 +85,8 @@ impl RmMem {
     /// # Safety
     /// `base` is NULL or points to a live `nvkmd_mem` that is not used again.
     unsafe fn owned(base: *mut nvkmd_mem) -> Option<Box<Self>> {
-        // SAFETY: NULL or a live nvkmd_mem (caller).
-        unsafe { Self::from_base(base) }?;
-        // SAFETY: a mem with our ops is the first field of an `RmMem` that
-        // `finish` leaked with Box::into_raw; the caller gives it up.
-        Some(unsafe { Box::from_raw(base.cast::<Self>()) })
+        // SAFETY: NULL or a live nvkmd_mem, not used again (caller).
+        unsafe { object::take(base) }
     }
 
     /// The allocation's RM handle.

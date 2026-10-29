@@ -33,6 +33,7 @@ use nvkmd_sys::{
 
 use super::ctx::{dev_create_ctx, dev_create_shared_ctx};
 use super::memory::{dev_alloc_mem, dev_alloc_tiled_mem, dev_import_dma_buf};
+use super::object::{self, Object};
 use super::pdev::{RmPdev, open_render_node};
 use super::va::{VaHeaps, dev_alloc_va};
 use super::{Diag, diag, rm_result, set_lost, try_alloc_zeroed, vk_error};
@@ -65,6 +66,19 @@ static DEV_OPS: nvkmd_dev_ops = nvkmd_dev_ops {
     create_shared_ctx: Some(dev_create_shared_ctx),
 };
 
+// SAFETY: `#[repr(C)]` with its `nvkmd_dev` first; only this module hands out
+// bases with `DEV_OPS`, each inside a boxed `RmDev`.
+unsafe impl Object for RmDev {
+    type Base = nvkmd_dev;
+    type Ops = nvkmd_dev_ops;
+    fn ops(base: &nvkmd_dev) -> *const nvkmd_dev_ops {
+        base.ops
+    }
+    fn ours() -> *const nvkmd_dev_ops {
+        &raw const DEV_OPS
+    }
+}
+
 impl RmDev {
     /// Our device behind Mesa's pointer, or `None` for NULL or another
     /// backend's.
@@ -72,13 +86,8 @@ impl RmDev {
     /// # Safety
     /// `base` is NULL or points to a live `nvkmd_dev`.
     pub(super) unsafe fn from_base<'a>(base: *mut nvkmd_dev) -> Option<&'a Self> {
-        // SAFETY: NULL or a live nvkmd_dev (caller).
-        let dev = unsafe { base.as_ref() }?;
-        if !core::ptr::eq(dev.ops, &raw const DEV_OPS) {
-            return None;
-        }
-        // SAFETY: a dev with our ops is the first field of a live `RmDev`.
-        Some(unsafe { &*base.cast::<Self>() })
+        // SAFETY: NULL or a live nvkmd_dev (caller); a device is only read.
+        unsafe { object::recover(base) }
     }
 
     /// The KMD device of a logical device NVK made (`nvk_device.nvkmd`,
@@ -89,14 +98,8 @@ impl RmDev {
     /// `vk` is the live `vk` member of a live `nvk_device` whose `nvkmd` is
     /// NULL or a live KMD device.
     pub(super) unsafe fn from_vk<'a>(vk: NonNull<vk_device>) -> Option<&'a Self> {
-        // SAFETY: `vk` is a member of a live nvk_device (caller), at the
-        // offset Mesa's header gives (nvkmd-sys).
-        let nvk = unsafe { vk.byte_sub(offset(NVKMD_SYS_NVK_DEVICE_VK)) };
-        // SAFETY: the `nvkmd` member lies inside that live nvk_device.
-        let slot =
-            unsafe { nvk.byte_add(offset(NVKMD_SYS_NVK_DEVICE_NVKMD)) }.cast::<*mut nvkmd_dev>();
-        // SAFETY: an aligned pointer member NVK set at device creation.
-        let kmd = unsafe { slot.read() };
+        // SAFETY: the caller's contract.
+        let kmd = unsafe { kmd_of(vk) };
         // SAFETY: NULL or a live KMD device (caller).
         unsafe { Self::from_base(kmd) }
     }
@@ -164,6 +167,20 @@ impl RmDev {
             None => unsafe { nv_rm_mark_lost(self.rm()) },
         }
     }
+}
+
+/// The `nvkmd` member of the `nvk_device` whose `vk` member is `vk`.
+///
+/// # Safety
+/// `vk` is the live `vk` member of a live `nvk_device`.
+unsafe fn kmd_of(vk: NonNull<vk_device>) -> *mut nvkmd_dev {
+    // SAFETY: `vk` is a member of a live nvk_device (caller), at the offset
+    // Mesa's header gives (nvkmd-sys).
+    let nvk = unsafe { vk.byte_sub(offset(NVKMD_SYS_NVK_DEVICE_VK)) };
+    // SAFETY: the `nvkmd` member lies inside that live nvk_device.
+    let slot = unsafe { nvk.byte_add(offset(NVKMD_SYS_NVK_DEVICE_NVKMD)) }.cast::<*mut nvkmd_dev>();
+    // SAFETY: an aligned pointer member NVK set at device creation.
+    unsafe { slot.read() }
 }
 
 fn offset(member: nvkmd_sys_layout) -> usize {
@@ -477,4 +494,64 @@ unsafe extern "C" fn dev_drm_fd(base: *mut nvkmd_dev) -> c_int {
         let dev = unsafe { RmDev::from_base(base) }.expect("Mesa calls its own backend's devices");
         dev.drm_fd()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Zeroed, 8-aligned heap bytes standing in for a Mesa object whose
+    /// members this module reaches by offset.
+    fn object(bytes: usize) -> Box<[u64]> {
+        vec![0; bytes.div_ceil(8)].into_boxed_slice()
+    }
+
+    #[test]
+    fn loss_is_read_from_mesas_counter() {
+        let mut device = object(size_of::<vk_device>());
+        let vk = NonNull::from(&mut *device).cast::<vk_device>();
+        // SAFETY: a live, zeroed device-sized object.
+        assert!(!unsafe { mesa_is_lost(vk) });
+        // SAFETY: as above; `_lost.lost` is an `int`.
+        unsafe { write_member(vk, NVKMD_SYS_VK_DEVICE_LOST, 1_i32) };
+        // SAFETY: as above.
+        assert!(unsafe { mesa_is_lost(vk) });
+    }
+
+    #[test]
+    fn a_log_object_names_its_device() {
+        // SAFETY: NULL.
+        assert_eq!(unsafe { logical_device(core::ptr::null_mut()) }, None);
+        let mut log = object(size_of::<vk_object_base>());
+        let base = NonNull::from(&mut *log).cast::<vk_object_base>();
+        // SAFETY: a live, zeroed object: no device.
+        assert_eq!(unsafe { logical_device(base.as_ptr()) }, None);
+        let mut device = object(size_of::<vk_device>());
+        let vk = NonNull::from(&mut *device).cast::<vk_device>();
+        // SAFETY: the `device` member lies inside the object.
+        let slot = unsafe { base.byte_add(offset(NVKMD_SYS_VK_OBJECT_BASE_DEVICE)) };
+        // SAFETY: an aligned pointer member of the live object.
+        unsafe { slot.cast::<*mut vk_device>().write(vk.as_ptr()) };
+        // SAFETY: a live object whose `device` member is set.
+        let found = unsafe { logical_device(base.as_ptr()) };
+        assert_eq!(found.map(NonNull::addr), Some(vk.addr()));
+    }
+
+    #[test]
+    fn the_kmd_device_is_found_from_the_vk_member() {
+        let vk_at = offset(NVKMD_SYS_NVK_DEVICE_VK);
+        let kmd_at = offset(NVKMD_SYS_NVK_DEVICE_NVKMD);
+        let mut nvk = object((vk_at + size_of::<vk_device>()).max(kmd_at + 8));
+        let mut kmd = object(size_of::<nvkmd_dev>());
+        let kmd = NonNull::from(&mut *kmd).cast::<nvkmd_dev>();
+        let start = NonNull::from(&mut *nvk);
+        // SAFETY: the `nvkmd` member lies inside the object.
+        let slot = unsafe { start.byte_add(kmd_at) }.cast::<*mut nvkmd_dev>();
+        // SAFETY: an aligned pointer member of the live object.
+        unsafe { slot.write(kmd.as_ptr()) };
+        // SAFETY: the `vk` member lies inside the object.
+        let vk = unsafe { start.byte_add(vk_at) }.cast::<vk_device>();
+        // SAFETY: `vk` is the member of a live nvk_device-sized object.
+        assert_eq!(unsafe { kmd_of(vk) }, kmd.as_ptr());
+    }
 }

@@ -42,6 +42,7 @@ use nvkmd_sys::{
 };
 
 use super::dev::{RmDev, logical_device};
+use super::object::{self, Object};
 use super::sync::{is_timeline, payload};
 use super::{Diag, diag, rm_result, try_alloc_zeroed, unsupported, vk_error, vk_errorf};
 
@@ -115,6 +116,19 @@ fn list_len<T>(items: &[T]) -> u32 {
     u32::try_from(items.len()).expect("submission lists hold at most u32::MAX entries")
 }
 
+// SAFETY: `#[repr(C)]` with its `nvkmd_ctx` first; only this module hands out
+// bases with `CTX_OPS`, each inside a boxed `RmCtx`.
+unsafe impl Object for RmCtx {
+    type Base = nvkmd_ctx;
+    type Ops = nvkmd_ctx_ops;
+    fn ops(base: &nvkmd_ctx) -> *const nvkmd_ctx_ops {
+        base.ops
+    }
+    fn ours() -> *const nvkmd_ctx_ops {
+        &raw const CTX_OPS
+    }
+}
+
 impl RmCtx {
     /// Our context behind Mesa's pointer, or `None` for NULL or another
     /// backend's.
@@ -123,14 +137,8 @@ impl RmCtx {
     /// `base` is NULL or points to a live `nvkmd_ctx` that no other call uses
     /// while the reference lives (Mesa serialises calls per context).
     unsafe fn from_base<'a>(base: *mut nvkmd_ctx) -> Option<&'a mut Self> {
-        // SAFETY: NULL or a live nvkmd_ctx (caller).
-        let ctx = unsafe { base.as_ref() }?;
-        if !core::ptr::eq(ctx.ops, &raw const CTX_OPS) {
-            return None;
-        }
-        // SAFETY: a ctx with our ops is the first field of a live `RmCtx`,
-        // not used by another call meanwhile (caller).
-        Some(unsafe { &mut *base.cast::<Self>() })
+        // SAFETY: NULL or a live nvkmd_ctx used by this call alone (caller).
+        unsafe { object::recover_mut(base) }
     }
 
     /// The context's device.
@@ -410,11 +418,9 @@ pub(super) unsafe extern "C" fn dev_create_shared_ctx(
 /// A context `create_ctx` returned, not used again.
 unsafe extern "C" fn ctx_destroy(base: *mut nvkmd_ctx) {
     nv_ffi::guard_or_abort::<Diag, ()>("nvkmd_ctx.destroy", || {
-        // SAFETY: a live context (contract).
-        unsafe { ctx_of(base) };
-        // SAFETY: a ctx with our ops is the first field of an `RmCtx` that
-        // `create` leaked with Box::into_raw; this is its one destroy.
-        let ctx = unsafe { Box::from_raw(base.cast::<RmCtx>()) };
+        // SAFETY: a live context, not used again (contract).
+        let ctx = unsafe { object::take::<RmCtx>(base) }
+            .expect("Mesa destroys its own backend's contexts");
         if let Some(channel) = ctx.channel {
             // SAFETY: the device's live RM device.
             let status = unsafe { nv_rm_context_destroy(ctx.dev().rm(), channel) };
@@ -689,4 +695,28 @@ unsafe extern "C" fn ctx_sync(base: *mut nvkmd_ctx, log: *mut vk_object_base) ->
         let status = unsafe { nv_rm_wait(ctx.dev().rm(), channel, token, u64::MAX) };
         rm_result(log, status, "wait for context completion")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_list_may_be_null() {
+        // SAFETY: count 0 reads nothing.
+        let empty: &[u64] = unsafe { list(core::ptr::null(), 0) };
+        assert_eq!(empty.len(), 0);
+        assert!(list_ptr(empty).is_null());
+        assert_eq!(list_len(empty), 0);
+    }
+
+    #[test]
+    fn a_list_borrows_its_count() {
+        let items = [3_u64, 5, 7];
+        // SAFETY: readable for 2 elements, not written meanwhile.
+        let borrowed = unsafe { list(items.as_ptr(), 2) };
+        assert_eq!(borrowed, &[3, 5]);
+        assert_eq!(list_ptr(borrowed), items.as_ptr());
+        assert_eq!(list_len(borrowed), 2);
+    }
 }

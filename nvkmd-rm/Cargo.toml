@@ -10,8 +10,10 @@ description = "NVK's nvkmd backend over the RM, linked into libvulkan_nouveau as
 [lib]
 crate-type = ["staticlib"]
 # The library calls Mesa's hidden-visibility functions, which only a link with
-# Mesa's objects resolves: its tests are mesa/tests/run-nvkmd-harness.py.
-test = false
+# Mesa's objects resolves. Its unit tests (natively and under Miri) cover the
+# parts that reach neither Mesa nor the RM; a test that pulls in an ops table
+# or a Mesa/RM call does not link and belongs in mesa/tests/run-nvkmd-harness.py,
+# which drives the entries themselves.
 doctest = false
 
 [dependencies]
