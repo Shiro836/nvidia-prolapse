@@ -199,6 +199,25 @@ fn allocations(world: &World) {
     assert_eq!(failed, Err(VK_ERROR_OUT_OF_DEVICE_MEMORY));
     assert_eq!(state().mem.binds, 0, "no VA for a failed allocation");
     world.expect_not_lost("RM allocation fails");
+
+    // Rounding a size this close to 2^64 up to 64 KiB pages would wrap.
+    world.case("device memory too large to round");
+    let huge = world
+        .dev
+        .alloc_mem(
+            log,
+            u64::MAX - 10,
+            4 * KIB,
+            NVKMD_MEM_LOCAL | NVKMD_MEM_VRAM,
+        )
+        .map(Mem::unref);
+    note(format!("device memory too large to round: {huge:?}"));
+    assert_eq!(huge, Err(VK_ERROR_OUT_OF_DEVICE_MEMORY));
+    assert_eq!(state().mem.allocs, 0, "nothing is asked of the RM");
+    assert!(
+        state().diagnostic.contains("cannot be rounded"),
+        "the refusal is named"
+    );
 }
 
 fn tiled(world: &World) {
