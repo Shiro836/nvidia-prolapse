@@ -1565,7 +1565,7 @@ fn queue_ref(inner: &Inner, context: u64) -> Result<&Queue> {
         .ok_or_else(|| Error::Contract("unknown RM context".into()))
 }
 /// The deadline of a caller's wait. `u64::MAX` is the caller asking for no
-/// bound (RUST.md §7's exemption): a Vulkan `UINT64_MAX` timeout, or `nvkmd_rm.c`'s
+/// bound (RUST.md §7's exemption): a Vulkan `UINT64_MAX` timeout, or the nvkmd backend's
 /// ring-pressure and context-sync waits, which pass `UINT64_MAX` as NVK's nouveau
 /// backend does for the same operations (Mesa `nvkmd_nouveau_ctx.c`,
 /// `nvkmd_nouveau_exec_ctx_sync`: `drmSyncobjWait(..., INT64_MAX, ...)`). Such a

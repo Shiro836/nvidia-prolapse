@@ -62,7 +62,7 @@ and SYNC_FD export first waits for a pending signal (WAIT_PENDING,
 
 A GPU ring is finite (`gpu.rs` QUEUE_ENTRIES). A submit that finds it full
 CPU-waits for the queue's oldest batch on the submitting thread
-(`rm_ctx_submit`; stock's GPFIFO slot advance waits the same way,
+(the nvkmd backend's `submit`; stock's GPFIFO slot advance waits the same way,
 stock GPFIFO submit at ELF b7f0f0). Formerly native timeline waits
 went straight to the GPU, so one thread could deadlock itself: submit to QA
 waiting on S >= 1 (not signalled, no signal submitted), keep submitting to QA
@@ -218,13 +218,13 @@ timeouts (`build/fence-tracing/caller-release/FINDINGS.md`). Now:
   submitted commands (VUID-vkFreeMemory-memory-00677). Sparse queue binds, the
   only path that rebinds a live range, are not advertised (`has_sparse` unset:
   `nvk_physical_device.c:1388,1507`), and the bind context CPU-waits its
-  semaphores before any VA change (`nvkmd_rm.c` `rm_ctx_wait`). Driver-internal
+  semaphores before any VA change (the backend's context `wait`). Driver-internal
   frees of possibly in-flight memory (the old SLM area: `nvk_device.c:118`,
-  `nvk_queue.c:65`) go through `rm_va_free` -> `nv_rm_va_free`, i.e. deferred.
+  `nvk_queue.c:65`) go through the backend's `va_free` -> `nv_rm_va_free`, i.e. deferred.
 * Remaining synchronous waits are all explicit or bounded: caller waits
   (`nv_rm_wait`, `nv_rm_sync_wait_many`, Mesa's own `nvkmd_ctx_sync` used by
   `NVK_DEBUG=push_sync` and upload-queue syncs), the ring-pressure retry on the
-  caller's own oldest batch (`rm_ctx_submit`, like any GPFIFO producer; it
+  caller's own oldest batch (the backend's `submit`, like any GPFIFO producer; it
   terminates because no received wait depends on unsubmitted work, see
   "Wait-before-signal and ring pressure"),
   `nv_rm_context_destroy` (own queue, 5 s bound, then loss) and close (5 s).
@@ -247,7 +247,7 @@ defers both — a superset that never waits.
 imports the dma-buf through `nvkmd_dev_import_dma_buf`
 (`nvk_device_memory.c:74`) only to read `mem->flags` (`:103`) and then unrefs
 it (`:111`); NVK's nvkmd import contract always returns a VA-bound memory
-(`rm_mem_import`, and NVK reads `mem->va->addr` directly, e.g.
+(the backend's `dev_import_dma_buf`, and NVK reads `mem->va->addr` directly, e.g.
 `nvk_buffer.c:261`), so skipping the temporary bind needs an NVK change. With
 deferred reclamation that bind/unbind never waits; a flags-only import op is a
 possible later optimisation.

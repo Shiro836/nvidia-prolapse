@@ -148,8 +148,8 @@ pub struct Reservation {
 }
 
 impl Reservation {
-    /// Validates the size and alignment of an `alloc_va` request (`nvkmd_rm.c`
-    /// `rm_va_alloc`); [`Reservation::target`] then says where it goes.
+    /// Validates the size and alignment of an `alloc_va` request;
+    /// [`Reservation::target`] then says where it goes.
     ///
     /// # Errors
     /// [`VaError::Sparse`] for sparse reservations, [`VaError::Size`] for an
@@ -237,7 +237,7 @@ impl Range {
 }
 
 /// Checks a bind of `memory` (an allocation of `memory_size` bytes) into a
-/// reservation (`nvkmd_rm.c` `rm_va_bind`). The VA range itself is checked by
+/// reservation. The VA range itself is checked by
 /// the unbind of that range that precedes every bind.
 ///
 /// # Errors
@@ -251,7 +251,7 @@ pub fn check_bind(memory: Range, memory_size: ByteSize) -> Result<(), VaError> {
 }
 
 /// An accepted unbind of a range of a reservation: which bindings it
-/// removes (`nvkmd_rm.c` `rm_va_unbind`).
+/// removes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unbind(Range);
 
@@ -300,7 +300,6 @@ mod tests {
 
     #[test]
     fn reservations_are_page_granular_and_fit_the_window() {
-        // nvkmd_rm.c rm_va_alloc: size and alignment checks.
         assert_eq!(
             reserve(1, 0),
             Ok(Reservation {
@@ -330,7 +329,7 @@ mod tests {
 
     #[test]
     fn replay_reservations_come_from_the_upper_half() {
-        // nvkmd_rm.c rm_va_alloc heap choice, nvkmd_nouveau_dev.c:51-58.
+        // The heap choice of nvkmd_nouveau_dev.c:51-58.
         let none = GpuVa::new(0);
         assert_eq!(
             Reservation::target(VaFlags::default(), none),
@@ -361,7 +360,6 @@ mod tests {
 
     #[test]
     fn released_ranges_return_to_the_heap_of_their_address() {
-        // nvkmd_rm.c rm_va_release.
         assert_eq!(Heap::of(WINDOW_START), Heap::Ordinary);
         assert_eq!(
             Heap::of(GpuVa::new(REPLAY_START.get() - 4 * KIB)),
@@ -376,7 +374,6 @@ mod tests {
 
     #[test]
     fn fixed_addresses_must_hold_the_whole_aligned_reservation_in_the_replay_heap() {
-        // nvkmd_rm.c rm_va_alloc fixed-address check.
         let r = reserve(64 * KIB, 64 * KIB).unwrap();
         assert!(r.fixed_fits(REPLAY_START));
         assert!(r.fixed_fits(GpuVa::new(WINDOW_END.get() - 64 * KIB)));
@@ -389,7 +386,6 @@ mod tests {
 
     #[test]
     fn binds_stay_inside_their_memory() {
-        // nvkmd_rm.c rm_va_bind range check.
         assert_eq!(check_bind(Range::new(0, bytes(8)), bytes(8)), Ok(()));
         assert_eq!(check_bind(Range::new(8, bytes(0)), bytes(8)), Ok(()));
         assert_eq!(
@@ -404,7 +400,6 @@ mod tests {
 
     #[test]
     fn unbinds_remove_whole_bindings() {
-        // nvkmd_rm.c rm_va_unbind.
         let size = bytes(64 * KIB);
         let bindings = [
             Range::new(32 * KIB, bytes(16 * KIB)),

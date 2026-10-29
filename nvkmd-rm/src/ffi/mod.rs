@@ -131,9 +131,9 @@ fn unsupported(log: *mut vk_object_base, what: &str) -> VkResult {
 
 /// Zeroed heap storage for one `T`, or `None` when the allocator is out of
 /// memory. Rust's system allocator serves a zeroed request with `calloc`,
-/// the call the C backend makes for the same object, so host memory
-/// exhaustion is `VK_ERROR_OUT_OF_HOST_MEMORY` at the same point instead of
-/// an abort. (`Box::try_new` is not stable.)
+/// as NVK's backends allocate their objects (`nvkmd_nouveau_*.c`), so host
+/// memory exhaustion is `VK_ERROR_OUT_OF_HOST_MEMORY` instead of an abort.
+/// (`Box::try_new` is not stable.)
 fn try_alloc_zeroed<T>() -> Option<Box<MaybeUninit<T>>> {
     const { assert!(size_of::<T>() != 0, "backend objects are not zero-sized") };
     let layout = Layout::new::<T>();
@@ -148,8 +148,7 @@ fn try_alloc_zeroed<T>() -> Option<Box<MaybeUninit<T>>> {
 
 /// Zeroed heap storage for `count` values of `T`, or `None` when the
 /// allocator is out of memory or the size overflows. Served by `calloc`, as
-/// [`try_alloc_zeroed`], for the arrays the C backend `calloc`s (app-sized
-/// wait lists).
+/// [`try_alloc_zeroed`], for app-sized arrays (wait lists).
 fn try_alloc_zeroed_slice<T>(count: usize) -> Option<Box<[MaybeUninit<T>]>> {
     const { assert!(size_of::<T>() != 0, "backend arrays are not zero-sized") };
     if count == 0 {

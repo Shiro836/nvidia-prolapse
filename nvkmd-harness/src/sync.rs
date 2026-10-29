@@ -341,8 +341,7 @@ fn finish(world: &World, sync: &Sync) {
     );
 }
 
-/// The four wait modes of the C backend's tests: binary/timeline, complete or
-/// pending.
+/// The four wait modes: binary/timeline, complete or pending.
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Binary,

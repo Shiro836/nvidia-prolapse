@@ -2,10 +2,10 @@
  *
  * nvrm G2: dma-buf import/export and DRM format modifiers.
  *
- * Memory follows NVK on the same backend (nvkmd_rm.c): an imported dma-buf
- * is nv_rm_import'ed as kindless memory and the image VA carries the PTE
- * kind nil derives from the modifier (rm_mem_import + rm_va_bind); an
- * export is nv_rm_export of the resource's allocation (rm_mem_export).
+ * Memory follows NVK on the same RM (the nvkmd-rm backend): an imported
+ * dma-buf is nv_rm_import'ed as kindless memory and the image VA carries the
+ * PTE kind nil derives from the modifier (dev_import_dma_buf + va_bind_mem);
+ * an export is nv_rm_export of the resource's allocation (mem_export).
  * Layouts are nil's DRM-modifier layouts (nil_image_init with .modifier,
  * as nvk_image_init for VK_EXT_image_drm_format_modifier), modifiers come
  * from nil_drm_format_mods_for_format (NVK's modifier list): uncompressed
@@ -465,7 +465,7 @@ nvrm_resource_from_handle(struct pipe_screen *pscreen, const struct pipe_resourc
       return NULL;
    }
    /* Kindless imported memory, VA with the modifier's PTE kind (LINEAR:
-    * kind 0), as NVK binds an imported image (nvkmd_rm.c rm_va_bind). */
+    * kind 0), as NVK binds an imported image (nvkmd-rm va_bind_mem). */
    uint64_t mapping;
    status = nv_rm_bind(screen->rm, alloc.id, 0, size, va, res->image.pte_kind, &mapping);
    if (status) {

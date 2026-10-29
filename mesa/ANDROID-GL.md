@@ -108,7 +108,7 @@ exist and round-trip.
    (nil has no 16-bit GOB modifier encoding, NVK the same). None external-only: LINEAR imports sample
    through a nil pitch TIC and render through LAYOUT_PITCH (pitch must be a 128 B multiple, else a
    named abort at bind time; NVK's LINEAR images are 128 B aligned). Imports = `nv_rm_import` + VA
-   with the modifier's PTE kind (nvkmd_rm.c); exports = `nv_rm_export`, uncompressed like NVK's.
+   with the modifier's PTE kind (as NVK's nvkmd backend); exports = `nv_rm_export`, uncompressed like NVK's.
 2. **EGL_ANDROID_native_fence_sync / EGL_KHR_wait_sync.** `caps.native_fence_fd`;
    `fence_get_fd` = `nv_rm_context_fence` (semaphore sync_file for the batch token; an empty batch
    when a fence is requested with no work), `create_fence_fd` dups the sync_file,

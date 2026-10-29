@@ -3,7 +3,7 @@
  * nvrm G1 textures:
  *  - tiled (block-linear) VRAM images laid out by nil (nil_image_init), with
  *    the PTE kind nil chose, as NVK binds image planes (nvk_image.c +
- *    nvkmd_rm.c rm_va_bind);
+ *    nvkmd-rm va_bind_mem);
  *  - copy-engine transfers between such an image and a linear GART staging
  *    buffer, following NVK's nouveau_copy_rect (nvk_cmd_copy.c:186-370);
  *  - texture headers (TIC) from nil_image_view_descriptor and sampler

@@ -55,7 +55,7 @@ pub enum PushError {
     },
 }
 
-/// The RM's form of `exec` (`nvkmd_rm.c` `rm_ctx_exec`).
+/// The RM's form of `exec`.
 ///
 /// # Errors
 /// [`ExecError::InvalidRange`] for a push the GPU cannot fetch.
@@ -109,8 +109,7 @@ pub fn first_chunk(len: usize, incomplete: impl Fn(usize) -> bool) -> Result<usi
 }
 
 /// Checks every submission boundary of `len` pending pushes before any of
-/// them is submitted, so a list that cannot be cut is refused whole
-/// (`nvkmd_rm.c` `rm_ctx_flush_signals`, the validation loop).
+/// them is submitted, so a list that cannot be cut is refused whole.
 ///
 /// # Errors
 /// [`PushError::ChainTooLong`] with the index where no cut is possible.
@@ -138,7 +137,7 @@ mod tests {
 
     #[test]
     fn push_ranges_must_be_words_below_the_limit() {
-        // nvkmd_rm.c rm_ctx_exec: 4-byte aligned address and size, 0 < size < 8 MiB.
+        // 4-byte aligned address and size, 0 < size < 8 MiB.
         for (addr, size) in [(0x1002, 4), (0x1000, 6), (0x1000, 0), (0x1000, 1 << 23)] {
             assert_eq!(
                 exec(push(addr, size)),
@@ -195,7 +194,7 @@ mod tests {
 
     #[test]
     fn lists_are_cut_at_the_push_limit() {
-        // nvkmd_rm.c rm_ctx_flush_signals with 0/1/999/1000/1001/2000 complete pushes.
+        // 0/1/999/1000/1001/2000 complete pushes.
         assert_eq!(chunks(&[]), Ok(vec![]));
         assert_eq!(chunks(&[false]), Ok(vec![1]));
         assert_eq!(chunks(&[false; 999]), Ok(vec![999]));
@@ -206,7 +205,7 @@ mod tests {
 
     #[test]
     fn a_cut_never_separates_a_push_from_its_continuation() {
-        // nvkmd_rm.c rm_ctx_flush_signals: both loops shorten a chunk ending on an incomplete push.
+        // Both the validation and the submission cut shorten a chunk ending on an incomplete push.
         let mut list = vec![false; 1001];
         list[998] = true;
         list[999] = true;
@@ -218,7 +217,7 @@ mod tests {
 
     #[test]
     fn an_uncuttable_chain_is_refused_before_anything_is_submitted() {
-        // nvkmd_rm.c rm_ctx_flush_signals, the validation loop: a 1000-push incomplete chain, at the start or later.
+        // A 1000-push incomplete chain, at the start or later.
         assert_eq!(
             chunks(&[true; 1000]),
             Err(PushError::ChainTooLong { at: 0 })

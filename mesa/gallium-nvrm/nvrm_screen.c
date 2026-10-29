@@ -61,8 +61,8 @@ nvrm_bo_alloc_va(struct nvrm_screen *screen, uint64_t size, enum nvrm_domain dom
    memset(bo, 0, sizeof(*bo));
    size = align64(MAX2(size, 1), 4096);
    /* Plain VRAM (never compressible: buffers/arenas are pitch, kind 0,
-    * NVK's non-tiled nvkmd_mem; nvkmd_rm.c:740-750 asks compression only
-    * for 64 KiB-multiple images). */
+    * NVK's non-tiled nvkmd_mem; NVK's backend asks compression only for
+    * 64 KiB-multiple images, nvkmd-rm-logic memory.rs). */
    const uint32_t placement = domain == NVRM_DOMAIN_GART ? NV_RM_PLACEMENT_GART
                                                          : NV_RM_PLACEMENT_VRAM;
    struct NvRmAllocation alloc;
@@ -83,8 +83,8 @@ nvrm_bo_alloc_va(struct nvrm_screen *screen, uint64_t size, enum nvrm_domain dom
       nv_rm_free(screen->rm, alloc.id);
       return false;
    }
-   /* Pitch (kind 0) mapping: G0a resources are linear, as NVK's
-    * non-tiled buffers (nvkmd_rm.c rm_mem_alloc_kind + rm_va_bind kind 0). */
+   /* Pitch (kind 0) mapping: these resources are linear, as NVK's
+    * non-tiled buffers (nvkmd-rm alloc + va_bind_mem with kind 0). */
    uint64_t mapping;
    status = nv_rm_bind(screen->rm, alloc.id, 0, size, va, 0, &mapping);
    if (status) {
@@ -100,7 +100,7 @@ nvrm_bo_alloc_va(struct nvrm_screen *screen, uint64_t size, enum nvrm_domain dom
    uintptr_t cpu = 0;
    if (domain != NVRM_DOMAIN_VRAM) {
       /* GART: system pages; VRAM_MAPPED: BAR1 (the backend maps VRAM
-       * allocations through BAR1, as nvkmd_rm.c rm_mem_map). */
+       * allocations through BAR1, as NVK's backend mem_map). */
       status = nv_rm_map(screen->rm, alloc.id, &cpu);
       if (status || !cpu) {
          nvrm_error("nv_rm_map of %" PRIu64 " B %s failed: %d\n", size,
@@ -199,7 +199,7 @@ nvrm_shader_heap_write(struct nvrm_screen *screen, uint64_t va, const void *data
 
 /* G1 tiled image: VRAM, not CPU-mapped, VA bound with the PTE kind nil
  * chose (NVK: memory allocated kindless, nvk_image binds the plane VA with
- * nil.pte_kind at max(nil.align_B, bind_align_B); nvkmd_rm.c rm_va_bind). */
+ * nil.pte_kind at max(nil.align_B, bind_align_B); nvkmd-rm va_bind_mem). */
 bool
 nvrm_bo_alloc_image(struct nvrm_screen *screen, const struct nil_image *image,
                     struct nvrm_bo *bo)
@@ -254,7 +254,7 @@ nvrm_bo_free(struct nvrm_screen *screen, struct nvrm_bo *bo)
       return;
    if (bo->map)
       nv_rm_unmap(screen->rm, bo->mem);
-   /* Same order as nvkmd_rm.c: VA (and its mappings) first, then memory;
+   /* Same order as NVK's backend: VA (and its mappings) first, then memory;
     * the backend defers both past work already submitted. */
    int32_t status = nv_rm_va_free(screen->rm, &bo->mapping, 1, bo->va, bo->size,
                                   nvrm_va_release, screen);
@@ -284,9 +284,9 @@ nvrm_submit_wait_fds(struct nvrm_screen *screen, uint64_t va, uint32_t size_B,
 }
 
 /* One batch of GPFIFO entries in order, as NVK's queue submits a command
- * buffer's pushes (nvkmd_rm.c rm_ctx_exec: NO_PREFETCH / INCOMPLETE flags
- * per entry). Ring pressure (VK_NOT_READY = 1, nothing queued, *token = the
- * oldest batch): wait for that batch and retry, as nvkmd_rm.c's submit. */
+ * buffer's pushes (nvkmd-rm ctx_exec: NO_PREFETCH / INCOMPLETE flags per
+ * entry). Ring pressure (VK_NOT_READY = 1, nothing queued, *token = the
+ * oldest batch): wait for that batch and retry, as NVK's backend submits. */
 bool
 nvrm_submit_async(struct nvrm_screen *screen, const struct NvRmExec *execs,
                   uint32_t exec_count, const int *wait_fds, uint32_t wait_count,
@@ -1182,7 +1182,7 @@ nvrm_screen_create(int fd, const struct pipe_screen_config *config)
    screen->bar_full = ri->bar_size >= ri->vram_size &&
                       !debug_get_bool_option("NVRM_FORCE_SMALL_BAR", false);
    screen->debug_stats = debug_get_bool_option("NVRM_DEBUG_STATS", false);
-   /* Same nv_device_info as nvkmd_rm_try_create_pdev (nvkmd_rm.c). */
+   /* Same nv_device_info as NVK's backend (nvkmd_rm_try_create_pdev). */
    screen->info = (struct nv_device_info){
       .type = NV_DEVICE_TYPE_DIS,
       .device_id = ri->device_id,
@@ -1206,7 +1206,7 @@ nvrm_screen_create(int fd, const struct pipe_screen_config *config)
             ri->name);
    snprintf(screen->info.chipset_name, sizeof(screen->info.chipset_name),
             "NV%03X", ri->chipset);
-   /* As nvkmd_rm.c / the nouveau winsys (nouveau_device.c): shared memory
+   /* As NVK's backend / the nouveau winsys (nouveau_device.c): shared memory
     * configurations from the SM version, non-coherent atom = cache line. */
    nv_device_info_init_shared_mem_sizes(&screen->info);
    screen->info.nc_atom_size_B = util_cache_granularity();

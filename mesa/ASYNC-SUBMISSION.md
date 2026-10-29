@@ -14,7 +14,7 @@ WAIT can hide installation failure and kernel foreign-wait cleanup cannot be
 universally bounded.
 
 
-The C nvkmd adapter queues borrowed sync-file dependencies and push buffers with
+The nvkmd backend queues borrowed sync-file dependencies and push buffers with
 `nv_rm_submit_waits`. Success returns a native 64-bit completion token before GPU
 completion. `VK_NOT_READY` consumes nothing and returns the oldest outstanding
 token for outside-worker backpressure. The worker never sleeps for GPU progress.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! The two `vk_sync_type`s every physical device lists: a binary/timeline type
 //! with opaque-fd import and export, and a binary type with `sync_file` import
-//! and export (`nvkmd_rm.c` `rm_sync_type`, `rm_sync_file_type`). Separate
+//! and export. Separate
 //! types because opaque shared state and sync-file copies have different
 //! lifetime contracts; Mesa's external-handle queries then report same-type
 //! compatibility only. Both run the same RM payload operations.
@@ -53,7 +53,7 @@ const _: () = assert!(VK_SYNC_WAIT_PENDING == NV_RM_SYNC_WAIT_PENDING);
 const _: () = assert!(VK_SYNC_WAIT_ANY == NV_RM_SYNC_WAIT_ANY);
 
 /// The object Mesa allocates in place for each sync of these types: Mesa's
-/// `vk_sync` and the RM's payload id (`nvkmd_rm.c` `nvkmd_rm_sync`).
+/// `vk_sync` and the RM's payload id.
 #[repr(C)]
 struct RmSync {
     base: vk_sync,
@@ -177,7 +177,7 @@ fn id_of(sync: NonNull<RmSync>) -> *mut NvRmSyncId {
     member(sync.cast(), offset_of!(RmSync, id))
 }
 
-/// The device of a sync callback (`nvkmd_rm.c` `rm_sync_device`).
+/// The device of a sync callback.
 ///
 /// # Safety
 /// `vk` is the live `vk` member of an `nvk_device` (Mesa calls a sync type
@@ -189,8 +189,7 @@ unsafe fn device<'a>(vk: *mut vk_device) -> (NonNull<vk_device>, &'a RmDev) {
     (vk, dev)
 }
 
-/// The sync of a callback, checked to be of a type `dev` lists (the C
-/// backend asserts the same, `nvkmd_rm.c` `rm_sync`).
+/// The sync of a callback, checked to be of a type `dev` lists.
 ///
 /// # Safety
 /// `sync` is NULL or a live `vk_sync`.
@@ -209,8 +208,8 @@ unsafe fn sync_of(dev: &RmDev, sync: *mut vk_sync) -> NonNull<RmSync> {
 }
 
 /// The RM payload behind a sync a context waits on or signals, or `None`
-/// when the sync is of a type `dev` does not list (`nvkmd_rm.c` `rm_ctx_wait`,
-/// `rm_ctx_signal`: a type check, not an assertion, since any `vk_sync`
+/// when the sync is of a type `dev` does not list (a type check, not an
+/// assertion, since any `vk_sync`
 /// reaches a queue).
 ///
 /// # Safety
@@ -257,7 +256,7 @@ fn guarded(entry: &'static str, body: impl FnOnce() -> VkResult) -> VkResult {
     nv_ffi::guard::<Diag, VkResult>(entry, None, || VK_ERROR_DEVICE_LOST, body)
 }
 
-/// `nvkmd_rm.c` `rm_wait_status`: Mesa's loss count, then the RM's loss flag,
+/// The loss check of every wait: Mesa's loss count, then the RM's loss flag,
 /// which becomes Mesa's loss. One atomic load each, no lock.
 ///
 /// # Safety
@@ -292,7 +291,7 @@ unsafe extern "C" fn sync_init(vk: *mut vk_device, sync: *mut vk_sync, initial: 
         // SAFETY: the contract.
         let call = unsafe { call(vk, sync) };
         // SAFETY: the device's live RM device; the RM writes the sync's own
-        // id member, as the C backend passes it.
+        // id member, which this backend passes for it.
         let status =
             unsafe { nv_rm_sync_create(call.dev.rm(), call.flags(), initial, id_of(call.sync)) };
         rm_result(call.log(), status, "create sync payload")
@@ -301,7 +300,7 @@ unsafe extern "C" fn sync_init(vk: *mut vk_device, sync: *mut vk_sync, initial: 
 
 /// `finish`: drops this payload reference; accepted GPU submissions keep
 /// their own until they retire. A failure cannot be returned and is the
-/// device's loss (`nvkmd_rm.c` `rm_sync_finish`); Mesa's loss hook only
+/// device's loss; Mesa's loss hook only
 /// publishes and wakes, so this may run under Mesa's locks.
 ///
 /// # Safety
@@ -429,8 +428,7 @@ const STACK_POINTS: usize = 16;
 
 /// `wait_many`: waits on the caller's thread until the points complete (all,
 /// or any), the caller's deadline passes, or the device is lost. Loss is
-/// checked before the RM wait and again after it (`nvkmd_rm.c`
-/// `rm_sync_wait_many`). The deadline is the caller's: a host timeline signal
+/// checked before the RM wait and again after it. The deadline is the caller's: a host timeline signal
 /// may take arbitrarily long, and elapsed time is not loss.
 ///
 /// # Safety

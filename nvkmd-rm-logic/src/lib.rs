@@ -7,8 +7,7 @@
 //! submissions.
 //!
 //! The boundary crate turns NVK's arguments into these types, calls the
-//! functions here and carries out the result through the RM's C ABI. The rules
-//! are those of the C backend `mesa/nvkmd_rm.c`; each test names the line it pins.
+//! functions here and carries out the result through the RM's C ABI.
 //! Pure functions on `Copy` data: no state, usable from any thread.
 #![forbid(unsafe_code)]
 

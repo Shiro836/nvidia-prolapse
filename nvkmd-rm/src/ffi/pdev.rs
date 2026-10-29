@@ -5,8 +5,7 @@
 //! The probe accepts a PCI device of NVIDIA with a render node driven by
 //! `nvidia-drm`, opens the RM once to read what it reports, and closes it
 //! again; the logical devices made later reopen both (`create_dev`). The call
-//! sequence (render node open, version query, stat, RM open/close) and the
-//! results of every failure are those of `nvkmd_rm.c` `nvkmd_rm_try_create_pdev`.
+//! sequence is render node open, version query, stat, RM open/close.
 use std::ffi::{CStr, CString, c_int};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -167,8 +166,8 @@ unsafe fn nvidia_render_node(drm: &_drmDevice) -> Option<&CStr> {
     (!node.is_null()).then(|| unsafe { CStr::from_ptr(node) })
 }
 
-/// Opens `path` read-write, close-on-exec (§13), through libc's `open` as the
-/// C backend does.
+/// Opens `path` read-write, close-on-exec (§13), through libc's `open` as
+/// NVK's nouveau backend does (`nvkmd_nouveau_pdev.c`).
 pub(super) fn open_render_node(path: &CStr) -> Option<OwnedFd> {
     let flags = c_int::try_from(O_RDWR | O_CLOEXEC).expect("open flags fit int");
     // SAFETY: `path` is NUL-terminated; no O_CREAT, so no mode argument.
@@ -193,8 +192,7 @@ fn is_nvidia_drm(fd: &OwnedFd) -> bool {
     native
 }
 
-/// The probe after the output was cleared. Failure values and the order of
-/// render node, libdrm and RM calls are those of `nvkmd_rm.c` `nvkmd_rm_try_create_pdev`.
+/// The probe after the output was cleared.
 ///
 /// # Safety
 /// `drm` is a complete libdrm device record; `log` is NULL or a live Vulkan

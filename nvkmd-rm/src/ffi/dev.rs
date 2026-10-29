@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! The KMD device (`nvkmd_dev`): its own render node and RM device, the VA
 //! window NVK allocates from, and, for a logical Vulkan device, the loss hooks
-//! between Mesa and the RM (`nvkmd_rm.c` `rm_dev_create`, `rm_dev_destroy`).
+//! between Mesa and the RM.
 //!
 //! Loss crosses in both directions: Mesa's loss of the logical device reaches
 //! the RM through `vk_device.notify_lost` (`nv_rm_mark_lost`, which only
@@ -90,8 +90,8 @@ impl RmDev {
         unsafe { object::recover(base) }
     }
 
-    /// The KMD device of a logical device NVK made (`nvk_device.nvkmd`,
-    /// `nvkmd_rm.c` `rm_sync_device`), or `None` when it is another
+    /// The KMD device of a logical device NVK made (`nvk_device.nvkmd`),
+    /// or `None` when it is another
     /// backend's.
     ///
     /// # Safety
@@ -147,8 +147,7 @@ impl RmDev {
     /// report it (void callbacks, rollbacks of a call whose own failure is
     /// returned): through Mesa for a logical device, whose loss hook reaches
     /// the RM, or to the RM directly for the physical device's probe device.
-    /// It only publishes and wakes: no GPU wait, no backend lock
-    /// (`nvkmd_rm.c` `rm_mem_lost`).
+    /// It only publishes and wakes: no GPU wait, no backend lock.
     pub(super) fn publish_loss(&self, operation: &str, status: i32) {
         diag(format_args!(
             "Native Rust RM {operation} failed; device lost: {status}"
@@ -272,8 +271,7 @@ pub(super) unsafe fn logical_device(log: *mut vk_object_base) -> Option<NonNull<
     NonNull::new(unsafe { slot.read() })
 }
 
-/// `create_dev` after validation; the call order and failure values are
-/// `nvkmd_rm.c` `rm_dev_create`.
+/// `create_dev` after validation.
 ///
 /// # Safety
 /// `log` is NULL or a live Vulkan object; when it has a logical device, that
@@ -436,7 +434,7 @@ unsafe extern "C" fn check_status(vk: *mut vk_device) -> VkResult {
     )
 }
 
-/// The device's `destroy`, in `nvkmd_rm.c` `rm_dev_destroy` order: hooks cleared, RM
+/// The device's `destroy`, in this order: hooks cleared, RM
 /// device closed (it may still return VA ranges to the heap), render node
 /// closed, heap and lists finished, storage freed.
 ///

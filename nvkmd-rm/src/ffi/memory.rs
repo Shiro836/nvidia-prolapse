@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Memory (`nvkmd_mem`): the device's `alloc_mem`, `alloc_tiled_mem` and
-//! `import_dma_buf` entries and the memory ops table (`nvkmd_rm.c`
-//! `rm_mem_alloc_kind` … `rm_mem_handle`).
+//! `import_dma_buf` entries and the memory ops table.
 //!
 //! Every allocation gets its own VA reservation of its whole size, bound at
 //! creation, through Mesa's `nvkmd_dev_alloc_va` and `nvkmd_va_bind_mem` (so
@@ -249,7 +248,7 @@ unsafe fn create(
     }
 }
 
-/// An RM allocation of `kind` (`nvkmd_rm.c` `rm_mem_alloc_kind`): placement,
+/// An RM allocation of `kind`: placement,
 /// size and alignment from the policy, then the RM allocation and its VA.
 fn alloc(
     dev: &RmDev,
@@ -315,7 +314,7 @@ fn alloc(
     finish(dev, log, storage, allocation, source)
 }
 
-/// A dma-buf import (`nvkmd_rm.c` `rm_mem_import`).
+/// A dma-buf import.
 fn import(dev: &RmDev, log: *mut vk_object_base, fd: c_int) -> Result<*mut nvkmd_mem, VkResult> {
     let Some(storage) = try_alloc_zeroed::<RmMem>() else {
         return Err(vk_error(log, VK_ERROR_OUT_OF_HOST_MEMORY));
@@ -471,7 +470,7 @@ unsafe extern "C" fn mem_map(
     )
 }
 
-/// `map` after validation (`nvkmd_rm.c` `rm_mem_map`).
+/// `map` after validation.
 fn map(mem: &RmMem, log: *mut vk_object_base) -> Result<*mut c_void, VkResult> {
     let dev = mem.dev();
     let mut address = 0_usize;

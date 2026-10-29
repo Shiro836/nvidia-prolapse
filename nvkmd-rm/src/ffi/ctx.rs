@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Contexts (`nvkmd_ctx`): the device's `create_ctx` and `create_shared_ctx`
-//! entries and the context ops table (`nvkmd_rm.c` `rm_ctx_submit` …
-//! `nvkmd_rm_create_shared_ctx`).
+//! entries and the context ops table.
 //!
 //! A context with engines owns one RM context (a channel); a bind-only
 //! context (`NVKMD_ENGINE_BIND`) owns none and carries out its work on the
@@ -148,7 +147,7 @@ impl RmCtx {
 
     /// Submits `pushes` with the pending waits and `signals` as one batch,
     /// waiting out ring pressure; on success the waits are consumed and the
-    /// batch's token is the context's last (`nvkmd_rm.c` `rm_ctx_submit`).
+    /// batch's token is the context's last.
     fn submit(
         &mut self,
         log: *mut vk_object_base,
@@ -203,7 +202,7 @@ impl RmCtx {
 
     /// Submits the pending pushes and waits, `signals` on the last
     /// submission; a call with no pushes still submits when it has waits or
-    /// signals (`nvkmd_rm.c` `rm_ctx_flush_signals`).
+    /// signals.
     fn flush_signals(&mut self, log: *mut vk_object_base, signals: &[NvRmSyncPoint]) -> VkResult {
         let Some(channel) = self.channel else {
             // A bind context never holds pushes or GPU waits (`exec` refuses
@@ -273,8 +272,7 @@ unsafe fn ctx_of<'a>(base: *mut nvkmd_ctx) -> &'a mut RmCtx {
     unsafe { RmCtx::from_base(base) }.expect("Mesa calls its own backend's contexts")
 }
 
-/// `create_ctx` and `create_shared_ctx` after their own checks
-/// (`nvkmd_rm.c` `rm_ctx_create_in`).
+/// `create_ctx` and `create_shared_ctx` after their own checks.
 ///
 /// # Safety
 /// `base` is a live device, `log` a live Vulkan object, `share` NULL or a
@@ -437,7 +435,7 @@ unsafe extern "C" fn ctx_destroy(base: *mut nvkmd_ctx) {
 /// The context's `wait`: work already pending is flushed first, so the
 /// waits precede only later work; consecutive waits share one acquire
 /// prefix. A bind context waits on the CPU instead, since its VA changes run
-/// on the CPU (`nvkmd_rm.c` `rm_ctx_wait`).
+/// on the CPU.
 ///
 /// # Safety
 /// Mesa's `nvkmd_ctx_ops.wait` contract: `waits` readable for `count`
@@ -501,8 +499,7 @@ unsafe extern "C" fn ctx_wait(
 
 /// The context's `exec`: appends pushes to the pending list, all or none: a
 /// refused push leaves the list as it was, so a valid prefix ending on an
-/// incomplete push cannot leave a chain no flush can cut (`nvkmd_rm.c`
-/// `rm_ctx_exec`).
+/// incomplete push cannot leave a chain no flush can cut.
 ///
 /// # Safety
 /// Mesa's `nvkmd_ctx_ops.exec` contract: `execs` readable for `count`
@@ -548,7 +545,7 @@ unsafe extern "C" fn ctx_exec(
 
 /// The context's `bind`: pending work is flushed, then each VA change runs
 /// on the CPU through Mesa's wrappers, in order, stopping at the first
-/// failure (`nvkmd_rm.c` `rm_ctx_bind`).
+/// failure.
 ///
 /// # Safety
 /// Mesa's `nvkmd_ctx_ops.bind` contract: `binds` readable for `count`
@@ -600,7 +597,7 @@ unsafe extern "C" fn ctx_bind(
 /// The context's `signal`: a channel context submits the pending work with
 /// these signals on its last batch (one batch even without work); every
 /// signal is checked before anything is submitted. A bind context flushes
-/// and signals on the CPU (`nvkmd_rm.c` `rm_ctx_signal`).
+/// and signals on the CPU.
 ///
 /// # Safety
 /// Mesa's `nvkmd_ctx_ops.signal` contract: `signals` readable for `count`

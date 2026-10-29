@@ -34,7 +34,7 @@ use nvkmd_sys::{
 use crate::fake;
 use nv_rm_core::conv::usize_from_u32;
 
-/// PCI vendor id of NVIDIA (`nvkmd_rm.c` `NVIDIA_VENDOR_ID`).
+/// PCI vendor id of NVIDIA, the only vendor the backend probes.
 const NVIDIA_VENDOR_ID: u16 = 0x10de;
 
 const fn offset(member: nvkmd_sys_layout) -> usize {

@@ -49,7 +49,7 @@ impl crate::ffi::Failable for Bridge {
 /// An entry point that reports VK_ERROR_DEVICE_LOST publishes the loss on
 /// its device before returning: Vulkan treats the logical device as lost
 /// from then on (spec "Lost Device"), and Mesa learns it on its next status
-/// or wait query (nvkmd_rm.c rm_wait_status, rm_check_status). Publication
+/// or wait query (the nvkmd backend's loss check). Publication
 /// is CPU-only (Core::mark_lost); stopping submissions follows on the next
 /// locked call. The guard's own failure value skips this: that object is
 /// already failed, or it belongs to the parent of a forked child, whose
@@ -79,7 +79,7 @@ pub(super) fn present(bridge: Option<&Bridge>) -> Result<&Bridge> {
     bridge.ok_or_else(|| Error::Contract("null RM bridge".into()))
 }
 /// `VkResult` values the entry points return (Vulkan registry `vk.xml`, enum
-/// `VkResult`); `nvkmd_rm.c` passes them to Mesa as they are.
+/// `VkResult`); the nvkmd backend passes them to Mesa as they are.
 pub(super) mod vk {
     pub(super) const ERROR_OUT_OF_HOST_MEMORY: i32 = -1;
     pub(super) const ERROR_OUT_OF_DEVICE_MEMORY: i32 = -2;
@@ -1191,7 +1191,7 @@ pub(crate) unsafe extern "C" fn nv_rm_exec(
                 return result;
             }
             // Synchronous by contract (nv_rm.h nv_rm_exec), so unbounded like
-            // nvkmd_rm.c's context sync; see `deadline` for how loss ends it.
+            // the nvkmd backend's context sync; see `deadline` for how loss ends it.
             // SAFETY: this entry point's own device argument.
             let wait = unsafe { nv_rm_wait(p, NvRmContextId::new(id), token, u64::MAX) };
             if wait != 0 {
@@ -1963,7 +1963,7 @@ mod tests {
     use std::time::Duration;
     #[test]
     fn status_codes_match_the_c_abi() {
-        // nvkmd_rm.c rm_result() returns the status as the VkResult. A failure
+        // The nvkmd backend returns the status as the VkResult. A failure
         // of a created device that is neither loss nor out of memory is an
         // implementation failure, VK_ERROR_UNKNOWN (-13): submission, waits and
         // status queries have no VK_ERROR_INITIALIZATION_FAILED.

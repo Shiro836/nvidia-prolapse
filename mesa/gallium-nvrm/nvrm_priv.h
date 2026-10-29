@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * nvrm: a gallium driver over the native RM backend (nv_rm.h, the same flat C
- * API NVK's nvkmd_rm.c uses), NAK and nil.
+ * API NVK's nvkmd backend uses), NAK and nil.
  *
  * G0a: screen + one channel per screen with NVK's 3D init, linear
  * GART-backed resources, CLEAR_SURFACE colour clears, synchronous flush

@@ -8,7 +8,7 @@ pub const FOREVER: u64 = u64::MAX;
 
 /// The relative timeout of a wait whose absolute `deadline` (Mesa's
 /// monotonic clock, `os_time_get_nano`) is `deadline`: infinite stays
-/// infinite, a past deadline polls once (`nvkmd_rm.c` `rm_sync_wait_many`).
+/// infinite, a past deadline polls once.
 /// The RM's wait owns the deadline; nothing here shortens or extends it.
 /// `now` reads the clock, only for a finite deadline: an infinite wait (the
 /// common `UINT64_MAX` one) costs no clock read (RUST.md §14).
@@ -22,9 +22,9 @@ pub fn wait_timeout(deadline: u64, now: impl FnOnce() -> u64) -> u64 {
 }
 
 /// Mesa's clock reading (`int64_t os_time_get_nano()`, `CLOCK_MONOTONIC`) as
-/// the unsigned time the deadlines are expressed in. The C backend converts
-/// it implicitly to `uint64_t`; a monotonic reading is never negative, and
-/// the conversion is the same bit reinterpretation C performs.
+/// the unsigned time the deadlines are expressed in (`uint64_t` in the
+/// `vk_sync` interface); a monotonic reading is never negative, and the
+/// conversion is the bit reinterpretation C's implicit conversion performs.
 #[must_use]
 pub const fn clock_reading(now: i64) -> u64 {
     now.cast_unsigned()
@@ -62,7 +62,7 @@ pub const fn shared_source(shared: bool) -> u32 {
 }
 
 /// `reserve_signal`'s answer: reserved only when the RM call succeeded and
-/// reported the reservation (`nvkmd_rm.c` `rm_sync_reserve_signal`).
+/// reported the reservation.
 #[must_use]
 pub const fn reserved(succeeded: bool, done: u32) -> bool {
     succeeded && done != 0
@@ -74,14 +74,13 @@ mod tests {
 
     #[test]
     fn infinite_deadlines_stay_infinite() {
-        // nvkmd_rm.c rm_sync_wait_many: the timeout.
         let unread = || -> u64 { panic!("an infinite wait reads no clock") };
         assert_eq!(wait_timeout(FOREVER, unread), FOREVER);
     }
 
     #[test]
     fn finite_deadlines_become_the_remaining_time() {
-        // nvkmd_rm.c rm_sync_wait_many: deadline > now ? deadline - now : 0.
+        // deadline > now ? deadline - now : 0.
         assert_eq!(wait_timeout(1_002_000_000, || 1_000_000_000), 2_000_000);
         assert_eq!(wait_timeout(1_000_000_001, || 1_000_000_000), 1);
         assert_eq!(wait_timeout(1_000_000_000, || 1_000_000_000), 0);
@@ -99,7 +98,7 @@ mod tests {
 
     #[test]
     fn wait_statuses() {
-        // nvkmd_rm.c rm_sync_wait_many and nv_rm.h nv_rm_sync_wait_many.
+        // nv_rm.h nv_rm_sync_wait_many.
         assert_eq!(WaitStatus::from_rm(0), WaitStatus::Complete);
         assert_eq!(WaitStatus::from_rm(2), WaitStatus::Timeout);
         assert_eq!(WaitStatus::from_rm(-4), WaitStatus::Failed(-4));
@@ -109,14 +108,13 @@ mod tests {
 
     #[test]
     fn shared_sources() {
-        // nvkmd_rm.c rm_sync_move: !!(src->flags & VK_SYNC_IS_SHARED).
+        // !!(src->flags & VK_SYNC_IS_SHARED).
         assert_eq!(shared_source(false), 0);
         assert_eq!(shared_source(true), 1);
     }
 
     #[test]
     fn reservations_need_success_and_the_rm_answer() {
-        // nvkmd_rm.c rm_sync_reserve_signal.
         assert!(reserved(true, 1));
         assert!(reserved(true, 7));
         assert!(!reserved(true, 0));

@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: MIT
 //! GPU virtual address reservations (`nvkmd_va`): the device's two VA heaps,
 //! the `alloc_va` entry, the VA ops table (`free`, `bind_mem`, `unbind`) and
-//! the release callback through which the RM returns a freed range
-//! (`nvkmd_rm.c` `rm_va_alloc` … `rm_va_free`).
+//! the release callback through which the RM returns a freed range.
 //!
-//! The heaps are Mesa's `util_vma_heap`, called through its C interface, so
-//! the addresses handed out are those of the C backend for the same sequence
-//! of requests. Both sit behind one mutex, which is held only around a heap
+//! The heaps are Mesa's `util_vma_heap`, called through its C interface, as
+//! NVK's nouveau backend uses it (`nvkmd_nouveau_dev.c:51-58`). Both sit behind one mutex, which is held only around a heap
 //! call and never across an RM call; the RM may call [`va_release`] while it
 //! holds its own resource lock, so the lock order is RM resource lock → heap
 //! lock (`nv_rm.h` `NvRmVaRelease`).
@@ -33,7 +31,7 @@ use super::memory::RmMem;
 use super::object::{self, Object};
 use super::{Diag, rm_result, try_alloc_zeroed, unsupported, vk_error, vk_errorf};
 
-/// The window's two heaps (`nvkmd_rm.c` `heap`, `replay_heap`). Each points
+/// The window's two heaps (ordinary and capture/replay). Each points
 /// into itself once initialised: the value is built in its final place and
 /// never moved.
 pub(super) struct VaHeaps {
@@ -162,7 +160,7 @@ impl RmVa {
     }
 
     /// Unmaps the bindings an unbind of `range` covers, in bind order
-    /// (`nvkmd_rm.c` `rm_va_unbind`). On an RM failure the bindings unmapped
+    /// On an RM failure the bindings unmapped
     /// before it stay removed and the failed one stays bound.
     fn unbind(&mut self, log: *mut vk_object_base, range: Range) -> VkResult {
         let unbind = match va::unbind(range, self.size(), &self.ranges) {
@@ -190,7 +188,7 @@ impl RmVa {
     }
 
     /// Binds `[memory_offset, memory_offset + size)` of `memory` at `offset`,
-    /// replacing what that range held (`nvkmd_rm.c` `rm_va_bind`).
+    /// replacing what that range held.
     fn bind(
         &mut self,
         log: *mut vk_object_base,
@@ -302,8 +300,7 @@ pub(super) unsafe extern "C" fn dev_alloc_va(
     )
 }
 
-/// `alloc_va` after validation; the order of its checks, its allocation and
-/// its results are `nvkmd_rm.c` `rm_va_alloc`.
+/// `alloc_va` after validation.
 fn alloc_va(
     dev: &RmDev,
     log: *mut vk_object_base,
@@ -438,7 +435,7 @@ unsafe extern "C" fn va_unbind(
 /// which returns the range to its heap through [`va_release`] once the work
 /// that may still use it retired, on whichever thread retires it. It never
 /// waits here: that work may wait on a fence this thread must produce
-/// (`nvkmd_rm.c` `rm_va_free`). If the RM refuses, the range stays reserved and
+/// If the RM refuses, the range stays reserved and
 /// the device is lost.
 ///
 /// # Safety

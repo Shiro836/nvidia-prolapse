@@ -260,7 +260,6 @@ mod tests {
 
     #[test]
     fn fields_are_copied_and_names_formatted() {
-        // nvkmd_rm.c nvkmd_rm_try_create_pdev: the device info.
         let dev = device_info(&ad102()).expect("every value fits");
         assert_eq!(dev.device_id, 0x2684);
         assert_eq!(dev.chipset, 0x192);
@@ -283,7 +282,7 @@ mod tests {
 
     #[test]
     fn names_are_cut_to_fit_their_terminator() {
-        // snprintf("%s") into device_name[64], nvkmd_rm.c nvkmd_rm_try_create_pdev.
+        // As snprintf("%s") into device_name[64].
         let mut info = ad102();
         info.name = [std::ffi::c_char::from_ne_bytes(*b"x"); 64];
         let dev = device_info(&info).expect("every value fits");
@@ -293,7 +292,6 @@ mod tests {
 
     #[test]
     fn zcull_is_reported_only_when_the_rm_has_it() {
-        // nvkmd_rm.c nvkmd_rm_try_create_pdev: the ZCULL info.
         let dev = device_info(&ad102()).expect("every value fits");
         let zcull = dev.zcull.expect("has_zcull_info is set");
         assert_eq!(zcull.geometry.width_align_pixels, 64);
@@ -317,7 +315,6 @@ mod tests {
 
     #[test]
     fn capabilities_follow_the_generic_kind() {
-        // nvkmd_rm.c nvkmd_rm_try_create_pdev: the KMD capabilities.
         let mut info = ad102();
         let turing = kmd_info(&info);
         assert!(turing.has_dma_buf && turing.has_alloc_tiled && turing.has_rm_compression);

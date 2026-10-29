@@ -526,7 +526,7 @@ nvrm_resource_map(struct pipe_context *pctx, struct pipe_resource *pres,
       }
       if (!res->bo.map) {
          /* Imported linear dma-buf: CPU map on first use (nv_rm_map, as
-          * NVK's rm_mem_map for imported memory). */
+          * NVK's backend mem_map for imported memory). */
          uintptr_t cpu = 0;
          int32_t status = nv_rm_map(nvrm_screen(pctx->screen)->rm, res->bo.mem, &cpu);
          if (status || !cpu) {

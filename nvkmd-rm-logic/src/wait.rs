@@ -34,8 +34,7 @@ pub enum WaitError {
 
 /// The acquire for `wait`, or `None` when there is nothing to wait for: a
 /// timeline value is a `u64`, so a wait for 0 is already satisfied. That
-/// check comes first, so a foreign timeline at value 0 is skipped too
-/// (`nvkmd_rm.c` `rm_ctx_wait`).
+/// check comes first, so a foreign timeline at value 0 is skipped too.
 ///
 /// # Errors
 /// [`WaitError::Foreign`] for a payload the RM does not own.
@@ -66,7 +65,6 @@ mod tests {
 
     #[test]
     fn timeline_value_zero_is_skipped_before_the_type_check() {
-        // nvkmd_rm.c rm_ctx_wait: the timeline-zero skip.
         let rm = WaitSync::Rm(NvRmSyncId::new(7));
         assert_eq!(acquire(wait(rm, true, 0)), Ok(None));
         assert_eq!(acquire(wait(WaitSync::Foreign, true, 0)), Ok(None));
@@ -74,7 +72,7 @@ mod tests {
 
     #[test]
     fn rm_payloads_become_acquires_with_their_value() {
-        // nvkmd_rm.c rm_ctx_wait: binary syncs keep the value NVK passed (0).
+        // Binary syncs keep the value NVK passed (0).
         let id = NvRmSyncId::new(7);
         assert_eq!(
             acquire(wait(WaitSync::Rm(id), true, 5)),
@@ -88,7 +86,6 @@ mod tests {
 
     #[test]
     fn foreign_payloads_are_refused() {
-        // nvkmd_rm.c rm_ctx_wait: the type check.
         assert_eq!(
             acquire(wait(WaitSync::Foreign, false, 0)),
             Err(WaitError::Foreign)

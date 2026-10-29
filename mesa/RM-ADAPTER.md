@@ -24,9 +24,9 @@ Memory has two separate lifetimes: the physical allocation and each GPU VA
 mapping. NVK allocates an initial plain mapping for every memory object, then
 may bind aliases with an image-specific PTE kind. The adapter records independent
 mapping IDs so it can unbind aliases without freeing the physical memory.
-VA teardown (`rm_va_free`) hands all mapping ids of a reservation to
+VA teardown (`va_free`) hands all mapping ids of a reservation to
 `nv_rm_va_free` with a release callback; the backend unmaps and calls it to
-return the range to the C heap only after the GPU work outstanding at free time
+return the range to the heap only after the GPU work outstanding at free time
 retired, so a range is never reused while mapped and no free waits on the GPU
 (SYNCHRONIZATION.md, "Resource reclamation").
 The C VA allocator owns `[16 GiB, 1 TiB)`; Rust's queue, completion and other
