@@ -264,7 +264,8 @@ Mesa's runtime and our patches to it over the C backend's sync types (`submit-on
 `sync-properties`, the queue part of `loss-notification`, the `nvk_mem_stream` and
 sync-provider checks). The harness re-expresses the property queries and the timeline-mode
 inputs (`sync-properties`), the queue loss (`queue-loss`) and the `nvk_mem_stream`/sync-provider
-failure cases (`mem-stream`) over the Rust backend; `submit-on-demand` is not ported yet.
+failure cases (`mem-stream`) over the Rust backend, and the `THREADED_ON_DEMAND` routing of the
+patched `vk_queue.c` (`submit-on-demand`) over a harness sync type and driver hook.
 
 Since the C backend is gone, the harness compares the Rust backend's call log with
 `mesa/tests/nvkmd-harness.calls`, the C backend's log on the same suites.

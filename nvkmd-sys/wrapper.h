@@ -56,7 +56,18 @@ enum nvkmd_sys_layout {
    NVKMD_SYS_VK_DEVICE_PHYSICAL = offsetof(struct vk_device, physical),
    NVKMD_SYS_VK_DEVICE_ALLOC = offsetof(struct vk_device, alloc),
    NVKMD_SYS_VK_DEVICE_SYNC = offsetof(struct vk_device, sync),
+   /* A logical device and queue submitting through Mesa's queue runtime
+    * (vk_queue.c vk_queue_init, vk_queue_submit) to a driver callback. */
+   NVKMD_SYS_VK_DEVICE_SUBMIT_MODE = offsetof(struct vk_device, submit_mode),
+   NVKMD_SYS_VK_DEVICE_TIMELINE_MODE = offsetof(struct vk_device, timeline_mode),
+   NVKMD_SYS_VK_QUEUE_DRIVER_SUBMIT = offsetof(struct vk_queue, driver_submit),
+   NVKMD_SYS_VK_QUEUE_SUBMIT_MODE = offsetof(struct vk_queue, submit.mode),
+   NVKMD_SYS_VK_QUEUE_SUBMIT_WAIT_COUNT = offsetof(struct vk_queue_submit, wait_count),
+   NVKMD_SYS_VK_QUEUE_SUBMIT_WAITS = offsetof(struct vk_queue_submit, waits),
+   NVKMD_SYS_VK_QUEUE_SUBMIT_SIGNAL_COUNT = offsetof(struct vk_queue_submit, signal_count),
+   NVKMD_SYS_VK_QUEUE_SUBMIT_SIGNALS = offsetof(struct vk_queue_submit, signals),
 };
+typedef enum vk_device_timeline_mode nvkmd_sys_vk_device_timeline_mode;
 
 /* The types of those members. */
 typedef __typeof__(((struct vk_device *)0)->_lost.lost) nvkmd_sys_vk_device_lost;

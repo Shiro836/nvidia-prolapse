@@ -1036,3 +1036,16 @@ nv_rm_close(42)
 close(3) = 0
 close(3) = 0
 PASS mem-stream
+== submit-on-demand
+pending waits on a fresh queue: driver calls 2, on the submitting thread 2
+wait before signal: queue threaded true
+behind the unsignalled wait: driver calls 2, on the submitting thread 2
+after the host signal: driver calls 41, on the submitting thread 2
+drained queue: driver calls 43, on the submitting thread 4
+idle-queue signal: driver calls 44, on the submitting thread 5
+second episode, before the signal: driver calls 44, on the submitting thread 5
+second episode, after the signal: driver calls 46, on the submitting thread 5
+deferred binary signal: reservations 1
+binary wait behind a deferred signal: driver calls 46, on the submitting thread 5
+after the third host signal: driver calls 50, on the submitting thread 5
+PASS submit-on-demand

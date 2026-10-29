@@ -17,6 +17,7 @@ mod fake_ctx;
 mod fake_sync;
 mod memory;
 mod mesa;
+mod on_demand;
 mod runtime;
 mod suites;
 mod sync;

@@ -56,6 +56,10 @@ ALLOWLIST_TYPES = [
     "vk_physical_device",
     # NVK's memory stream over the backend's timeline type, and the sync provider its device carries.
     "nvk_mem_stream", "util_sync_provider", "VkAllocationCallbacks",
+    # Mesa's queue runtime and semaphore entrypoints over a driver submit callback.
+    "vk_queue_submit_mode", "nvkmd_sys_vk_device_timeline_mode", "VkDeviceQueueCreateInfo", "VkSemaphoreCreateInfo",
+    "VkSubmitInfo2", "VkSemaphoreSubmitInfo", "VkSemaphoreSignalInfo", "VkSemaphoreWaitInfo", "VkDevice", "VkQueue",
+    "VkSemaphore", "VkFence", "vk_queue_submit",
 ]
 ALLOWLIST_FUNCTIONS = [
     "nvkmd_mem_init", "nvkmd_dev_alloc_va", "nvkmd_va_bind_mem", "nvkmd_va_free", "nvkmd_va_unbind",
@@ -71,12 +75,13 @@ ALLOWLIST_FUNCTIONS = [
     "vk_sync_export_sync_file",
     "_vk_queue_set_lost", "mtx_init", "mtx_lock", "mtx_unlock", "mtx_destroy",
     "nvk_mem_stream_init", "nvk_mem_stream_finish", "util_sync_provider_drm", "vk_default_allocator",
+    "vk_queue_init", "vk_queue_finish",
 ]
 # libdrm's device-record constants (xf86drm.h) and the open flags of the render node (fcntl.h): macros.
 ALLOWLIST_VARS = ["DRM_NODE_RENDER", "DRM_NODE_MAX", "DRM_BUS_PCI", "O_RDWR", "O_CLOEXEC", "mtx_plain", "thrd_success",
-                 "DRM_CAP_SYNCOBJ_TIMELINE"]
+                 "DRM_CAP_SYNCOBJ_TIMELINE", "VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT"]
 OPAQUE_TYPES = ["vk_device", "vk_object_base", "vk_physical_device", "vk_instance", "list_head", "vk_queue",
-                "nvk_device"]
+                "nvk_device", "vk_queue_submit"]
 
 
 def nvkmd_flags(build):

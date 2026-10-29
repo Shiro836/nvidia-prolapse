@@ -351,6 +351,36 @@ pub struct VkPhysicalDevice_T {
     _unused: [u8; 0],
 }
 pub type VkPhysicalDevice = *mut VkPhysicalDevice_T;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkDevice_T {
+    _unused: [u8; 0],
+}
+pub type VkDevice = *mut VkDevice_T;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkQueue_T {
+    _unused: [u8; 0],
+}
+pub type VkQueue = *mut VkQueue_T;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkSemaphore_T {
+    _unused: [u8; 0],
+}
+pub type VkSemaphore = *mut VkSemaphore_T;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkCommandBuffer_T {
+    _unused: [u8; 0],
+}
+pub type VkCommandBuffer = *mut VkCommandBuffer_T;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkFence_T {
+    _unused: [u8; 0],
+}
+pub type VkFence = *mut VkFence_T;
 pub const VK_SUCCESS: VkResult = 0;
 pub const VK_NOT_READY: VkResult = 1;
 pub const VK_TIMEOUT: VkResult = 2;
@@ -2618,6 +2648,8 @@ pub type VkSystemAllocationScope = ::core::ffi::c_uint;
 pub const VK_INTERNAL_ALLOCATION_TYPE_EXECUTABLE: VkInternalAllocationType = 0;
 pub const VK_INTERNAL_ALLOCATION_TYPE_MAX_ENUM: VkInternalAllocationType = 2147483647;
 pub type VkInternalAllocationType = ::core::ffi::c_uint;
+pub type VkDeviceQueueCreateFlags = VkFlags;
+pub type VkSemaphoreCreateFlags = VkFlags;
 pub type PFN_vkAllocationFunction = ::core::option::Option<
     unsafe extern "C" fn(
         pUserData: *mut ::core::ffi::c_void,
@@ -2681,6 +2713,54 @@ const _: () = {
         [::core::mem::offset_of!(VkAllocationCallbacks, pfnInternalAllocation) - 32usize];
     ["Offset of field: VkAllocationCallbacks::pfnInternalFree"]
         [::core::mem::offset_of!(VkAllocationCallbacks, pfnInternalFree) - 40usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkDeviceQueueCreateInfo {
+    pub sType: VkStructureType,
+    pub pNext: *const ::core::ffi::c_void,
+    pub flags: VkDeviceQueueCreateFlags,
+    pub queueFamilyIndex: u32,
+    pub queueCount: u32,
+    pub pQueuePriorities: *const f32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of VkDeviceQueueCreateInfo"]
+        [::core::mem::size_of::<VkDeviceQueueCreateInfo>() - 40usize];
+    ["Alignment of VkDeviceQueueCreateInfo"]
+        [::core::mem::align_of::<VkDeviceQueueCreateInfo>() - 8usize];
+    ["Offset of field: VkDeviceQueueCreateInfo::sType"]
+        [::core::mem::offset_of!(VkDeviceQueueCreateInfo, sType) - 0usize];
+    ["Offset of field: VkDeviceQueueCreateInfo::pNext"]
+        [::core::mem::offset_of!(VkDeviceQueueCreateInfo, pNext) - 8usize];
+    ["Offset of field: VkDeviceQueueCreateInfo::flags"]
+        [::core::mem::offset_of!(VkDeviceQueueCreateInfo, flags) - 16usize];
+    ["Offset of field: VkDeviceQueueCreateInfo::queueFamilyIndex"]
+        [::core::mem::offset_of!(VkDeviceQueueCreateInfo, queueFamilyIndex) - 20usize];
+    ["Offset of field: VkDeviceQueueCreateInfo::queueCount"]
+        [::core::mem::offset_of!(VkDeviceQueueCreateInfo, queueCount) - 24usize];
+    ["Offset of field: VkDeviceQueueCreateInfo::pQueuePriorities"]
+        [::core::mem::offset_of!(VkDeviceQueueCreateInfo, pQueuePriorities) - 32usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkSemaphoreCreateInfo {
+    pub sType: VkStructureType,
+    pub pNext: *const ::core::ffi::c_void,
+    pub flags: VkSemaphoreCreateFlags,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of VkSemaphoreCreateInfo"][::core::mem::size_of::<VkSemaphoreCreateInfo>() - 24usize];
+    ["Alignment of VkSemaphoreCreateInfo"]
+        [::core::mem::align_of::<VkSemaphoreCreateInfo>() - 8usize];
+    ["Offset of field: VkSemaphoreCreateInfo::sType"]
+        [::core::mem::offset_of!(VkSemaphoreCreateInfo, sType) - 0usize];
+    ["Offset of field: VkSemaphoreCreateInfo::pNext"]
+        [::core::mem::offset_of!(VkSemaphoreCreateInfo, pNext) - 8usize];
+    ["Offset of field: VkSemaphoreCreateInfo::flags"]
+        [::core::mem::offset_of!(VkSemaphoreCreateInfo, flags) - 16usize];
 };
 pub const VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_FD_BIT: VkExternalFenceHandleTypeFlagBits = 1;
 pub const VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_WIN32_BIT: VkExternalFenceHandleTypeFlagBits = 2;
@@ -2841,6 +2921,7 @@ pub const VK_SEMAPHORE_TYPE_BINARY_KHR: VkSemaphoreType = 0;
 pub const VK_SEMAPHORE_TYPE_TIMELINE_KHR: VkSemaphoreType = 1;
 pub const VK_SEMAPHORE_TYPE_MAX_ENUM: VkSemaphoreType = 2147483647;
 pub type VkSemaphoreType = ::core::ffi::c_uint;
+pub type VkSemaphoreWaitFlags = VkFlags;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct VkSemaphoreTypeCreateInfo {
@@ -2864,8 +2945,147 @@ const _: () = {
     ["Offset of field: VkSemaphoreTypeCreateInfo::initialValue"]
         [::core::mem::offset_of!(VkSemaphoreTypeCreateInfo, initialValue) - 24usize];
 };
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkSemaphoreWaitInfo {
+    pub sType: VkStructureType,
+    pub pNext: *const ::core::ffi::c_void,
+    pub flags: VkSemaphoreWaitFlags,
+    pub semaphoreCount: u32,
+    pub pSemaphores: *const VkSemaphore,
+    pub pValues: *const u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of VkSemaphoreWaitInfo"][::core::mem::size_of::<VkSemaphoreWaitInfo>() - 40usize];
+    ["Alignment of VkSemaphoreWaitInfo"][::core::mem::align_of::<VkSemaphoreWaitInfo>() - 8usize];
+    ["Offset of field: VkSemaphoreWaitInfo::sType"]
+        [::core::mem::offset_of!(VkSemaphoreWaitInfo, sType) - 0usize];
+    ["Offset of field: VkSemaphoreWaitInfo::pNext"]
+        [::core::mem::offset_of!(VkSemaphoreWaitInfo, pNext) - 8usize];
+    ["Offset of field: VkSemaphoreWaitInfo::flags"]
+        [::core::mem::offset_of!(VkSemaphoreWaitInfo, flags) - 16usize];
+    ["Offset of field: VkSemaphoreWaitInfo::semaphoreCount"]
+        [::core::mem::offset_of!(VkSemaphoreWaitInfo, semaphoreCount) - 20usize];
+    ["Offset of field: VkSemaphoreWaitInfo::pSemaphores"]
+        [::core::mem::offset_of!(VkSemaphoreWaitInfo, pSemaphores) - 24usize];
+    ["Offset of field: VkSemaphoreWaitInfo::pValues"]
+        [::core::mem::offset_of!(VkSemaphoreWaitInfo, pValues) - 32usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkSemaphoreSignalInfo {
+    pub sType: VkStructureType,
+    pub pNext: *const ::core::ffi::c_void,
+    pub semaphore: VkSemaphore,
+    pub value: u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of VkSemaphoreSignalInfo"][::core::mem::size_of::<VkSemaphoreSignalInfo>() - 32usize];
+    ["Alignment of VkSemaphoreSignalInfo"]
+        [::core::mem::align_of::<VkSemaphoreSignalInfo>() - 8usize];
+    ["Offset of field: VkSemaphoreSignalInfo::sType"]
+        [::core::mem::offset_of!(VkSemaphoreSignalInfo, sType) - 0usize];
+    ["Offset of field: VkSemaphoreSignalInfo::pNext"]
+        [::core::mem::offset_of!(VkSemaphoreSignalInfo, pNext) - 8usize];
+    ["Offset of field: VkSemaphoreSignalInfo::semaphore"]
+        [::core::mem::offset_of!(VkSemaphoreSignalInfo, semaphore) - 16usize];
+    ["Offset of field: VkSemaphoreSignalInfo::value"]
+        [::core::mem::offset_of!(VkSemaphoreSignalInfo, value) - 24usize];
+};
 pub type VkFlags64 = u64;
 pub type VkPipelineStageFlags2 = VkFlags64;
+pub type VkPipelineStageFlagBits2 = VkFlags64;
+pub const VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT: VkPipelineStageFlagBits2 = 65536;
+pub type VkSubmitFlags = VkFlags;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkSemaphoreSubmitInfo {
+    pub sType: VkStructureType,
+    pub pNext: *const ::core::ffi::c_void,
+    pub semaphore: VkSemaphore,
+    pub value: u64,
+    pub stageMask: VkPipelineStageFlags2,
+    pub deviceIndex: u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of VkSemaphoreSubmitInfo"][::core::mem::size_of::<VkSemaphoreSubmitInfo>() - 48usize];
+    ["Alignment of VkSemaphoreSubmitInfo"]
+        [::core::mem::align_of::<VkSemaphoreSubmitInfo>() - 8usize];
+    ["Offset of field: VkSemaphoreSubmitInfo::sType"]
+        [::core::mem::offset_of!(VkSemaphoreSubmitInfo, sType) - 0usize];
+    ["Offset of field: VkSemaphoreSubmitInfo::pNext"]
+        [::core::mem::offset_of!(VkSemaphoreSubmitInfo, pNext) - 8usize];
+    ["Offset of field: VkSemaphoreSubmitInfo::semaphore"]
+        [::core::mem::offset_of!(VkSemaphoreSubmitInfo, semaphore) - 16usize];
+    ["Offset of field: VkSemaphoreSubmitInfo::value"]
+        [::core::mem::offset_of!(VkSemaphoreSubmitInfo, value) - 24usize];
+    ["Offset of field: VkSemaphoreSubmitInfo::stageMask"]
+        [::core::mem::offset_of!(VkSemaphoreSubmitInfo, stageMask) - 32usize];
+    ["Offset of field: VkSemaphoreSubmitInfo::deviceIndex"]
+        [::core::mem::offset_of!(VkSemaphoreSubmitInfo, deviceIndex) - 40usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkCommandBufferSubmitInfo {
+    pub sType: VkStructureType,
+    pub pNext: *const ::core::ffi::c_void,
+    pub commandBuffer: VkCommandBuffer,
+    pub deviceMask: u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of VkCommandBufferSubmitInfo"]
+        [::core::mem::size_of::<VkCommandBufferSubmitInfo>() - 32usize];
+    ["Alignment of VkCommandBufferSubmitInfo"]
+        [::core::mem::align_of::<VkCommandBufferSubmitInfo>() - 8usize];
+    ["Offset of field: VkCommandBufferSubmitInfo::sType"]
+        [::core::mem::offset_of!(VkCommandBufferSubmitInfo, sType) - 0usize];
+    ["Offset of field: VkCommandBufferSubmitInfo::pNext"]
+        [::core::mem::offset_of!(VkCommandBufferSubmitInfo, pNext) - 8usize];
+    ["Offset of field: VkCommandBufferSubmitInfo::commandBuffer"]
+        [::core::mem::offset_of!(VkCommandBufferSubmitInfo, commandBuffer) - 16usize];
+    ["Offset of field: VkCommandBufferSubmitInfo::deviceMask"]
+        [::core::mem::offset_of!(VkCommandBufferSubmitInfo, deviceMask) - 24usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkSubmitInfo2 {
+    pub sType: VkStructureType,
+    pub pNext: *const ::core::ffi::c_void,
+    pub flags: VkSubmitFlags,
+    pub waitSemaphoreInfoCount: u32,
+    pub pWaitSemaphoreInfos: *const VkSemaphoreSubmitInfo,
+    pub commandBufferInfoCount: u32,
+    pub pCommandBufferInfos: *const VkCommandBufferSubmitInfo,
+    pub signalSemaphoreInfoCount: u32,
+    pub pSignalSemaphoreInfos: *const VkSemaphoreSubmitInfo,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of VkSubmitInfo2"][::core::mem::size_of::<VkSubmitInfo2>() - 64usize];
+    ["Alignment of VkSubmitInfo2"][::core::mem::align_of::<VkSubmitInfo2>() - 8usize];
+    ["Offset of field: VkSubmitInfo2::sType"]
+        [::core::mem::offset_of!(VkSubmitInfo2, sType) - 0usize];
+    ["Offset of field: VkSubmitInfo2::pNext"]
+        [::core::mem::offset_of!(VkSubmitInfo2, pNext) - 8usize];
+    ["Offset of field: VkSubmitInfo2::flags"]
+        [::core::mem::offset_of!(VkSubmitInfo2, flags) - 16usize];
+    ["Offset of field: VkSubmitInfo2::waitSemaphoreInfoCount"]
+        [::core::mem::offset_of!(VkSubmitInfo2, waitSemaphoreInfoCount) - 20usize];
+    ["Offset of field: VkSubmitInfo2::pWaitSemaphoreInfos"]
+        [::core::mem::offset_of!(VkSubmitInfo2, pWaitSemaphoreInfos) - 24usize];
+    ["Offset of field: VkSubmitInfo2::commandBufferInfoCount"]
+        [::core::mem::offset_of!(VkSubmitInfo2, commandBufferInfoCount) - 32usize];
+    ["Offset of field: VkSubmitInfo2::pCommandBufferInfos"]
+        [::core::mem::offset_of!(VkSubmitInfo2, pCommandBufferInfos) - 40usize];
+    ["Offset of field: VkSubmitInfo2::signalSemaphoreInfoCount"]
+        [::core::mem::offset_of!(VkSubmitInfo2, signalSemaphoreInfoCount) - 48usize];
+    ["Offset of field: VkSubmitInfo2::pSignalSemaphoreInfos"]
+        [::core::mem::offset_of!(VkSubmitInfo2, pSignalSemaphoreInfos) - 56usize];
+};
 pub type thrd_t = __thrd_t;
 pub const thrd_success: _bindgen_ty_14 = 0;
 pub const thrd_busy: _bindgen_ty_14 = 1;
@@ -4448,6 +4668,17 @@ const _: () = {
     ["Alignment of vk_queue"][::core::mem::align_of::<vk_queue>() - 8usize];
 };
 unsafe extern "C" {
+    pub fn vk_queue_init(
+        queue: *mut vk_queue,
+        device: *mut vk_device,
+        pCreateInfo: *const VkDeviceQueueCreateInfo,
+        index_in_family: u32,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_queue_finish(queue: *mut vk_queue);
+}
+unsafe extern "C" {
     pub fn _vk_queue_set_lost(
         queue: *mut vk_queue,
         file: *const ::core::ffi::c_char,
@@ -4456,6 +4687,17 @@ unsafe extern "C" {
         ...
     ) -> VkResult;
 }
+#[repr(C)]
+#[repr(align(8))]
+#[derive(Debug, Copy, Clone)]
+pub struct vk_queue_submit {
+    pub _bindgen_opaque_blob: [u64; 21usize],
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of vk_queue_submit"][::core::mem::size_of::<vk_queue_submit>() - 168usize];
+    ["Alignment of vk_queue_submit"][::core::mem::align_of::<vk_queue_submit>() - 8usize];
+};
 #[repr(C)]
 #[repr(align(8))]
 pub struct nvk_device {
@@ -4507,7 +4749,16 @@ pub const NVKMD_SYS_NVK_PHYSICAL_DEVICE_NVKMD: nvkmd_sys_layout = 5816;
 pub const NVKMD_SYS_VK_DEVICE_PHYSICAL: nvkmd_sys_layout = 112;
 pub const NVKMD_SYS_VK_DEVICE_ALLOC: nvkmd_sys_layout = 64;
 pub const NVKMD_SYS_VK_DEVICE_SYNC: nvkmd_sys_layout = 6144;
+pub const NVKMD_SYS_VK_DEVICE_SUBMIT_MODE: nvkmd_sys_layout = 6164;
+pub const NVKMD_SYS_VK_DEVICE_TIMELINE_MODE: nvkmd_sys_layout = 6160;
+pub const NVKMD_SYS_VK_QUEUE_DRIVER_SUBMIT: nvkmd_sys_layout = 96;
+pub const NVKMD_SYS_VK_QUEUE_SUBMIT_MODE: nvkmd_sys_layout = 104;
+pub const NVKMD_SYS_VK_QUEUE_SUBMIT_WAIT_COUNT: nvkmd_sys_layout = 16;
+pub const NVKMD_SYS_VK_QUEUE_SUBMIT_WAITS: nvkmd_sys_layout = 40;
+pub const NVKMD_SYS_VK_QUEUE_SUBMIT_SIGNAL_COUNT: nvkmd_sys_layout = 24;
+pub const NVKMD_SYS_VK_QUEUE_SUBMIT_SIGNALS: nvkmd_sys_layout = 56;
 pub type nvkmd_sys_layout = ::core::ffi::c_uint;
+pub use self::vk_device_vk_device_timeline_mode as nvkmd_sys_vk_device_timeline_mode;
 pub type nvkmd_sys_vk_device_lost = ::core::ffi::c_int;
 pub type nvkmd_sys_vk_device_notify_lost = ::core::option::Option<
     unsafe extern "C" fn(arg1: *mut vk_device, arg2: *mut ::core::ffi::c_void),

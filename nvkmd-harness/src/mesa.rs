@@ -44,6 +44,14 @@ use nvkmd_sys::{
     NVKMD_SYS_VK_DEVICE_SYNC, nvk_device, nvk_mem_stream, nvk_mem_stream_finish,
     nvk_mem_stream_init, util_sync_provider, util_sync_provider_drm, vk_default_allocator,
 };
+use nvkmd_sys::{
+    NVKMD_SYS_VK_DEVICE_SUBMIT_MODE, NVKMD_SYS_VK_DEVICE_TIMELINE_MODE,
+    NVKMD_SYS_VK_QUEUE_DRIVER_SUBMIT, NVKMD_SYS_VK_QUEUE_SUBMIT_MODE, VK_OBJECT_TYPE_DEVICE,
+    VkAllocationCallbacks, VkDevice as VkDeviceHandle, VkDeviceQueueCreateInfo, VkFence, VkQueue,
+    VkSemaphore, VkSemaphoreCreateInfo, VkSemaphoreSignalInfo, VkSemaphoreWaitInfo, VkSubmitInfo2,
+    vk_device_vk_device_timeline_mode, vk_queue_finish, vk_queue_init, vk_queue_submit,
+    vk_queue_submit_mode,
+};
 
 // Mesa's common external fence and semaphore property queries (vk_fence.c,
 // vk_semaphore.c), declared here because bindgen skips declarations that
@@ -63,6 +71,41 @@ unsafe extern "C" {
         info: *const VkPhysicalDeviceExternalSemaphoreInfo,
         properties: *mut VkExternalSemaphoreProperties,
     );
+}
+
+// Mesa's common semaphore and queue entrypoints (vk_semaphore.c,
+// vk_queue.c), declared here for the reason above: vk_common_entrypoints.h
+// gives them hidden visibility. Same signatures as that header and
+// vkCreateSemaphore, vkDestroySemaphore, vkSignalSemaphore,
+// vkWaitSemaphores, vkQueueSubmit2 and vkQueueWaitIdle in vulkan_core.h.
+unsafe extern "C" {
+    fn vk_common_CreateSemaphore(
+        device: VkDeviceHandle,
+        info: *const VkSemaphoreCreateInfo,
+        allocator: *const VkAllocationCallbacks,
+        semaphore: *mut VkSemaphore,
+    ) -> VkResult;
+    fn vk_common_DestroySemaphore(
+        device: VkDeviceHandle,
+        semaphore: VkSemaphore,
+        allocator: *const VkAllocationCallbacks,
+    );
+    fn vk_common_SignalSemaphore(
+        device: VkDeviceHandle,
+        info: *const VkSemaphoreSignalInfo,
+    ) -> VkResult;
+    fn vk_common_WaitSemaphores(
+        device: VkDeviceHandle,
+        info: *const VkSemaphoreWaitInfo,
+        timeout: u64,
+    ) -> VkResult;
+    fn vk_common_QueueSubmit2(
+        queue: VkQueue,
+        count: u32,
+        submits: *const VkSubmitInfo2,
+        fence: VkFence,
+    ) -> VkResult;
+    fn vk_common_QueueWaitIdle(queue: VkQueue) -> VkResult;
 }
 
 use crate::fake;
@@ -1050,6 +1093,11 @@ impl PhysicalDevice {
     /// Lists `pdev`'s sync types; `pdev` outlives the stand-in (the suites
     /// drop it first).
     pub(crate) fn new(pdev: &Pdev) -> Self {
+        Self::with_sync_types(pdev.get().sync_types)
+    }
+
+    /// Lists `types` (a NULL-terminated list that outlives the stand-in).
+    pub(crate) fn with_sync_types(types: *const *const vk_sync_type) -> Self {
         let words: Box<[u64]> = vec![0; words::<vk_physical_device>()].into_boxed_slice();
         let base = NonNull::from(Box::leak(words)).cast::<u8>();
         // SAFETY: `vk_object_base.type` (the base is the first member) and
@@ -1067,7 +1115,7 @@ impl PhysicalDevice {
             write_member(
                 base,
                 offset(NVKMD_SYS_VK_PHYSICAL_DEVICE_SUPPORTED_SYNC_TYPES),
-                pdev.get().sync_types,
+                types,
             );
         }
         Self(base.cast())
@@ -1380,4 +1428,182 @@ pub(crate) fn zeroed_sync_type() -> vk_sync_type {
     // SAFETY: all-zero is a valid `vk_sync_type` (integers and empty
     // callbacks).
     unsafe { core::mem::zeroed() }
+}
+
+impl VkDevice {
+    /// Makes the stand-in a logical device Mesa's queue and semaphore
+    /// entrypoints accept: typed as a device (their handle casts), with
+    /// Mesa's default allocator, `physical`, and the submit and timeline
+    /// modes `vk_device_init` would choose.
+    pub(crate) fn set_queue_runtime(
+        &self,
+        physical: &PhysicalDevice,
+        submit_mode: vk_queue_submit_mode,
+        timeline_mode: vk_device_vk_device_timeline_mode,
+    ) {
+        let base = self.0.cast::<u8>();
+        // SAFETY: Mesa's static default allocator, valid for the process.
+        let alloc = unsafe { vk_default_allocator() };
+        // SAFETY: a valid pointer to an initialised VkAllocationCallbacks.
+        let alloc = unsafe { alloc.read() };
+        // SAFETY: these members lie inside the logical device and are aligned
+        // (Mesa's layout); no submit thread exists yet.
+        unsafe {
+            write_member(
+                base,
+                offset(NVKMD_SYS_VK_OBJECT_BASE_TYPE),
+                VK_OBJECT_TYPE_DEVICE,
+            );
+        }
+        // SAFETY: as above.
+        unsafe { write_member(base, offset(NVKMD_SYS_VK_DEVICE_ALLOC), alloc) };
+        // SAFETY: as above.
+        unsafe {
+            write_member(
+                base,
+                offset(NVKMD_SYS_VK_DEVICE_PHYSICAL),
+                physical.0.as_ptr(),
+            );
+        }
+        // SAFETY: as above.
+        unsafe { write_member(base, offset(NVKMD_SYS_VK_DEVICE_SUBMIT_MODE), submit_mode) };
+        // SAFETY: as above.
+        unsafe {
+            write_member(
+                base,
+                offset(NVKMD_SYS_VK_DEVICE_TIMELINE_MODE),
+                timeline_mode,
+            );
+        }
+    }
+
+    /// The logical device's handle (`vk_device_to_handle`: its address).
+    fn handle(&self) -> VkDeviceHandle {
+        self.as_ptr().cast()
+    }
+
+    /// Mesa's vkCreateSemaphore; `info` is a complete create-info chain.
+    pub(crate) fn create_semaphore(
+        &self,
+        info: &VkSemaphoreCreateInfo,
+    ) -> Result<VkSemaphore, VkResult> {
+        let mut semaphore: VkSemaphore = core::ptr::null_mut();
+        // SAFETY: a device set up by `set_queue_runtime`; `info` and the
+        // output are valid for the call; no allocator (the device's).
+        let result = unsafe {
+            vk_common_CreateSemaphore(self.handle(), info, core::ptr::null(), &raw mut semaphore)
+        };
+        if result == VK_SUCCESS {
+            Ok(semaphore)
+        } else {
+            Err(result)
+        }
+    }
+
+    /// Mesa's vkDestroySemaphore of a semaphore of this device no pending
+    /// submission uses.
+    pub(crate) fn destroy_semaphore(&self, semaphore: VkSemaphore) {
+        // SAFETY: as stated; created by `create_semaphore` with no allocator.
+        unsafe { vk_common_DestroySemaphore(self.handle(), semaphore, core::ptr::null()) };
+    }
+
+    /// Mesa's vkSignalSemaphore.
+    pub(crate) fn signal_semaphore(&self, info: &VkSemaphoreSignalInfo) -> VkResult {
+        // SAFETY: a device set up by `set_queue_runtime`; `info` names one of
+        // its semaphores.
+        unsafe { vk_common_SignalSemaphore(self.handle(), info) }
+    }
+
+    /// Mesa's vkWaitSemaphores.
+    pub(crate) fn wait_semaphores(&self, info: &VkSemaphoreWaitInfo, timeout: u64) -> VkResult {
+        // SAFETY: as `signal_semaphore`; the arrays `info` points to are live.
+        unsafe { vk_common_WaitSemaphores(self.handle(), info, timeout) }
+    }
+}
+
+/// The driver hook a [`RuntimeQueue`] submits to (`vk_queue.driver_submit`).
+pub(crate) type DriverSubmit =
+    unsafe extern "C" fn(*mut vk_queue, *mut vk_queue_submit) -> VkResult;
+
+/// A queue made by Mesa's `vk_queue_init` on a [`VkDevice`] set up by
+/// [`VkDevice::set_queue_runtime`], submitting to a harness hook.
+/// Heap-allocated: Mesa links it into the device's queue list and its submit
+/// thread keeps its address.
+pub(crate) struct RuntimeQueue(NonNull<vk_queue>);
+
+impl RuntimeQueue {
+    pub(crate) fn new(device: &VkDevice, driver_submit: DriverSubmit) -> Self {
+        let words: Box<[u64]> = vec![0; words::<vk_queue>()].into_boxed_slice();
+        let queue = NonNull::from(Box::leak(words)).cast::<vk_queue>();
+        // SAFETY: all-zero is a valid VkDeviceQueueCreateInfo (integers and
+        // NULL pointers).
+        let mut info: VkDeviceQueueCreateInfo = unsafe { core::mem::zeroed() };
+        info.queueCount = 1;
+        // SAFETY: a writable record of vk_queue's size; the device is set up
+        // and outlives the queue; queue 0 of a one-queue family.
+        let result = unsafe { vk_queue_init(queue.as_ptr(), device.as_ptr(), &raw const info, 0) };
+        assert_eq!(result, VK_SUCCESS, "vk_queue_init");
+        // SAFETY: `driver_submit` lies inside the queue, pointer-aligned; no
+        // submission has run yet.
+        unsafe {
+            write_member(
+                queue.cast(),
+                offset(NVKMD_SYS_VK_QUEUE_DRIVER_SUBMIT),
+                Some(driver_submit),
+            );
+        }
+        Self(queue)
+    }
+
+    /// The queue's handle (`vk_queue_to_handle`: its address).
+    fn handle(&self) -> VkQueue {
+        self.0.as_ptr().cast()
+    }
+
+    /// The queue's current submit mode (`vk_queue.submit.mode`).
+    pub(crate) fn submit_mode(&self) -> vk_queue_submit_mode {
+        // SAFETY: the member lies inside the live queue (Mesa's layout).
+        let slot = unsafe {
+            self.0
+                .cast::<u8>()
+                .byte_add(offset(NVKMD_SYS_VK_QUEUE_SUBMIT_MODE))
+        };
+        // SAFETY: aligned; written only by the submitting thread, which is
+        // this one.
+        unsafe { slot.cast::<vk_queue_submit_mode>().read() }
+    }
+
+    /// Mesa's vkQueueSubmit2 without a fence.
+    pub(crate) fn submit(&self, submits: &[VkSubmitInfo2]) -> VkResult {
+        let count = u32::try_from(submits.len()).expect("a handful of submissions");
+        // SAFETY: a live queue; `submits` and the arrays they point to are
+        // live for the call.
+        unsafe {
+            vk_common_QueueSubmit2(
+                self.handle(),
+                count,
+                submits.as_ptr(),
+                core::ptr::null_mut(),
+            )
+        }
+    }
+
+    /// Mesa's vkQueueWaitIdle.
+    pub(crate) fn wait_idle(&self) -> VkResult {
+        // SAFETY: a live queue.
+        unsafe { vk_common_QueueWaitIdle(self.handle()) }
+    }
+}
+
+impl Drop for RuntimeQueue {
+    fn drop(&mut self) {
+        // SAFETY: initialised by vk_queue_init; Mesa drains and joins its
+        // submit thread here.
+        unsafe { vk_queue_finish(self.0.as_ptr()) };
+        let slice =
+            std::ptr::slice_from_raw_parts_mut(self.0.as_ptr().cast::<u64>(), words::<vk_queue>());
+        // SAFETY: allocated as a boxed slice of that many u64 in `new`; Mesa
+        // unlinked the queue in vk_queue_finish.
+        drop(unsafe { Box::from_raw(slice) });
+    }
 }

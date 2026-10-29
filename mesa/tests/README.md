@@ -45,7 +45,14 @@ a type without timeline, init or finish are refused with
 `VK_ERROR_INITIALIZATION_FAILED` and no sync object; an RM failure creating the
 timeline passes through; the backend's timeline type works and finishes. Also
 the logical device's DRM sync provider: none when its allocation fails, no
-timeline waits without the render node's timeline syncobjs).
+timeline waits without the render node's timeline syncobjs) and
+`submit-on-demand` (Mesa's `THREADED_ON_DEMAND` queue routing from our
+`vk_queue.c` patch, on a queue made by `vk_queue_init` submitting to a harness
+driver hook through Mesa's `vkQueueSubmit2`, semaphore and wait entrypoints:
+the hook never receives a wait whose signal is not yet submitted; a wait
+before its signal moves the queue to its submit thread with everything behind
+it, in order; a drained queue submits on the caller again; a deferred binary
+signal is reserved at submit time so a binary wait behind it does not block).
 
 ## pascal-a-clear.c
 
