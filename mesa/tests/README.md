@@ -8,15 +8,26 @@ python3 mesa/tests/run-nvkmd-harness.py --backend c
 ```
 
 `nvkmd-harness` (a workspace crate) drives a backend only through Mesa's
-public nvkmd interface: `nvkmd_try_create_pdev_for_drm`, the ops tables and
-the hooks a backend installs in a `vk_device`. It is linked against the host
-NVK build of each backend (`build/nvk-host`, `build/nvk-host-rust`) with
-libc's render-node and allocation calls, libdrm and Mesa's diagnostic sinks
-replaced, and a fake RM. Every RM, render-node and libdrm call is logged; the
+public nvkmd interface: `nvkmd_try_create_pdev_for_drm`, the ops tables, the
+`vk_sync_type`s through Mesa's `vk_sync_*` wrappers and the hooks a backend
+installs in a `vk_device`. It is linked against the host NVK build of each
+backend (`build/nvk-host`, `build/nvk-host-rust`) with libc's render-node and
+allocation calls, libdrm, Mesa's diagnostic sinks and Mesa's clock replaced,
+and a fake RM. Every RM, render-node and libdrm call is logged; the
 two backends' logs must be identical, suite by suite. Suites: `pdev`
 (probing, refusals, failure cleanup, the filled device info and sync types,
-KMD device creation) and `loss` (loss publication through the hooks and their
-removal before the RM device closes).
+KMD device creation), `info` (RM values too wide for Mesa's fields), `loss`
+(loss publication through the hooks and their removal before the RM device
+closes), `memory-api` (placement of every allocation kind, tiled and imported
+memory, export, CPU maps, VA reservations from the ordinary and the
+capture/replay heap, binds and unbinds) and `memory-cleanup` (map failures,
+failed frees, unmaps and rollbacks publishing the loss, VA frees that fail or
+defer their release), `sync-api` (payload creation, host signal/reset/move,
+reservation, sync-file and opaque-fd import/export, every RM failure, a failed
+finish publishing the loss) and `wait-loss` (CPU waits in every mode against
+loss from either side, deadlines, completion racing loss, RM errors, waits
+past six seconds, empty, stack-sized and allocated point lists, host
+operations on a lost device).
 
 ## Preflight harness of the C backend
 

@@ -850,6 +850,14 @@ rm_mem_alloc_kind(struct nvkmd_dev* base,
     * the compressible placement below. */
    if (placement == NV_RM_PLACEMENT_VRAM) {
       alignment = MAX2(alignment, 1u << 16);
+      /* align64 wraps past UINT64_MAX - 0xffff: no device has that much
+       * memory, and a wrapped size would ask RM for an empty allocation. */
+      if (size > UINT64_MAX - 0xffff) {
+         free(mem);
+         return vk_errorf(log, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                          "%" PRIu64 " bytes of device memory cannot be rounded to 64 KiB pages",
+                          size);
+      }
       size = align64(size, 1u << 16);
    }
    /* Stock 615 requests compression + big pages for device-local memory that

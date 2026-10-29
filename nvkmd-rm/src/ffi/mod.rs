@@ -16,11 +16,16 @@ use std::fmt;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-use nvkmd_sys::{__vk_errorf, VK_ERROR_FEATURE_NOT_PRESENT, VK_SUCCESS, VkResult, vk_object_base};
+use nvkmd_sys::{
+    __vk_errorf, _vk_device_set_lost, VK_ERROR_FEATURE_NOT_PRESENT, VK_SUCCESS, VkResult,
+    vk_device, vk_object_base,
+};
 
 mod dev;
+mod memory;
 mod pdev;
 mod sync;
+mod va;
 
 /// Platform log tag of this backend's diagnostics.
 const TAG: &CStr = c"nvkmd-rm";
@@ -52,6 +57,29 @@ fn vk_errorf(log: *mut vk_object_base, result: VkResult, message: fmt::Arguments
         __vk_errorf(
             log.cast(),
             result,
+            TAG.as_ptr(),
+            line(),
+            c"%s".as_ptr(),
+            text.as_ptr(),
+        )
+    }
+}
+
+/// Mesa's `vk_device_set_lost` (`vk_device.h`): counts the logical device's
+/// loss, runs its `notify_lost` hook on the first one and reports `message`;
+/// returns `VK_ERROR_DEVICE_LOST`.
+///
+/// # Safety
+/// `vk` is a live logical device.
+#[track_caller]
+unsafe fn set_lost(vk: NonNull<vk_device>, message: fmt::Arguments<'_>) -> VkResult {
+    let text = message.to_string().replace('\0', "\u{fffd}");
+    let text = CString::new(text).expect("interior NULs were replaced");
+    // SAFETY: a live logical device (caller); "%s" reads exactly one
+    // NUL-terminated string, `text`, which outlives the call.
+    unsafe {
+        _vk_device_set_lost(
+            vk.as_ptr(),
             TAG.as_ptr(),
             line(),
             c"%s".as_ptr(),
@@ -114,4 +142,24 @@ fn try_alloc_zeroed<T>() -> Option<Box<MaybeUninit<T>>> {
     // owns it and frees it with the same layout; `MaybeUninit` needs no
     // initialisation.
     Some(unsafe { Box::from_raw(storage.as_ptr()) })
+}
+
+/// Zeroed heap storage for `count` values of `T`, or `None` when the
+/// allocator is out of memory or the size overflows. Served by `calloc`, as
+/// [`try_alloc_zeroed`], for the arrays the C backend `calloc`s (app-sized
+/// wait lists).
+fn try_alloc_zeroed_slice<T>(count: usize) -> Option<Box<[MaybeUninit<T>]>> {
+    const { assert!(size_of::<T>() != 0, "backend arrays are not zero-sized") };
+    if count == 0 {
+        return Some(Box::new([]));
+    }
+    let layout = Layout::array::<T>(count).ok()?;
+    // SAFETY: `layout` has a non-zero size (non-zero `T`, `count` > 0).
+    let storage = unsafe { std::alloc::alloc_zeroed(layout) };
+    let storage = NonNull::new(storage.cast::<MaybeUninit<T>>())?;
+    let slice = core::ptr::slice_from_raw_parts_mut(storage.as_ptr(), count);
+    // SAFETY: allocated by the global allocator with the layout of
+    // `[T; count]`, so the box owns it and frees it with the same layout;
+    // `MaybeUninit` needs no initialisation.
+    Some(unsafe { Box::from_raw(slice) })
 }

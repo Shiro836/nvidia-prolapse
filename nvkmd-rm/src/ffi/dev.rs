@@ -9,30 +9,34 @@
 //! through `vk_device.check_status`. The hooks are cleared before the RM device
 //! closes, so nothing calls into a closing device.
 //!
-//! The memory, VA and context entries are not served by this backend yet; they
-//! fail `VK_ERROR_FEATURE_NOT_PRESENT`.
+//! The device owns the two VA heaps its reservations come from
+//! ([`super::va`]); the memory and VA entries live in their own modules. The
+//! context entries are not served by this backend yet; they fail
+//! `VK_ERROR_FEATURE_NOT_PRESENT`.
 use std::ffi::c_int;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr::NonNull;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use nv_rm_abi::{
     NV_RM_VA_END, NV_RM_VA_START, NvRmDevice, NvRmInfo, nv_rm_check_status, nv_rm_close,
     nv_rm_mark_lost, nv_rm_open, nv_rm_timestamp,
 };
 use nvkmd_sys::{
-    _vk_device_set_lost, NVKMD_SYS_NVK_DEVICE_NVKMD, NVKMD_SYS_NVK_DEVICE_VK,
-    NVKMD_SYS_VK_DEVICE_CHECK_STATUS, NVKMD_SYS_VK_DEVICE_NOTIFY_LOST,
+    NVKMD_SYS_NVK_DEVICE_NVKMD, NVKMD_SYS_NVK_DEVICE_VK, NVKMD_SYS_VK_DEVICE_CHECK_STATUS,
+    NVKMD_SYS_VK_DEVICE_LOST, NVKMD_SYS_VK_DEVICE_NOTIFY_LOST,
     NVKMD_SYS_VK_DEVICE_NOTIFY_LOST_DATA, NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_ERROR_DEVICE_LOST,
     VK_ERROR_INITIALIZATION_FAILED, VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS, VkResult, nvkmd_ctx,
-    nvkmd_dev, nvkmd_dev_finish, nvkmd_dev_init, nvkmd_dev_ops, nvkmd_engines, nvkmd_mem,
-    nvkmd_mem_flags, nvkmd_pdev, nvkmd_sys_layout, nvkmd_sys_vk_device_check_status,
-    nvkmd_sys_vk_device_notify_lost, nvkmd_va, nvkmd_va_flags, util_vma_heap, util_vma_heap_finish,
-    util_vma_heap_init, vk_device, vk_object_base,
+    nvkmd_dev, nvkmd_dev_finish, nvkmd_dev_init, nvkmd_dev_ops, nvkmd_engines, nvkmd_pdev,
+    nvkmd_sys_layout, nvkmd_sys_vk_device_check_status, nvkmd_sys_vk_device_notify_lost, vk_device,
+    vk_object_base,
 };
 
+use super::memory::{dev_alloc_mem, dev_alloc_tiled_mem, dev_import_dma_buf};
 use super::pdev::{RmPdev, open_render_node};
-use super::{Diag, diag, rm_result, try_alloc_zeroed, unsupported, vk_error};
+use super::va::{VaHeaps, dev_alloc_va};
+use super::{Diag, diag, rm_result, set_lost, try_alloc_zeroed, unsupported, vk_error};
 
 /// A KMD device. Mesa holds `&base`; [`dev_destroy`] frees it.
 #[repr(C)]
@@ -43,11 +47,11 @@ pub(super) struct RmDev {
     /// device the physical-device probe makes.
     vk: Option<NonNull<vk_device>>,
     /// The render node; `None` only during `dev_destroy`, which closes it
-    /// before finishing the heap.
+    /// before finishing the heaps.
     fd: Option<OwnedFd>,
-    /// NVK's VA window `[NV_RM_VA_START, NV_RM_VA_END)` (Mesa's
-    /// `util_vma_heap`, which points into itself: initialised in place).
-    heap: Mutex<util_vma_heap>,
+    /// NVK's VA window `[NV_RM_VA_START, NV_RM_VA_END)` as its two heaps,
+    /// initialised in place. Held only around a heap call.
+    heaps: Mutex<VaHeaps>,
 }
 
 static DEV_OPS: nvkmd_dev_ops = nvkmd_dev_ops {
@@ -68,7 +72,7 @@ impl RmDev {
     ///
     /// # Safety
     /// `base` is NULL or points to a live `nvkmd_dev`.
-    unsafe fn from_base<'a>(base: *mut nvkmd_dev) -> Option<&'a Self> {
+    pub(super) unsafe fn from_base<'a>(base: *mut nvkmd_dev) -> Option<&'a Self> {
         // SAFETY: NULL or a live nvkmd_dev (caller).
         let dev = unsafe { base.as_ref() }?;
         if !core::ptr::eq(dev.ops, &raw const DEV_OPS) {
@@ -77,10 +81,112 @@ impl RmDev {
         // SAFETY: a dev with our ops is the first field of a live `RmDev`.
         Some(unsafe { &*base.cast::<Self>() })
     }
+
+    /// The KMD device of a logical device NVK made (`nvk_device.nvkmd`,
+    /// `nvkmd_rm.c` `rm_sync_device`), or `None` when it is another
+    /// backend's.
+    ///
+    /// # Safety
+    /// `vk` is the live `vk` member of a live `nvk_device` whose `nvkmd` is
+    /// NULL or a live KMD device.
+    pub(super) unsafe fn from_vk<'a>(vk: NonNull<vk_device>) -> Option<&'a Self> {
+        // SAFETY: `vk` is a member of a live nvk_device (caller), at the
+        // offset Mesa's header gives (nvkmd-sys).
+        let nvk = unsafe { vk.byte_sub(offset(NVKMD_SYS_NVK_DEVICE_VK)) };
+        // SAFETY: the `nvkmd` member lies inside that live nvk_device.
+        let slot =
+            unsafe { nvk.byte_add(offset(NVKMD_SYS_NVK_DEVICE_NVKMD)) }.cast::<*mut nvkmd_dev>();
+        // SAFETY: an aligned pointer member NVK set at device creation.
+        let kmd = unsafe { slot.read() };
+        // SAFETY: NULL or a live KMD device (caller).
+        unsafe { Self::from_base(kmd) }
+    }
+
+    /// The device as Mesa sees it.
+    pub(super) fn base_ptr(&self) -> *mut nvkmd_dev {
+        (&raw const self.base).cast_mut()
+    }
+
+    /// The device's RM device, live until `dev_destroy`.
+    pub(super) fn rm(&self) -> *mut NvRmDevice {
+        self.rm.as_ptr()
+    }
+
+    /// The device's render node.
+    pub(super) fn drm_fd(&self) -> c_int {
+        self.fd.as_ref().map_or(-1, AsRawFd::as_raw_fd)
+    }
+
+    /// The physical device this device was made from.
+    pub(super) fn pdev(&self) -> &RmPdev {
+        // SAFETY: Mesa destroys a physical device after its devices; the
+        // pointer is the one `create` stored.
+        unsafe { RmPdev::from_base(self.base.pdev) }.expect("a device's physical device is ours")
+    }
+
+    /// The device's generic kind, as the allocation policy takes it.
+    pub(super) fn generic_kind(&self) -> nvkmd_rm_logic::memory::GenericKind {
+        nvkmd_rm_logic::memory::GenericKind::new(self.pdev().info.generic_kind)
+    }
+
+    /// The heaps lock, whose address the VA release callback receives.
+    pub(super) fn heaps_lock(&self) -> &Mutex<VaHeaps> {
+        &self.heaps
+    }
+
+    /// The heaps, locked.
+    pub(super) fn heaps(&self) -> MutexGuard<'_, VaHeaps> {
+        self.heaps
+            .lock()
+            .expect("the heap lock is never held across a panic")
+    }
+
+    /// Publishes the device's loss after a cleanup step failed that cannot
+    /// report it (void callbacks, rollbacks of a call whose own failure is
+    /// returned): through Mesa for a logical device, whose loss hook reaches
+    /// the RM, or to the RM directly for the physical device's probe device.
+    /// It only publishes and wakes: no GPU wait, no backend lock
+    /// (`nvkmd_rm.c` `rm_mem_lost`).
+    pub(super) fn publish_loss(&self, operation: &str, status: i32) {
+        diag(format_args!(
+            "Native Rust RM {operation} failed; device lost: {status}"
+        ));
+        match self.vk {
+            Some(vk) => {
+                // SAFETY: the live logical device this device was made for.
+                unsafe {
+                    set_lost(
+                        vk,
+                        format_args!("Native Rust RM {operation} failed: {status}"),
+                    );
+                }
+            }
+            // SAFETY: the device's live RM device.
+            None => unsafe { nv_rm_mark_lost(self.rm()) },
+        }
+    }
 }
 
 fn offset(member: nvkmd_sys_layout) -> usize {
     nv_rm_core::conv::usize_from_u32(member)
+}
+
+/// Mesa's `vk_device_is_lost_no_report` (`vk_device.h`, inline: the loss
+/// count `_lost.lost` is positive). One atomic load; `Acquire` as Mesa's
+/// `p_atomic_read` (`util/u_atomic.h`), pairing with the increment in
+/// `_vk_device_set_lost` that precedes its loss report.
+///
+/// # Safety
+/// `vk` is a live logical device.
+pub(super) unsafe fn mesa_is_lost(vk: NonNull<vk_device>) -> bool {
+    // SAFETY: `_lost.lost` lies inside the live device (Mesa's layout,
+    // nvkmd-sys).
+    let counter = unsafe { vk.byte_add(offset(NVKMD_SYS_VK_DEVICE_LOST)) }.cast::<i32>();
+    // SAFETY: an aligned `int` of the live device that Mesa only accesses
+    // atomically (p_atomic_inc/p_atomic_read); the reference ends with this
+    // load.
+    let counter = unsafe { AtomicI32::from_ptr(counter.as_ptr()) };
+    counter.load(Ordering::Acquire) > 0
 }
 
 /// Writes the member at `member` of the live `device`.
@@ -203,8 +309,6 @@ unsafe fn create(pdev: &RmPdev, log: *mut vk_object_base) -> Result<*mut nvkmd_d
     // SAFETY: all-zero is a valid `nvkmd_dev` (pointers, integers, the list
     // and mutex before their init below).
     let base: nvkmd_dev = unsafe { core::mem::zeroed() };
-    // SAFETY: all-zero is a valid `util_vma_heap` before its init below.
-    let heap: util_vma_heap = unsafe { core::mem::zeroed() };
     let mut dev = Box::write(
         storage,
         RmDev {
@@ -212,7 +316,7 @@ unsafe fn create(pdev: &RmPdev, log: *mut vk_object_base) -> Result<*mut nvkmd_d
             rm,
             vk,
             fd: Some(fd),
-            heap: Mutex::new(heap),
+            heaps: Mutex::new(VaHeaps::zeroed()),
         },
     );
     dev.base.ops = &raw const DEV_OPS;
@@ -221,14 +325,10 @@ unsafe fn create(pdev: &RmPdev, log: *mut vk_object_base) -> Result<*mut nvkmd_d
     dev.base.va_end = NV_RM_VA_END;
     // SAFETY: the device's list and mutex, in their final place.
     unsafe { nvkmd_dev_init(&raw mut dev.base) };
-    {
-        let heap = dev
-            .heap
-            .get_mut()
-            .expect("a mutex no thread has seen is not poisoned");
-        // SAFETY: the heap in its final place; the window is NVK's VA range.
-        unsafe { util_vma_heap_init(heap, NV_RM_VA_START, NV_RM_VA_END - NV_RM_VA_START) };
-    }
+    dev.heaps
+        .get_mut()
+        .expect("a mutex no thread has seen is not poisoned")
+        .init();
     let dev = Box::into_raw(dev);
     if let Some(vk) = vk {
         // SAFETY: a live logical device that outlives this KMD device; its
@@ -301,29 +401,19 @@ unsafe extern "C" fn check_status(vk: *mut vk_device) -> VkResult {
                 return VK_ERROR_DEVICE_LOST;
             };
             // SAFETY: Mesa calls the hook on the live logical device of an
-            // `nvk_device` (`vk` is its first member, offset checked by nvkmd-sys).
-            let nvk = unsafe { vk.byte_sub(offset(NVKMD_SYS_NVK_DEVICE_VK)) };
-            // SAFETY: the `nvkmd` member lies inside that live nvk_device.
-            let slot = unsafe { nvk.byte_add(offset(NVKMD_SYS_NVK_DEVICE_NVKMD)) }
-                .cast::<*mut nvkmd_dev>();
-            // SAFETY: an aligned pointer member NVK set at device creation.
-            let kmd = unsafe { slot.read() };
-            // SAFETY: NULL or the device's live KMD device.
-            let Some(dev) = (unsafe { RmDev::from_base(kmd) }) else {
+            // `nvk_device`, whose `nvkmd` is its live KMD device.
+            let Some(dev) = (unsafe { RmDev::from_vk(vk) }) else {
                 return VK_ERROR_DEVICE_LOST;
             };
             // SAFETY: the device's live RM device.
             if unsafe { nv_rm_check_status(dev.rm.as_ptr()) } == VK_SUCCESS {
                 return VK_SUCCESS;
             }
-            // SAFETY: the live logical device; "%s" reads one string.
+            // SAFETY: the live logical device.
             unsafe {
-                _vk_device_set_lost(
-                    vk.as_ptr(),
-                    super::TAG.as_ptr(),
-                    0,
-                    c"%s".as_ptr(),
-                    c"Native Rust RM reported a failed GPU dependency or channel".as_ptr(),
+                set_lost(
+                    vk,
+                    format_args!("Native Rust RM reported a failed GPU dependency or channel"),
                 )
             }
         },
@@ -339,10 +429,10 @@ unsafe extern "C" fn check_status(vk: *mut vk_device) -> VkResult {
 unsafe extern "C" fn dev_destroy(base: *mut nvkmd_dev) {
     nv_ffi::guard_or_abort::<Diag, ()>("nvkmd_dev.destroy", || {
         // SAFETY: a live nvkmd_dev (contract).
-        let dev =
-            unsafe { RmDev::from_base(base) }.expect("Mesa destroys its own backend's devices");
-        // SAFETY: made by Box::into_raw in `create`; this is its one destroy.
-        let mut dev = unsafe { Box::from_raw(core::ptr::from_ref(dev).cast_mut()) };
+        unsafe { RmDev::from_base(base) }.expect("Mesa destroys its own backend's devices");
+        // SAFETY: a dev with our ops is the first field of an `RmDev` that
+        // `create` leaked with Box::into_raw; this is its one destroy.
+        let mut dev = unsafe { Box::from_raw(base.cast::<RmDev>()) };
         if let Some(vk) = dev.vk {
             // SAFETY: NVK destroys the KMD device before its logical device,
             // with no other call on it in flight (vkDestroyDevice is externally
@@ -352,14 +442,13 @@ unsafe extern "C" fn dev_destroy(base: *mut nvkmd_dev) {
         // SAFETY: the device's RM device, closed once.
         unsafe { nv_rm_close(dev.rm.as_ptr()) };
         drop(dev.fd.take());
-        // The heap and the device's list point into themselves: finished in
-        // place, before the storage is freed.
-        let heap = dev
-            .heap
+        // The heaps and the device's list point into themselves: finished in
+        // place, before the storage is freed. Nothing allocates from the
+        // heaps now, and the RM ran its last release in `nv_rm_close`.
+        dev.heaps
             .get_mut()
-            .expect("the heap lock is never held across a panic");
-        // SAFETY: the heap `create` initialised; nothing allocates from it now.
-        unsafe { util_vma_heap_finish(heap) };
+            .expect("the heap lock is never held across a panic")
+            .finish();
         // SAFETY: the list and mutex `create` initialised.
         unsafe { nvkmd_dev_finish(&raw mut dev.base) };
         drop(dev);
@@ -387,11 +476,11 @@ unsafe extern "C" fn dev_drm_fd(base: *mut nvkmd_dev) -> c_int {
     nv_ffi::guard_or_abort::<Diag, c_int>("nvkmd_dev.get_drm_fd", || {
         // SAFETY: a live nvkmd_dev (contract).
         let dev = unsafe { RmDev::from_base(base) }.expect("Mesa calls its own backend's devices");
-        dev.fd.as_ref().map_or(-1, AsRawFd::as_raw_fd)
+        dev.drm_fd()
     })
 }
 
-/// The memory, VA and context entries: not served (module docs).
+/// The context entries: not served (module docs).
 fn not_served(log: *mut vk_object_base, entry: &'static str, what: &str) -> VkResult {
     nv_ffi::guard::<Diag, VkResult>(
         entry,
@@ -399,52 +488,6 @@ fn not_served(log: *mut vk_object_base, entry: &'static str, what: &str) -> VkRe
         || VK_ERROR_DEVICE_LOST,
         || unsupported(log, what),
     )
-}
-
-unsafe extern "C" fn dev_alloc_mem(
-    _dev: *mut nvkmd_dev,
-    log: *mut vk_object_base,
-    _size: u64,
-    _align: u64,
-    _flags: nvkmd_mem_flags,
-    _out: *mut *mut nvkmd_mem,
-) -> VkResult {
-    not_served(log, "nvkmd_dev.alloc_mem", "memory allocation")
-}
-
-unsafe extern "C" fn dev_alloc_tiled_mem(
-    _dev: *mut nvkmd_dev,
-    log: *mut vk_object_base,
-    _size: u64,
-    _align: u64,
-    _pte_kind: u8,
-    _tile_mode: u16,
-    _flags: nvkmd_mem_flags,
-    _out: *mut *mut nvkmd_mem,
-) -> VkResult {
-    not_served(log, "nvkmd_dev.alloc_tiled_mem", "memory allocation")
-}
-
-unsafe extern "C" fn dev_import_dma_buf(
-    _dev: *mut nvkmd_dev,
-    log: *mut vk_object_base,
-    _fd: c_int,
-    _out: *mut *mut nvkmd_mem,
-) -> VkResult {
-    not_served(log, "nvkmd_dev.import_dma_buf", "dma-buf import")
-}
-
-unsafe extern "C" fn dev_alloc_va(
-    _dev: *mut nvkmd_dev,
-    log: *mut vk_object_base,
-    _flags: nvkmd_va_flags,
-    _pte_kind: u8,
-    _size: u64,
-    _align: u64,
-    _fixed: u64,
-    _out: *mut *mut nvkmd_va,
-) -> VkResult {
-    not_served(log, "nvkmd_dev.alloc_va", "VA allocation")
 }
 
 unsafe extern "C" fn dev_create_ctx(

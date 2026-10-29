@@ -72,6 +72,14 @@ impl RmPdev {
     pub(super) fn base_ptr(&self) -> *mut nvkmd_pdev {
         (&raw const self.base).cast_mut()
     }
+
+    /// Whether `sync_type` is one of the two types this device lists (Mesa
+    /// hands the listed pointers to `vk_sync_init` unchanged).
+    pub(super) fn lists_sync_type(&self, sync_type: *const vk_sync_type) -> bool {
+        self.sync_types
+            .iter()
+            .any(|listed| core::ptr::eq(listed, sync_type))
+    }
 }
 
 /// A value narrowed to the width of the Mesa field it is reported in.
@@ -382,11 +390,11 @@ fn describe(
 unsafe extern "C" fn pdev_destroy(base: *mut nvkmd_pdev) {
     nv_ffi::guard_or_abort::<Diag, ()>("nvkmd_pdev.destroy", || {
         // SAFETY: a live nvkmd_pdev (contract).
-        let pdev =
-            unsafe { RmPdev::from_base(base) }.expect("Mesa destroys its own backend's devices");
-        let pdev = core::ptr::from_ref(pdev).cast_mut();
-        // SAFETY: made by Box::into_raw in `probe`; this is its one destroy.
-        drop(unsafe { Box::from_raw(pdev) });
+        unsafe { RmPdev::from_base(base) }.expect("Mesa destroys its own backend's devices");
+        // SAFETY: a pdev with our ops is the first field of an `RmPdev` that
+        // `probe` leaked with Box::into_raw; Mesa's pointer carries that
+        // allocation's provenance, and this is its one destroy.
+        drop(unsafe { Box::from_raw(base.cast::<RmPdev>()) });
     });
 }
 

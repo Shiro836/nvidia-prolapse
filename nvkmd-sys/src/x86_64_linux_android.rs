@@ -863,7 +863,38 @@ const _: () = {
         [::core::mem::offset_of!(vk_sync_signal, signal_value) - 16usize];
 };
 unsafe extern "C" {
+    pub fn vk_sync_init(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        type_: *const vk_sync_type,
+        flags: vk_sync_flags,
+        initial_value: u64,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_finish(device: *mut vk_device, sync: *mut vk_sync);
+}
+unsafe extern "C" {
     pub fn vk_sync_signal(device: *mut vk_device, sync: *mut vk_sync, value: u64) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_get_value(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        value: *mut u64,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_reset(device: *mut vk_device, sync: *mut vk_sync) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_wait(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        wait_value: u64,
+        wait_flags: vk_sync_wait_flags,
+        abs_timeout_ns: u64,
+    ) -> VkResult;
 }
 unsafe extern "C" {
     pub fn vk_sync_wait_many(
@@ -873,6 +904,37 @@ unsafe extern "C" {
         wait_flags: vk_sync_wait_flags,
         abs_timeout_ns: u64,
     ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_import_opaque_fd(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        fd: ::core::ffi::c_int,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_export_opaque_fd(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        fd: *mut ::core::ffi::c_int,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_import_sync_file(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        sync_file: ::core::ffi::c_int,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_export_sync_file(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        sync_file: *mut ::core::ffi::c_int,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_move(device: *mut vk_device, dst: *mut vk_sync, src: *mut vk_sync) -> VkResult;
 }
 pub const NVKMD_MEM_LOCAL: nvkmd_mem_flags = 1;
 pub const NVKMD_MEM_GART: nvkmd_mem_flags = 2;
@@ -1437,6 +1499,36 @@ unsafe extern "C" {
     pub fn nvkmd_dev_info_init_shared_mem_sizes(info: *mut nv_device_info);
 }
 unsafe extern "C" {
+    pub fn nvkmd_dev_alloc_mem(
+        dev: *mut nvkmd_dev,
+        log_obj: *mut vk_object_base,
+        size_B: u64,
+        align_B: u64,
+        flags: nvkmd_mem_flags,
+        mem_out: *mut *mut nvkmd_mem,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn nvkmd_dev_alloc_tiled_mem(
+        dev: *mut nvkmd_dev,
+        log_obj: *mut vk_object_base,
+        size_B: u64,
+        align_B: u64,
+        pte_kind: u8,
+        tile_mode: u16,
+        flags: nvkmd_mem_flags,
+        mem_out: *mut *mut nvkmd_mem,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn nvkmd_dev_import_dma_buf(
+        dev: *mut nvkmd_dev,
+        log_obj: *mut vk_object_base,
+        fd: ::core::ffi::c_int,
+        mem_out: *mut *mut nvkmd_mem,
+    ) -> VkResult;
+}
+unsafe extern "C" {
     pub fn nvkmd_dev_alloc_va(
         dev: *mut nvkmd_dev,
         log_obj: *mut vk_object_base,
@@ -1447,6 +1539,21 @@ unsafe extern "C" {
         fixed_addr: u64,
         va_out: *mut *mut nvkmd_va,
     ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn nvkmd_mem_unref(mem: *mut nvkmd_mem);
+}
+unsafe extern "C" {
+    pub fn nvkmd_mem_map(
+        mem: *mut nvkmd_mem,
+        log_obj: *mut vk_object_base,
+        flags: nvkmd_mem_map_flags,
+        fixed_addr: *mut ::core::ffi::c_void,
+        map_out: *mut *mut ::core::ffi::c_void,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn nvkmd_mem_unmap(mem: *mut nvkmd_mem, flags: nvkmd_mem_map_flags);
 }
 unsafe extern "C" {
     pub fn nvkmd_va_free(va: *mut nvkmd_va);
@@ -1504,6 +1611,9 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn util_vma_heap_free(heap: *mut util_vma_heap, offset: u64, size: u64);
+}
+unsafe extern "C" {
+    pub fn os_time_get_nano() -> i64;
 }
 #[repr(C)]
 #[repr(align(8))]

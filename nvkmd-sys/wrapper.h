@@ -9,6 +9,7 @@
 #include "nvk_device.h"
 #include "nvkmd/nvkmd.h"
 #include "util/cache_ops.h"
+#include "util/os_time.h"
 #include "util/vma.h"
 #include "vk_device.h"
 #include "vk_log.h"
