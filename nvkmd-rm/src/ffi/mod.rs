@@ -21,6 +21,7 @@ use nvkmd_sys::{
     vk_device, vk_object_base,
 };
 
+mod ctx;
 mod dev;
 mod memory;
 mod pdev;

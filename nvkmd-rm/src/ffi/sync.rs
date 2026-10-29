@@ -208,6 +208,37 @@ unsafe fn sync_of(dev: &RmDev, sync: *mut vk_sync) -> NonNull<RmSync> {
     sync.cast()
 }
 
+/// The RM payload behind a sync a context waits on or signals, or `None`
+/// when the sync is of a type `dev` does not list (`nvkmd_rm.c` `rm_ctx_wait`,
+/// `rm_ctx_signal`: a type check, not an assertion, since any `vk_sync`
+/// reaches a queue).
+///
+/// # Safety
+/// `sync` is a live `vk_sync`.
+pub(super) unsafe fn payload(dev: &RmDev, sync: NonNull<vk_sync>) -> Option<NvRmSyncId> {
+    // SAFETY: a live vk_sync (caller); Mesa sets its type before handing it out.
+    let sync_type =
+        unsafe { member::<*const vk_sync_type>(sync, offset_of!(vk_sync, type_)).read() };
+    if !dev.pdev().lists_sync_type(sync_type) {
+        return None;
+    }
+    // SAFETY: a sync of our types is the first field of an allocation of
+    // `size_of::<RmSync>()` bytes, its id written by `init` before the sync
+    // reached a queue.
+    Some(unsafe { id_of(sync.cast()).read() })
+}
+
+/// Whether a live sync of any type is a timeline (`VK_SYNC_IS_TIMELINE`).
+///
+/// # Safety
+/// `sync` is a live `vk_sync`.
+pub(super) unsafe fn is_timeline(sync: NonNull<vk_sync>) -> bool {
+    // SAFETY: a live vk_sync (caller); Mesa writes its flags only in calls
+    // Vulkan externally synchronises with a queue submission.
+    let flags = unsafe { member::<vk_sync_flags>(sync, offset_of!(vk_sync, flags)).read() };
+    flags & VK_SYNC_IS_TIMELINE != 0
+}
+
 /// A callback's device and sync.
 ///
 /// # Safety

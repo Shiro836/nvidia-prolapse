@@ -10,9 +10,8 @@
 //! closes, so nothing calls into a closing device.
 //!
 //! The device owns the two VA heaps its reservations come from
-//! ([`super::va`]); the memory and VA entries live in their own modules. The
-//! context entries are not served by this backend yet; they fail
-//! `VK_ERROR_FEATURE_NOT_PRESENT`.
+//! ([`super::va`]); the memory, VA and context entries live in their own
+//! modules.
 use std::ffi::c_int;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr::NonNull;
@@ -27,16 +26,16 @@ use nvkmd_sys::{
     NVKMD_SYS_NVK_DEVICE_NVKMD, NVKMD_SYS_NVK_DEVICE_VK, NVKMD_SYS_VK_DEVICE_CHECK_STATUS,
     NVKMD_SYS_VK_DEVICE_LOST, NVKMD_SYS_VK_DEVICE_NOTIFY_LOST,
     NVKMD_SYS_VK_DEVICE_NOTIFY_LOST_DATA, NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_ERROR_DEVICE_LOST,
-    VK_ERROR_INITIALIZATION_FAILED, VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS, VkResult, nvkmd_ctx,
-    nvkmd_dev, nvkmd_dev_finish, nvkmd_dev_init, nvkmd_dev_ops, nvkmd_engines, nvkmd_pdev,
-    nvkmd_sys_layout, nvkmd_sys_vk_device_check_status, nvkmd_sys_vk_device_notify_lost, vk_device,
-    vk_object_base,
+    VK_ERROR_INITIALIZATION_FAILED, VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS, VkResult, nvkmd_dev,
+    nvkmd_dev_finish, nvkmd_dev_init, nvkmd_dev_ops, nvkmd_pdev, nvkmd_sys_layout,
+    nvkmd_sys_vk_device_check_status, nvkmd_sys_vk_device_notify_lost, vk_device, vk_object_base,
 };
 
+use super::ctx::{dev_create_ctx, dev_create_shared_ctx};
 use super::memory::{dev_alloc_mem, dev_alloc_tiled_mem, dev_import_dma_buf};
 use super::pdev::{RmPdev, open_render_node};
 use super::va::{VaHeaps, dev_alloc_va};
-use super::{Diag, diag, rm_result, set_lost, try_alloc_zeroed, unsupported, vk_error};
+use super::{Diag, diag, rm_result, set_lost, try_alloc_zeroed, vk_error};
 
 /// A KMD device. Mesa holds `&base`; [`dev_destroy`] frees it.
 #[repr(C)]
@@ -247,7 +246,7 @@ pub(super) unsafe extern "C" fn dev_create(
 ///
 /// # Safety
 /// `log` is NULL or a live Vulkan object.
-unsafe fn logical_device(log: *mut vk_object_base) -> Option<NonNull<vk_device>> {
+pub(super) unsafe fn logical_device(log: *mut vk_object_base) -> Option<NonNull<vk_device>> {
     let log = NonNull::new(log)?;
     // SAFETY: `device` lies inside the live object (Mesa's layout).
     let slot =
@@ -478,33 +477,4 @@ unsafe extern "C" fn dev_drm_fd(base: *mut nvkmd_dev) -> c_int {
         let dev = unsafe { RmDev::from_base(base) }.expect("Mesa calls its own backend's devices");
         dev.drm_fd()
     })
-}
-
-/// The context entries: not served (module docs).
-fn not_served(log: *mut vk_object_base, entry: &'static str, what: &str) -> VkResult {
-    nv_ffi::guard::<Diag, VkResult>(
-        entry,
-        None,
-        || VK_ERROR_DEVICE_LOST,
-        || unsupported(log, what),
-    )
-}
-
-unsafe extern "C" fn dev_create_ctx(
-    _dev: *mut nvkmd_dev,
-    log: *mut vk_object_base,
-    _engines: nvkmd_engines,
-    _out: *mut *mut nvkmd_ctx,
-) -> VkResult {
-    not_served(log, "nvkmd_dev.create_ctx", "contexts")
-}
-
-unsafe extern "C" fn dev_create_shared_ctx(
-    _dev: *mut nvkmd_dev,
-    log: *mut vk_object_base,
-    _engines: nvkmd_engines,
-    _share: *mut nvkmd_ctx,
-    _out: *mut *mut nvkmd_ctx,
-) -> VkResult {
-    not_served(log, "nvkmd_dev.create_shared_ctx", "contexts")
 }

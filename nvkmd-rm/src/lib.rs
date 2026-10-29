@@ -7,7 +7,5 @@
 //!
 //! Every `extern "C"` entry and callback lives in [`ffi`] and runs inside the
 //! shared panic guard (`nv-ffi`); the policy it applies lives in
-//! `nvkmd-rm-logic`. Physical and KMD devices, memory, VA reservations and
-//! sync payloads are served; context requests fail
-//! `VK_ERROR_FEATURE_NOT_PRESENT`.
+//! `nvkmd-rm-logic`.
 mod ffi;
