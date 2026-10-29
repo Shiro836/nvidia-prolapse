@@ -5,6 +5,7 @@
 
 pub const O_RDWR: u32 = 2;
 pub const O_CLOEXEC: u32 = 524288;
+pub const DRM_CAP_SYNCOBJ_TIMELINE: u32 = 20;
 pub const DRM_NODE_RENDER: u32 = 2;
 pub const DRM_NODE_MAX: u32 = 3;
 pub const DRM_BUS_PCI: u32 = 0;
@@ -2607,6 +2608,80 @@ pub const VK_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION_KHR: VkObjectType = 1000156000
 pub const VK_OBJECT_TYPE_PRIVATE_DATA_SLOT_EXT: VkObjectType = 1000295000;
 pub const VK_OBJECT_TYPE_MAX_ENUM: VkObjectType = 2147483647;
 pub type VkObjectType = ::core::ffi::c_uint;
+pub const VK_SYSTEM_ALLOCATION_SCOPE_COMMAND: VkSystemAllocationScope = 0;
+pub const VK_SYSTEM_ALLOCATION_SCOPE_OBJECT: VkSystemAllocationScope = 1;
+pub const VK_SYSTEM_ALLOCATION_SCOPE_CACHE: VkSystemAllocationScope = 2;
+pub const VK_SYSTEM_ALLOCATION_SCOPE_DEVICE: VkSystemAllocationScope = 3;
+pub const VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE: VkSystemAllocationScope = 4;
+pub const VK_SYSTEM_ALLOCATION_SCOPE_MAX_ENUM: VkSystemAllocationScope = 2147483647;
+pub type VkSystemAllocationScope = ::core::ffi::c_uint;
+pub const VK_INTERNAL_ALLOCATION_TYPE_EXECUTABLE: VkInternalAllocationType = 0;
+pub const VK_INTERNAL_ALLOCATION_TYPE_MAX_ENUM: VkInternalAllocationType = 2147483647;
+pub type VkInternalAllocationType = ::core::ffi::c_uint;
+pub type PFN_vkAllocationFunction = ::core::option::Option<
+    unsafe extern "C" fn(
+        pUserData: *mut ::core::ffi::c_void,
+        size: usize,
+        alignment: usize,
+        allocationScope: VkSystemAllocationScope,
+    ) -> *mut ::core::ffi::c_void,
+>;
+pub type PFN_vkFreeFunction = ::core::option::Option<
+    unsafe extern "C" fn(pUserData: *mut ::core::ffi::c_void, pMemory: *mut ::core::ffi::c_void),
+>;
+pub type PFN_vkInternalAllocationNotification = ::core::option::Option<
+    unsafe extern "C" fn(
+        pUserData: *mut ::core::ffi::c_void,
+        size: usize,
+        allocationType: VkInternalAllocationType,
+        allocationScope: VkSystemAllocationScope,
+    ),
+>;
+pub type PFN_vkInternalFreeNotification = ::core::option::Option<
+    unsafe extern "C" fn(
+        pUserData: *mut ::core::ffi::c_void,
+        size: usize,
+        allocationType: VkInternalAllocationType,
+        allocationScope: VkSystemAllocationScope,
+    ),
+>;
+pub type PFN_vkReallocationFunction = ::core::option::Option<
+    unsafe extern "C" fn(
+        pUserData: *mut ::core::ffi::c_void,
+        pOriginal: *mut ::core::ffi::c_void,
+        size: usize,
+        alignment: usize,
+        allocationScope: VkSystemAllocationScope,
+    ) -> *mut ::core::ffi::c_void,
+>;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkAllocationCallbacks {
+    pub pUserData: *mut ::core::ffi::c_void,
+    pub pfnAllocation: PFN_vkAllocationFunction,
+    pub pfnReallocation: PFN_vkReallocationFunction,
+    pub pfnFree: PFN_vkFreeFunction,
+    pub pfnInternalAllocation: PFN_vkInternalAllocationNotification,
+    pub pfnInternalFree: PFN_vkInternalFreeNotification,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of VkAllocationCallbacks"][::core::mem::size_of::<VkAllocationCallbacks>() - 48usize];
+    ["Alignment of VkAllocationCallbacks"]
+        [::core::mem::align_of::<VkAllocationCallbacks>() - 8usize];
+    ["Offset of field: VkAllocationCallbacks::pUserData"]
+        [::core::mem::offset_of!(VkAllocationCallbacks, pUserData) - 0usize];
+    ["Offset of field: VkAllocationCallbacks::pfnAllocation"]
+        [::core::mem::offset_of!(VkAllocationCallbacks, pfnAllocation) - 8usize];
+    ["Offset of field: VkAllocationCallbacks::pfnReallocation"]
+        [::core::mem::offset_of!(VkAllocationCallbacks, pfnReallocation) - 16usize];
+    ["Offset of field: VkAllocationCallbacks::pfnFree"]
+        [::core::mem::offset_of!(VkAllocationCallbacks, pfnFree) - 24usize];
+    ["Offset of field: VkAllocationCallbacks::pfnInternalAllocation"]
+        [::core::mem::offset_of!(VkAllocationCallbacks, pfnInternalAllocation) - 32usize];
+    ["Offset of field: VkAllocationCallbacks::pfnInternalFree"]
+        [::core::mem::offset_of!(VkAllocationCallbacks, pfnInternalFree) - 40usize];
+};
 pub const VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_FD_BIT: VkExternalFenceHandleTypeFlagBits = 1;
 pub const VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_WIN32_BIT: VkExternalFenceHandleTypeFlagBits = 2;
 pub const VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT: VkExternalFenceHandleTypeFlagBits = 4;
@@ -3375,6 +3450,9 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn vk_sync_move(device: *mut vk_device, dst: *mut vk_sync, src: *mut vk_sync) -> VkResult;
 }
+unsafe extern "C" {
+    pub fn vk_default_allocator() -> *const VkAllocationCallbacks;
+}
 pub const NVKMD_MEM_LOCAL: nvkmd_mem_flags = 1;
 pub const NVKMD_MEM_GART: nvkmd_mem_flags = 2;
 pub const NVKMD_MEM_VRAM: nvkmd_mem_flags = 4;
@@ -4051,8 +4129,215 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn util_vma_heap_free(heap: *mut util_vma_heap, offset: u64, size: u64);
 }
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct nvk_mem_stream_chunk {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct nvk_mem_stream {
+    pub sync: *mut vk_sync,
+    pub next_time_point: u64,
+    pub time_point_passed: u64,
+    pub needs_flush: bool,
+    pub chunk: *mut nvk_mem_stream_chunk,
+    pub chunk_alloc_B: u32,
+    pub recycle: list_head,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of nvk_mem_stream"][::core::mem::size_of::<nvk_mem_stream>() - 64usize];
+    ["Alignment of nvk_mem_stream"][::core::mem::align_of::<nvk_mem_stream>() - 8usize];
+    ["Offset of field: nvk_mem_stream::sync"]
+        [::core::mem::offset_of!(nvk_mem_stream, sync) - 0usize];
+    ["Offset of field: nvk_mem_stream::next_time_point"]
+        [::core::mem::offset_of!(nvk_mem_stream, next_time_point) - 8usize];
+    ["Offset of field: nvk_mem_stream::time_point_passed"]
+        [::core::mem::offset_of!(nvk_mem_stream, time_point_passed) - 16usize];
+    ["Offset of field: nvk_mem_stream::needs_flush"]
+        [::core::mem::offset_of!(nvk_mem_stream, needs_flush) - 24usize];
+    ["Offset of field: nvk_mem_stream::chunk"]
+        [::core::mem::offset_of!(nvk_mem_stream, chunk) - 32usize];
+    ["Offset of field: nvk_mem_stream::chunk_alloc_B"]
+        [::core::mem::offset_of!(nvk_mem_stream, chunk_alloc_B) - 40usize];
+    ["Offset of field: nvk_mem_stream::recycle"]
+        [::core::mem::offset_of!(nvk_mem_stream, recycle) - 48usize];
+};
+unsafe extern "C" {
+    pub fn nvk_mem_stream_init(dev: *mut nvk_device, stream: *mut nvk_mem_stream) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn nvk_mem_stream_finish(dev: *mut nvk_device, stream: *mut nvk_mem_stream);
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct util_dynarray {
+    pub mem_ctx: *mut ::core::ffi::c_void,
+    pub data: *mut ::core::ffi::c_void,
+    pub size: ::core::ffi::c_uint,
+    pub capacity: ::core::ffi::c_uint,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of util_dynarray"][::core::mem::size_of::<util_dynarray>() - 24usize];
+    ["Alignment of util_dynarray"][::core::mem::align_of::<util_dynarray>() - 8usize];
+    ["Offset of field: util_dynarray::mem_ctx"]
+        [::core::mem::offset_of!(util_dynarray, mem_ctx) - 0usize];
+    ["Offset of field: util_dynarray::data"][::core::mem::offset_of!(util_dynarray, data) - 8usize];
+    ["Offset of field: util_dynarray::size"]
+        [::core::mem::offset_of!(util_dynarray, size) - 16usize];
+    ["Offset of field: util_dynarray::capacity"]
+        [::core::mem::offset_of!(util_dynarray, capacity) - 20usize];
+};
 unsafe extern "C" {
     pub fn os_time_get_nano() -> i64;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct util_sync_provider {
+    pub create: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            flags: u32,
+            handle: *mut u32,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub destroy: ::core::option::Option<
+        unsafe extern "C" fn(p: *mut util_sync_provider, handle: u32) -> ::core::ffi::c_int,
+    >,
+    pub handle_to_fd: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            handle: u32,
+            out_obj_fd: *mut ::core::ffi::c_int,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub fd_to_handle: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            obj_fd: ::core::ffi::c_int,
+            handle: *mut u32,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub import_sync_file: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            handle: u32,
+            sync_file_fd: ::core::ffi::c_int,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub export_sync_file: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            handle: u32,
+            out_sync_file_fd: *mut ::core::ffi::c_int,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub wait: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            handles: *mut u32,
+            num_handles: ::core::ffi::c_uint,
+            timeout_nsec: i64,
+            flags: ::core::ffi::c_uint,
+            first_signaled: *mut u32,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub reset: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            handles: *const u32,
+            handle_count: u32,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub signal: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            handles: *const u32,
+            handle_count: u32,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub timeline_signal: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            handles: *const u32,
+            points: *mut u64,
+            handle_count: u32,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub timeline_wait: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            handles: *mut u32,
+            points: *mut u64,
+            num_handles: ::core::ffi::c_uint,
+            timeout_nsec: i64,
+            flags: ::core::ffi::c_uint,
+            first_signaled: *mut u32,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub query: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            handles: *mut u32,
+            points: *mut u64,
+            handle_count: u32,
+            flags: u32,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub transfer: ::core::option::Option<
+        unsafe extern "C" fn(
+            p: *mut util_sync_provider,
+            dst_handle: u32,
+            dst_point: u64,
+            src_handle: u32,
+            src_point: u64,
+            flags: u32,
+        ) -> ::core::ffi::c_int,
+    >,
+    pub finalize: ::core::option::Option<unsafe extern "C" fn(p: *mut util_sync_provider)>,
+    pub clone: ::core::option::Option<
+        unsafe extern "C" fn(p: *mut util_sync_provider) -> *mut util_sync_provider,
+    >,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of util_sync_provider"][::core::mem::size_of::<util_sync_provider>() - 120usize];
+    ["Alignment of util_sync_provider"][::core::mem::align_of::<util_sync_provider>() - 8usize];
+    ["Offset of field: util_sync_provider::create"]
+        [::core::mem::offset_of!(util_sync_provider, create) - 0usize];
+    ["Offset of field: util_sync_provider::destroy"]
+        [::core::mem::offset_of!(util_sync_provider, destroy) - 8usize];
+    ["Offset of field: util_sync_provider::handle_to_fd"]
+        [::core::mem::offset_of!(util_sync_provider, handle_to_fd) - 16usize];
+    ["Offset of field: util_sync_provider::fd_to_handle"]
+        [::core::mem::offset_of!(util_sync_provider, fd_to_handle) - 24usize];
+    ["Offset of field: util_sync_provider::import_sync_file"]
+        [::core::mem::offset_of!(util_sync_provider, import_sync_file) - 32usize];
+    ["Offset of field: util_sync_provider::export_sync_file"]
+        [::core::mem::offset_of!(util_sync_provider, export_sync_file) - 40usize];
+    ["Offset of field: util_sync_provider::wait"]
+        [::core::mem::offset_of!(util_sync_provider, wait) - 48usize];
+    ["Offset of field: util_sync_provider::reset"]
+        [::core::mem::offset_of!(util_sync_provider, reset) - 56usize];
+    ["Offset of field: util_sync_provider::signal"]
+        [::core::mem::offset_of!(util_sync_provider, signal) - 64usize];
+    ["Offset of field: util_sync_provider::timeline_signal"]
+        [::core::mem::offset_of!(util_sync_provider, timeline_signal) - 72usize];
+    ["Offset of field: util_sync_provider::timeline_wait"]
+        [::core::mem::offset_of!(util_sync_provider, timeline_wait) - 80usize];
+    ["Offset of field: util_sync_provider::query"]
+        [::core::mem::offset_of!(util_sync_provider, query) - 88usize];
+    ["Offset of field: util_sync_provider::transfer"]
+        [::core::mem::offset_of!(util_sync_provider, transfer) - 96usize];
+    ["Offset of field: util_sync_provider::finalize"]
+        [::core::mem::offset_of!(util_sync_provider, finalize) - 104usize];
+    ["Offset of field: util_sync_provider::clone"]
+        [::core::mem::offset_of!(util_sync_provider, clone) - 112usize];
+};
+unsafe extern "C" {
+    pub fn util_sync_provider_drm(drm_fd: ::core::ffi::c_int) -> *mut util_sync_provider;
 }
 pub const VK_QUEUE_SUBMIT_MODE_IMMEDIATE: vk_queue_submit_mode = 0;
 pub const VK_QUEUE_SUBMIT_MODE_DEFERRED: vk_queue_submit_mode = 1;
@@ -4171,6 +4456,36 @@ unsafe extern "C" {
         ...
     ) -> VkResult;
 }
+#[repr(C)]
+#[repr(align(8))]
+pub struct nvk_device {
+    pub _bindgen_opaque_blob: [u64; 3751usize],
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct nvk_device__bindgen_ty_1 {
+    pub mutex: simple_mtx_t,
+    pub blocks: util_dynarray,
+    pub free_pieces: util_dynarray,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of nvk_device__bindgen_ty_1"]
+        [::core::mem::size_of::<nvk_device__bindgen_ty_1>() - 56usize];
+    ["Alignment of nvk_device__bindgen_ty_1"]
+        [::core::mem::align_of::<nvk_device__bindgen_ty_1>() - 8usize];
+    ["Offset of field: nvk_device__bindgen_ty_1::mutex"]
+        [::core::mem::offset_of!(nvk_device__bindgen_ty_1, mutex) - 0usize];
+    ["Offset of field: nvk_device__bindgen_ty_1::blocks"]
+        [::core::mem::offset_of!(nvk_device__bindgen_ty_1, blocks) - 8usize];
+    ["Offset of field: nvk_device__bindgen_ty_1::free_pieces"]
+        [::core::mem::offset_of!(nvk_device__bindgen_ty_1, free_pieces) - 32usize];
+};
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of nvk_device"][::core::mem::size_of::<nvk_device>() - 30008usize];
+    ["Alignment of nvk_device"][::core::mem::align_of::<nvk_device>() - 8usize];
+};
 unsafe extern "C" {
     pub fn util_cache_granularity() -> usize;
 }
@@ -4186,6 +4501,12 @@ pub const NVKMD_SYS_VK_OBJECT_BASE_TYPE: nvkmd_sys_layout = 8;
 pub const NVKMD_SYS_VK_PHYSICAL_DEVICE_SUPPORTED_SYNC_TYPES: nvkmd_sys_layout = 5576;
 pub const NVKMD_SYS_VK_QUEUE_LOST: nvkmd_sys_layout = 280;
 pub const NVKMD_SYS_VK_QUEUE_SUBMIT_MUTEX: nvkmd_sys_layout = 112;
+pub const NVKMD_SYS_NVK_PHYSICAL_DEVICE_SIZE: nvkmd_sys_layout = 7352;
+pub const NVKMD_SYS_NVK_PHYSICAL_DEVICE_VK: nvkmd_sys_layout = 0;
+pub const NVKMD_SYS_NVK_PHYSICAL_DEVICE_NVKMD: nvkmd_sys_layout = 5816;
+pub const NVKMD_SYS_VK_DEVICE_PHYSICAL: nvkmd_sys_layout = 112;
+pub const NVKMD_SYS_VK_DEVICE_ALLOC: nvkmd_sys_layout = 64;
+pub const NVKMD_SYS_VK_DEVICE_SYNC: nvkmd_sys_layout = 6144;
 pub type nvkmd_sys_layout = ::core::ffi::c_uint;
 pub type nvkmd_sys_vk_device_lost = ::core::ffi::c_int;
 pub type nvkmd_sys_vk_device_notify_lost = ::core::option::Option<

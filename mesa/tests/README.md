@@ -39,7 +39,13 @@ opaque-fd and sync-fd masks, no sync-fd timeline semaphores; exactly one
 timeline type, waiting before signal, which selects Mesa's native timeline
 mode) and `queue-loss` (Mesa's `vk_queue_set_lost` on two stand-in queues of
 a logical device, under each queue's submit mutex: one device loss count and
-one RM publication per queue, none for a repeat).
+one RM publication per queue, none for a repeat) and `mem-stream` (NVK's
+`nvk_mem_stream_init` on a stand-in NVK device: no sync types, a zeroed type,
+a type without timeline, init or finish are refused with
+`VK_ERROR_INITIALIZATION_FAILED` and no sync object; an RM failure creating the
+timeline passes through; the backend's timeline type works and finishes. Also
+the logical device's DRM sync provider: none when its allocation fails, no
+timeline waits without the render node's timeline syncobjs).
 
 ## pascal-a-clear.c
 

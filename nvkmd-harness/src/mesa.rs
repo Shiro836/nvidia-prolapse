@@ -38,6 +38,12 @@ use nvkmd_sys::{
     VkPhysicalDeviceExternalSemaphoreInfo, mtx_destroy, mtx_init, mtx_lock, mtx_plain, mtx_t,
     mtx_unlock, thrd_success, vk_physical_device, vk_queue,
 };
+use nvkmd_sys::{
+    NVKMD_SYS_NVK_PHYSICAL_DEVICE_NVKMD, NVKMD_SYS_NVK_PHYSICAL_DEVICE_SIZE,
+    NVKMD_SYS_NVK_PHYSICAL_DEVICE_VK, NVKMD_SYS_VK_DEVICE_ALLOC, NVKMD_SYS_VK_DEVICE_PHYSICAL,
+    NVKMD_SYS_VK_DEVICE_SYNC, nvk_device, nvk_mem_stream, nvk_mem_stream_finish,
+    nvk_mem_stream_init, util_sync_provider, util_sync_provider_drm, vk_default_allocator,
+};
 
 // Mesa's common external fence and semaphore property queries (vk_fence.c,
 // vk_semaphore.c), declared here because bindgen skips declarations that
@@ -1207,4 +1213,171 @@ impl Drop for Queue {
         // no pointer to the queue.
         drop(unsafe { Box::from_raw(slice) });
     }
+}
+
+/// A stand-in NVK physical device (`nvk_physical_device`): zeroed, its
+/// `nvkmd` member pointing at a stand-in `nvkmd_pdev` that lists the sync
+/// types this owner chooses. That member is all NVK's memory stream reads
+/// of the physical device (`nvk_mem_stream.c` `nvk_mem_stream_init` through
+/// `nvk_device_physical`).
+pub(crate) struct NvkPhysical {
+    base: NonNull<u8>,
+    nvkmd: NonNull<nvkmd_pdev>,
+}
+
+/// Words of the stand-in NVK physical device.
+const NVK_PHYSICAL_WORDS: usize = offset(NVKMD_SYS_NVK_PHYSICAL_DEVICE_SIZE).div_ceil(8);
+
+impl NvkPhysical {
+    pub(crate) fn new() -> Self {
+        // SAFETY: all-zero is a valid `nvkmd_pdev` (integers, NULL pointers and
+        // empty callbacks).
+        let pdev: nvkmd_pdev = unsafe { core::mem::zeroed() };
+        let nvkmd = NonNull::from(Box::leak(Box::new(pdev)));
+        let words: Box<[u64; NVK_PHYSICAL_WORDS]> = Box::new([0; NVK_PHYSICAL_WORDS]);
+        let base = NonNull::from(Box::leak(words)).cast::<u8>();
+        // SAFETY: the `nvkmd` member lies inside the stand-in and is
+        // pointer-aligned (Mesa's layout); the stand-in is not shared yet.
+        unsafe {
+            write_member(
+                base,
+                offset(NVKMD_SYS_NVK_PHYSICAL_DEVICE_NVKMD),
+                nvkmd.as_ptr(),
+            );
+        }
+        Self { base, nvkmd }
+    }
+
+    /// The `vk_physical_device` a logical device's `physical` points at.
+    fn vk(&self) -> *mut vk_physical_device {
+        // SAFETY: the `vk` member lies inside the stand-in.
+        unsafe { self.base.byte_add(offset(NVKMD_SYS_NVK_PHYSICAL_DEVICE_VK)) }
+            .cast::<vk_physical_device>()
+            .as_ptr()
+    }
+
+    /// Makes `types` (NULL, or a NULL-terminated list that outlives every
+    /// stream call) the sync types of the stand-in `nvkmd_pdev`.
+    pub(crate) fn set_sync_types(&self, types: *const *const vk_sync_type) {
+        // SAFETY: `sync_types` lies inside the live stand-in pdev owned here,
+        // aligned (its own field); Mesa reads it only during calls made from
+        // this thread.
+        unsafe {
+            write_member(
+                self.nvkmd.cast(),
+                core::mem::offset_of!(nvkmd_pdev, sync_types),
+                types,
+            );
+        }
+    }
+}
+
+impl Drop for NvkPhysical {
+    fn drop(&mut self) {
+        // SAFETY: allocated by Box in `new`; no logical device points at it
+        // any more (the suites drop those first).
+        drop(unsafe { Box::from_raw(self.nvkmd.as_ptr()) });
+        // SAFETY: as above.
+        drop(unsafe { Box::from_raw(self.base.cast::<[u64; NVK_PHYSICAL_WORDS]>().as_ptr()) });
+    }
+}
+
+/// Mesa's DRM sync provider of a logical device (`vk_device_set_drm_fd`,
+/// inline in `vk_device.h`: `util_sync_provider_drm`), released through its
+/// `finalize` as `vk_device_finish` does.
+pub(crate) struct SyncProvider(NonNull<util_sync_provider>);
+
+impl SyncProvider {
+    /// `None` when Mesa could not allocate the provider.
+    pub(crate) fn new(fd: c_int) -> Option<Self> {
+        // SAFETY: the descriptor is only stored and passed to drmGetCap, which
+        // the harness answers.
+        NonNull::new(unsafe { util_sync_provider_drm(fd) }).map(Self)
+    }
+
+    /// Whether the provider offers timeline waits (the render node reported
+    /// timeline syncobjs).
+    pub(crate) fn has_timeline_wait(&self) -> bool {
+        // SAFETY: a live provider Mesa initialised; not written concurrently.
+        unsafe { self.0.as_ref() }.timeline_wait.is_some()
+    }
+}
+
+impl Drop for SyncProvider {
+    fn drop(&mut self) {
+        // SAFETY: a live provider Mesa initialised; not written concurrently.
+        let finalize = unsafe { self.0.as_ref() }
+            .finalize
+            .expect("util_sync_provider_drm sets finalize");
+        // SAFETY: the provider's own release; nothing uses it afterwards (the
+        // logical device that carried it is gone).
+        unsafe { finalize(self.0.as_ptr()) };
+    }
+}
+
+impl VkDevice {
+    /// Gives the logical device what NVK's memory stream reaches besides the
+    /// KMD device: its physical device, Mesa's default allocator and a sync
+    /// provider (`vk_device_init`, `vk_device_set_drm_fd`).
+    pub(crate) fn set_runtime(&self, physical: &NvkPhysical, sync: &SyncProvider) {
+        let base = self.0.cast::<u8>();
+        // SAFETY: Mesa's static default allocator, valid for the process.
+        let alloc = unsafe { vk_default_allocator() };
+        // SAFETY: a valid pointer to an initialised VkAllocationCallbacks.
+        let alloc = unsafe { alloc.read() };
+        // SAFETY: `alloc`, `physical` and `sync` lie inside the logical device
+        // and are aligned (Mesa's layout); the suites are single-threaded.
+        unsafe { write_member(base, offset(NVKMD_SYS_VK_DEVICE_ALLOC), alloc) };
+        // SAFETY: as above.
+        unsafe { write_member(base, offset(NVKMD_SYS_VK_DEVICE_PHYSICAL), physical.vk()) };
+        // SAFETY: as above.
+        unsafe { write_member(base, offset(NVKMD_SYS_VK_DEVICE_SYNC), sync.0.as_ptr()) };
+    }
+
+    /// The stand-in NVK device, as NVK's own functions take it.
+    fn nvk_device(&self) -> *mut nvk_device {
+        self.nvk().cast::<nvk_device>().as_ptr()
+    }
+}
+
+/// NVK's memory stream (`nvk_mem_stream.c`) of a stand-in NVK device.
+pub(crate) struct MemStream(Box<nvk_mem_stream>);
+
+impl MemStream {
+    /// A stream whose `sync` holds a non-NULL marker, so a failed init is seen
+    /// to clear it.
+    pub(crate) fn new() -> Self {
+        // SAFETY: all-zero is a valid `nvk_mem_stream` (integers, false and
+        // NULL pointers); init overwrites it.
+        let mut stream: Box<nvk_mem_stream> = Box::new(unsafe { core::mem::zeroed() });
+        stream.sync = NonNull::dangling().as_ptr();
+        Self(stream)
+    }
+
+    /// `nvk_mem_stream_init` on `vk`, which has a KMD device and
+    /// [`VkDevice::set_runtime`].
+    pub(crate) fn init(&mut self, vk: &VkDevice) -> VkResult {
+        // SAFETY: the stand-in NVK device holds everything init reads; the
+        // stream is a writable record.
+        unsafe { nvk_mem_stream_init(vk.nvk_device(), &raw mut *self.0) }
+    }
+
+    /// Whether the stream holds a timeline sync object.
+    pub(crate) fn has_sync(&self) -> bool {
+        !self.0.sync.is_null()
+    }
+
+    /// `nvk_mem_stream_finish` of a stream whose init succeeded and that
+    /// allocated no chunk.
+    pub(crate) fn finish(mut self, vk: &VkDevice) {
+        // SAFETY: an initialised stream of this device.
+        unsafe { nvk_mem_stream_finish(vk.nvk_device(), &raw mut *self.0) };
+    }
+}
+
+/// A sync type with no size, no features and no callbacks.
+pub(crate) fn zeroed_sync_type() -> vk_sync_type {
+    // SAFETY: all-zero is a valid `vk_sync_type` (integers and empty
+    // callbacks).
+    unsafe { core::mem::zeroed() }
 }

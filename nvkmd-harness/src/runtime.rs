@@ -2,7 +2,8 @@
 //! Mesa's runtime over the backend's sync types and loss hooks: the external
 //! fence and semaphore property queries an application sees
 //! (`vk_fence.c`, `vk_semaphore.c`) and a queue's loss (`vk_queue.c`
-//! `_vk_queue_set_lost`). These run Mesa's own code against stand-in
+//! `_vk_queue_set_lost`), and NVK's memory stream over the backend's timeline
+//! type (`nvk_mem_stream.c`). These run Mesa's own code against stand-in
 //! physical devices and queues ([`crate::mesa`]); the backend is reached only
 //! through the types it lists and the hooks it installs.
 use std::ffi::c_void;
@@ -23,8 +24,12 @@ use nvkmd_sys::{
     VkSemaphoreTypeCreateInfo,
 };
 
-use crate::fake::{live_allocations, note, reset, state};
-use crate::mesa::{self, PhysicalDevice, Queue, VkDevice};
+use nvkmd_sys::{
+    VK_ERROR_INITIALIZATION_FAILED, VK_ERROR_OUT_OF_DEVICE_MEMORY, VK_SUCCESS, vk_sync_type,
+};
+
+use crate::fake::{self, live_allocations, note, reset, state};
+use crate::mesa::{self, MemStream, NvkPhysical, PhysicalDevice, Queue, SyncProvider, VkDevice};
 
 /// What Mesa answers for one external handle type: features, compatible
 /// types, types exportable from an import.
@@ -197,4 +202,126 @@ pub(crate) fn queue_loss() {
     drop(vk);
     pdev.destroy();
     assert_eq!(live_allocations(), 0, "devices free what they allocated");
+}
+
+/// NVK's memory stream over the backend's sync types (`nvk_mem_stream.c`
+/// `nvk_mem_stream_init`): it refuses a physical device without an operational
+/// timeline type before `vk_sync_create` could call through a NULL callback,
+/// passes an RM failure to create its timeline through, and leaves no sync
+/// object behind on any failure. Before that, the logical device's DRM sync
+/// provider (`vk_device_set_drm_fd`): an allocation failure leaves none, and a
+/// render node without timeline syncobjs gives one without timeline waits.
+pub(crate) fn mem_stream() {
+    reset();
+    state().timeline_cap = Some(0);
+    let pdev = mesa::try_create_pdev().expect("the fake NVIDIA device is accepted");
+    let vk = VkDevice::new();
+    let dev = pdev.create_dev(Some(&vk)).expect("the KMD device opens");
+    vk.attach(&dev);
+    state().loss_device = vk.as_ptr().expose_provenance();
+
+    fake::fail_next_calloc();
+    let provider = SyncProvider::new(fake::SYNC_PROVIDER_FD);
+    fake::stop_failing_calloc();
+    note(format!(
+        "sync provider, allocation fails: {}",
+        if provider.is_some() {
+            "created"
+        } else {
+            "none"
+        }
+    ));
+    assert!(provider.is_none(), "a failed allocation gives no provider");
+    let provider = SyncProvider::new(fake::SYNC_PROVIDER_FD).expect("the provider allocates");
+    note(format!(
+        "sync provider: timeline wait {}",
+        provider.has_timeline_wait()
+    ));
+    assert!(
+        !provider.has_timeline_wait(),
+        "no timeline waits without the render node's timeline syncobjs"
+    );
+
+    let physical = NvkPhysical::new();
+    vk.set_runtime(&physical, &provider);
+    let timeline = *pdev.sync_types()[0];
+    assert!(
+        timeline.features & VK_SYNC_FEATURE_TIMELINE != 0,
+        "the backend lists its timeline type first (NVK uses sync_types[0])"
+    );
+    let zeroed = mesa::zeroed_sync_type();
+    let binary = vk_sync_type {
+        features: timeline.features & !VK_SYNC_FEATURE_TIMELINE,
+        ..timeline
+    };
+    let without_init = vk_sync_type {
+        init: None,
+        ..timeline
+    };
+    let without_finish = vk_sync_type {
+        finish: None,
+        ..timeline
+    };
+    for (case, kind) in [
+        ("zeroed type", &zeroed),
+        ("type without timeline", &binary),
+        ("timeline type without init", &without_init),
+        ("timeline type without finish", &without_finish),
+    ] {
+        let types = [std::ptr::from_ref(kind), std::ptr::null()];
+        physical.set_sync_types(types.as_ptr());
+        refused_stream(&vk, case);
+    }
+    physical.set_sync_types(std::ptr::null());
+    refused_stream(&vk, "no sync types");
+
+    physical.set_sync_types(pdev.get().sync_types);
+    state().sync.create_status = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    let mut stream = MemStream::new();
+    let result = stream.init(&vk);
+    state().sync.create_status = 0;
+    note(format!(
+        "RM timeline creation fails: nvk_mem_stream_init = {result}, sync {}",
+        stream.has_sync()
+    ));
+    assert_eq!(
+        result, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+        "the RM status passes through"
+    );
+    assert!(!stream.has_sync(), "a failed init leaves no sync object");
+
+    let mut stream = MemStream::new();
+    let result = stream.init(&vk);
+    note(format!(
+        "operational timeline type: nvk_mem_stream_init = {result}, sync {}",
+        stream.has_sync()
+    ));
+    assert_eq!(result, VK_SUCCESS);
+    assert!(stream.has_sync(), "the stream holds its timeline");
+    stream.finish(&vk);
+
+    dev.destroy();
+    state().loss_device = 0;
+    drop(vk);
+    drop(physical);
+    drop(provider);
+    pdev.destroy();
+    assert_eq!(live_allocations(), 0, "devices free what they allocated");
+}
+
+/// `nvk_mem_stream_init` refuses the stand-in physical device's sync types
+/// with `VK_ERROR_INITIALIZATION_FAILED` and a diagnostic, and no sync object.
+fn refused_stream(vk: &VkDevice, case: &str) {
+    state().diagnostic.clear();
+    let mut stream = MemStream::new();
+    let result = stream.init(vk);
+    let diagnostic = std::mem::take(&mut state().diagnostic);
+    note(format!(
+        "{case}: nvk_mem_stream_init = {result}, sync {}, diagnostic {:?}",
+        stream.has_sync(),
+        diagnostic.trim_end()
+    ));
+    assert_eq!(result, VK_ERROR_INITIALIZATION_FAILED, "{case}");
+    assert!(!stream.has_sync(), "{case}: no sync object");
+    assert!(!diagnostic.is_empty(), "{case}: Mesa reports why");
 }

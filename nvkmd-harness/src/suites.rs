@@ -28,6 +28,7 @@ pub(crate) const SUITES: &[Suite] = &[
     ("submit-fusion", crate::ctx::submit_fusion),
     ("sync-properties", crate::runtime::sync_properties),
     ("queue-loss", crate::runtime::queue_loss),
+    ("mem-stream", crate::runtime::mem_stream),
 ];
 
 fn refused(case: &str, expected: VkResult) {

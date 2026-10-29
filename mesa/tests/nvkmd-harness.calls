@@ -1010,3 +1010,29 @@ nv_rm_close(42)
 close(3) = 0
 close(3) = 0
 PASS queue-loss
+== mem-stream
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+sync provider, allocation fails: none
+drmGetCap(99, SYNCOBJ_TIMELINE) = 0, 0
+sync provider: timeline wait false
+zeroed type: nvk_mem_stream_init = -3, sync false, diagnostic "NVK memory stream requires an operational timeline sync type"
+type without timeline: nvk_mem_stream_init = -3, sync false, diagnostic "NVK memory stream requires an operational timeline sync type"
+timeline type without init: nvk_mem_stream_init = -3, sync false, diagnostic "NVK memory stream requires an operational timeline sync type"
+timeline type without finish: nvk_mem_stream_init = -3, sync false, diagnostic "NVK memory stream requires an operational timeline sync type"
+no sync types: nvk_mem_stream_init = -3, sync false, diagnostic "NVK memory stream requires an operational timeline sync type"
+nv_rm_sync_create(flags=0x1, initial=0) = -2
+RM timeline creation fails: nvk_mem_stream_init = -2, sync false
+nv_rm_sync_create(flags=0x1, initial=0) = 0 (sync 77)
+operational timeline type: nvk_mem_stream_init = 0, sync true
+nv_rm_sync_destroy_deferred(77) = 0
+nv_rm_close(42)
+close(3) = 0
+close(3) = 0
+PASS mem-stream

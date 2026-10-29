@@ -54,6 +54,8 @@ ALLOWLIST_TYPES = [
     "VkExternalSemaphoreProperties", "VkSemaphoreTypeCreateInfo", "VkObjectType", "mtx_t",
     "VkExternalFenceFeatureFlagBits", "VkExternalSemaphoreFeatureFlagBits", "VkPhysicalDevice",
     "vk_physical_device",
+    # NVK's memory stream over the backend's timeline type, and the sync provider its device carries.
+    "nvk_mem_stream", "util_sync_provider", "VkAllocationCallbacks",
 ]
 ALLOWLIST_FUNCTIONS = [
     "nvkmd_mem_init", "nvkmd_dev_alloc_va", "nvkmd_va_bind_mem", "nvkmd_va_free", "nvkmd_va_unbind",
@@ -68,10 +70,13 @@ ALLOWLIST_FUNCTIONS = [
     "vk_sync_import_opaque_fd", "vk_sync_export_opaque_fd", "vk_sync_import_sync_file",
     "vk_sync_export_sync_file",
     "_vk_queue_set_lost", "mtx_init", "mtx_lock", "mtx_unlock", "mtx_destroy",
+    "nvk_mem_stream_init", "nvk_mem_stream_finish", "util_sync_provider_drm", "vk_default_allocator",
 ]
 # libdrm's device-record constants (xf86drm.h) and the open flags of the render node (fcntl.h): macros.
-ALLOWLIST_VARS = ["DRM_NODE_RENDER", "DRM_NODE_MAX", "DRM_BUS_PCI", "O_RDWR", "O_CLOEXEC", "mtx_plain", "thrd_success"]
-OPAQUE_TYPES = ["vk_device", "vk_object_base", "vk_physical_device", "vk_instance", "list_head", "vk_queue"]
+ALLOWLIST_VARS = ["DRM_NODE_RENDER", "DRM_NODE_MAX", "DRM_BUS_PCI", "O_RDWR", "O_CLOEXEC", "mtx_plain", "thrd_success",
+                 "DRM_CAP_SYNCOBJ_TIMELINE"]
+OPAQUE_TYPES = ["vk_device", "vk_object_base", "vk_physical_device", "vk_instance", "list_head", "vk_queue",
+                "nvk_device"]
 
 
 def nvkmd_flags(build):

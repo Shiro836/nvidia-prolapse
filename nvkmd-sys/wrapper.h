@@ -7,12 +7,16 @@
 #include <xf86drm.h>
 
 #include "nvk_device.h"
+#include "nvk_mem_stream.h"
+#include "nvk_physical_device.h"
 #include "nvkmd/nvkmd.h"
 #include "util/cache_ops.h"
 #include "util/os_time.h"
+#include "util/u_sync_provider.h"
 #include "util/vma.h"
 #include "c11/threads.h"
 #include "vk_common_entrypoints.h"
+#include "vk_alloc.h"
 #include "vk_device.h"
 #include "vk_log.h"
 #include "vk_object.h"
@@ -43,6 +47,15 @@ enum nvkmd_sys_layout {
       offsetof(struct vk_physical_device, supported_sync_types),
    NVKMD_SYS_VK_QUEUE_LOST = offsetof(struct vk_queue, _lost.lost),
    NVKMD_SYS_VK_QUEUE_SUBMIT_MUTEX = offsetof(struct vk_queue, submit.mutex),
+   /* A stand-in NVK physical device and the logical-device members NVK's
+    * memory stream reaches (nvk_mem_stream.c nvk_mem_stream_init,
+    * vk_sync.c vk_sync_create, vk_device.h vk_device_set_drm_fd). */
+   NVKMD_SYS_NVK_PHYSICAL_DEVICE_SIZE = sizeof(struct nvk_physical_device),
+   NVKMD_SYS_NVK_PHYSICAL_DEVICE_VK = offsetof(struct nvk_physical_device, vk),
+   NVKMD_SYS_NVK_PHYSICAL_DEVICE_NVKMD = offsetof(struct nvk_physical_device, nvkmd),
+   NVKMD_SYS_VK_DEVICE_PHYSICAL = offsetof(struct vk_device, physical),
+   NVKMD_SYS_VK_DEVICE_ALLOC = offsetof(struct vk_device, alloc),
+   NVKMD_SYS_VK_DEVICE_SYNC = offsetof(struct vk_device, sync),
 };
 
 /* The types of those members. */

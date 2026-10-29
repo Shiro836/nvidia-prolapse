@@ -25,9 +25,9 @@ use nv_rm_abi::{
     NvRmMemoryId, NvRmVaRelease, NvRmZcullInfo,
 };
 use nvkmd_sys::{
-    _drmVersion, NVKMD_SYS_VK_DEVICE_CHECK_STATUS, NVKMD_SYS_VK_DEVICE_NOTIFY_LOST,
-    NVKMD_SYS_VK_DEVICE_NOTIFY_LOST_DATA, VK_ERROR_INITIALIZATION_FAILED, VK_SUCCESS, VkResult,
-    drmVersionPtr, stat, vk_device,
+    _drmVersion, DRM_CAP_SYNCOBJ_TIMELINE, NVKMD_SYS_VK_DEVICE_CHECK_STATUS,
+    NVKMD_SYS_VK_DEVICE_NOTIFY_LOST, NVKMD_SYS_VK_DEVICE_NOTIFY_LOST_DATA,
+    VK_ERROR_INITIALIZATION_FAILED, VK_SUCCESS, VkResult, drmVersionPtr, stat, vk_device,
 };
 
 use crate::mesa;
@@ -115,6 +115,9 @@ pub(crate) struct State {
     pub(crate) sync: crate::fake_sync::Syncs,
     /// The fake RM's context entries.
     pub(crate) ctx: crate::fake_ctx::Contexts,
+    /// What `drmGetCap(DRM_CAP_SYNCOBJ_TIMELINE)` answers on
+    /// [`SYNC_PROVIDER_FD`]; `None` = the query is unexpected.
+    pub(crate) timeline_cap: Option<u64>,
     sysfs: Vec<c_int>,
 }
 
@@ -231,6 +234,7 @@ impl State {
             mem: Memory::new(),
             sync: crate::fake_sync::Syncs::new(),
             ctx: crate::fake_ctx::Contexts::new(),
+            timeline_cap: None,
             sysfs: Vec::new(),
         }
     }
@@ -562,8 +566,44 @@ pub(crate) extern "C" fn __wrap_drmFreeVersion(version: drmVersionPtr) {
     state().record("drmFreeVersion".to_owned());
 }
 
-/// The syncobj and capability queries of libdrm are never used by the RM
-/// backend: its sync types own their payloads.
+/// The descriptor a logical device's DRM sync provider is made for
+/// (`vk_device_set_drm_fd`); never opened.
+pub(crate) const SYNC_PROVIDER_FD: c_int = 99;
+
+/// libdrm `drmGetCap`, which only Mesa's DRM sync provider asks
+/// (`util/u_sync_provider.c` `util_sync_provider_drm`), and only while a
+/// suite sets [`State::timeline_cap`]; the RM backend never does.
+///
+/// # Safety
+///
+/// As libdrm `drmGetCap`: `value` is writable.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn __wrap_drmGetCap(
+    fd: c_int,
+    capability: u64,
+    value: *mut u64,
+) -> c_int {
+    let mut state = state();
+    let answer = state
+        .timeline_cap
+        .expect("drmGetCap is asked only for a sync provider a suite creates");
+    assert_eq!(
+        fd, SYNC_PROVIDER_FD,
+        "the capability query is on the provider's descriptor"
+    );
+    assert_eq!(
+        capability,
+        u64::from(DRM_CAP_SYNCOBJ_TIMELINE),
+        "the provider asks for timeline syncobjs only"
+    );
+    state.record(format!("drmGetCap({fd}, SYNCOBJ_TIMELINE) = 0, {answer}"));
+    // SAFETY: writable (caller).
+    unsafe { value.write(answer) };
+    0
+}
+
+/// The syncobj queries of libdrm are never used by the RM backend: its sync
+/// types own their payloads.
 macro_rules! drm_tripwires {
     ($($name:ident),*) => {$(
         /// Aborts: the backend never calls this.
@@ -574,7 +614,6 @@ macro_rules! drm_tripwires {
     )*};
 }
 drm_tripwires!(
-    __wrap_drmGetCap,
     __wrap_drmSyncobjCreate,
     __wrap_drmSyncobjWait,
     __wrap_drmSyncobjDestroy,
