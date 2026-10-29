@@ -11,9 +11,13 @@
 #include "util/cache_ops.h"
 #include "util/os_time.h"
 #include "util/vma.h"
+#include "c11/threads.h"
+#include "vk_common_entrypoints.h"
 #include "vk_device.h"
 #include "vk_log.h"
 #include "vk_object.h"
+#include "vk_physical_device.h"
+#include "vk_queue.h"
 #include "vk_sync.h"
 
 /* The members the backend reaches inside structures it otherwise treats as
@@ -31,6 +35,14 @@ enum nvkmd_sys_layout {
    NVKMD_SYS_VK_DEVICE_CHECK_STATUS = offsetof(struct vk_device, check_status),
    NVKMD_SYS_VK_DEVICE_QUEUES = offsetof(struct vk_device, queues),
    NVKMD_SYS_VK_OBJECT_BASE_DEVICE = offsetof(struct vk_object_base, device),
+   /* The harness's stand-ins for Mesa's runtime queries over the backend's
+    * sync types: a physical device listing them (vk_fence.c, vk_semaphore.c)
+    * and a queue of a logical device (vk_queue.c _vk_queue_set_lost). */
+   NVKMD_SYS_VK_OBJECT_BASE_TYPE = offsetof(struct vk_object_base, type),
+   NVKMD_SYS_VK_PHYSICAL_DEVICE_SUPPORTED_SYNC_TYPES =
+      offsetof(struct vk_physical_device, supported_sync_types),
+   NVKMD_SYS_VK_QUEUE_LOST = offsetof(struct vk_queue, _lost.lost),
+   NVKMD_SYS_VK_QUEUE_SUBMIT_MUTEX = offsetof(struct vk_queue, submit.mutex),
 };
 
 /* The types of those members. */

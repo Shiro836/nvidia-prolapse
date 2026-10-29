@@ -32,7 +32,14 @@ operations on a lost device) and `submit-fusion` (channel, bind-only and
 shared contexts and their failures; pushes, GPU waits and signals fused into
 batches cut at 1000 pushes and before a continuation; ring-pressure retries;
 failures that keep exactly the unaccepted work; refusals before anything is
-submitted; `sync`; CPU waits, signals and VA binds of bind-only contexts).
+submitted; `sync`; CPU waits, signals and VA binds of bind-only contexts),
+`sync-properties` (Mesa's external fence and semaphore property queries over
+the backend's sync types, run on a stand-in physical device: same-type-only
+opaque-fd and sync-fd masks, no sync-fd timeline semaphores; exactly one
+timeline type, waiting before signal, which selects Mesa's native timeline
+mode) and `queue-loss` (Mesa's `vk_queue_set_lost` on two stand-in queues of
+a logical device, under each queue's submit mutex: one device loss count and
+one RM publication per queue, none for a repeat).
 
 ## pascal-a-clear.c
 

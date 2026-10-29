@@ -30,6 +30,34 @@ use nvkmd_sys::{
     vk_sync_import_opaque_fd, vk_sync_import_sync_file, vk_sync_init, vk_sync_move, vk_sync_reset,
     vk_sync_signal, vk_sync_signal as VkSyncSignal, vk_sync_type, vk_sync_wait, vk_sync_wait_flags,
 };
+use nvkmd_sys::{
+    _vk_queue_set_lost, NVKMD_SYS_VK_OBJECT_BASE_TYPE,
+    NVKMD_SYS_VK_PHYSICAL_DEVICE_SUPPORTED_SYNC_TYPES, NVKMD_SYS_VK_QUEUE_LOST,
+    NVKMD_SYS_VK_QUEUE_SUBMIT_MUTEX, VK_OBJECT_TYPE_PHYSICAL_DEVICE, VkExternalFenceProperties,
+    VkExternalSemaphoreProperties, VkPhysicalDevice, VkPhysicalDeviceExternalFenceInfo,
+    VkPhysicalDeviceExternalSemaphoreInfo, mtx_destroy, mtx_init, mtx_lock, mtx_plain, mtx_t,
+    mtx_unlock, thrd_success, vk_physical_device, vk_queue,
+};
+
+// Mesa's common external fence and semaphore property queries (vk_fence.c,
+// vk_semaphore.c), declared here because bindgen skips declarations that
+// carry an explicit hidden visibility attribute, as vk_common_entrypoints.h
+// (generated from vk.xml) gives them. Same signatures as that header and
+// vkGetPhysicalDeviceExternalFenceProperties /
+// vkGetPhysicalDeviceExternalSemaphoreProperties in vulkan_core.h; the static
+// link with Mesa's objects resolves them.
+unsafe extern "C" {
+    fn vk_common_GetPhysicalDeviceExternalFenceProperties(
+        physical_device: VkPhysicalDevice,
+        info: *const VkPhysicalDeviceExternalFenceInfo,
+        properties: *mut VkExternalFenceProperties,
+    );
+    fn vk_common_GetPhysicalDeviceExternalSemaphoreProperties(
+        physical_device: VkPhysicalDevice,
+        info: *const VkPhysicalDeviceExternalSemaphoreInfo,
+        properties: *mut VkExternalSemaphoreProperties,
+    );
+}
 
 use crate::fake;
 use nv_rm_core::conv::usize_from_u32;
@@ -195,6 +223,11 @@ impl VkDevice {
     /// Mesa counted while the RM has not heard of it yet).
     pub(crate) fn count_loss(&self) {
         lost_counter(self.as_ptr()).fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Mesa's loss count of the device.
+    pub(crate) fn lost_count(&self) -> i32 {
+        lost_counter(self.as_ptr()).load(Ordering::Acquire)
     }
 
     /// Whether the pointer member at `member` (one of the loss hooks) is set.
@@ -981,4 +1014,197 @@ pub(crate) fn wait_none(vk: &VkDevice, sync_type: &vk_sync_type) -> VkResult {
     let wait = sync_type.wait_many.expect("the backend's types wait");
     // SAFETY: the backend's callback with an empty list (never read).
     unsafe { wait(vk.as_ptr(), 0, core::ptr::null(), 0, u64::MAX) }
+}
+
+/// Words of a stand-in of `T`: zeroed, u64-aligned, at least `size_of::<T>()` bytes.
+const fn words<T>() -> usize {
+    size_of::<T>().div_ceil(8)
+}
+
+/// Writes `value` at byte `at` of the zeroed stand-in `base`.
+///
+/// # Safety
+///
+/// `base + at` lies inside the stand-in and is aligned for `T` (Mesa's
+/// layout, nvkmd-sys); nothing else accesses that member concurrently.
+unsafe fn write_member<T>(base: NonNull<u8>, at: usize, value: T) {
+    // SAFETY: in bounds (caller).
+    let slot = unsafe { base.byte_add(at) }.cast::<T>();
+    // SAFETY: aligned and unshared (caller).
+    unsafe { slot.write(value) };
+}
+
+/// A stand-in physical device (`vk_physical_device`): zeroed, typed as a
+/// physical device, listing the sync types of a backend physical device.
+/// That is all Mesa's external fence and semaphore property queries read
+/// (`vk_fence.c` `get_fence_sync_type`, `vk_semaphore.c` `get_semaphore_sync_type`).
+pub(crate) struct PhysicalDevice(NonNull<vk_physical_device>);
+
+impl PhysicalDevice {
+    /// Lists `pdev`'s sync types; `pdev` outlives the stand-in (the suites
+    /// drop it first).
+    pub(crate) fn new(pdev: &Pdev) -> Self {
+        let words: Box<[u64]> = vec![0; words::<vk_physical_device>()].into_boxed_slice();
+        let base = NonNull::from(Box::leak(words)).cast::<u8>();
+        // SAFETY: `vk_object_base.type` (the base is the first member) and
+        // `supported_sync_types` lie inside the stand-in, aligned (Mesa's
+        // layout); the stand-in is not shared yet.
+        unsafe {
+            write_member(
+                base,
+                offset(NVKMD_SYS_VK_OBJECT_BASE_TYPE),
+                VK_OBJECT_TYPE_PHYSICAL_DEVICE,
+            );
+        }
+        // SAFETY: as above.
+        unsafe {
+            write_member(
+                base,
+                offset(NVKMD_SYS_VK_PHYSICAL_DEVICE_SUPPORTED_SYNC_TYPES),
+                pdev.get().sync_types,
+            );
+        }
+        Self(base.cast())
+    }
+
+    fn handle(&self) -> VkPhysicalDevice {
+        // vk_physical_device_to_handle (vk_physical_device.h): the handle is
+        // the object's address.
+        self.0.as_ptr().cast()
+    }
+
+    /// Mesa's vkGetPhysicalDeviceExternalFenceProperties.
+    pub(crate) fn fence_properties(
+        &self,
+        info: &VkPhysicalDeviceExternalFenceInfo,
+        result: &mut VkExternalFenceProperties,
+    ) {
+        // SAFETY: a live stand-in physical device and valid in/out structs
+        // whose pNext chains end at NULL.
+        unsafe { vk_common_GetPhysicalDeviceExternalFenceProperties(self.handle(), info, result) };
+    }
+
+    /// Mesa's vkGetPhysicalDeviceExternalSemaphoreProperties.
+    pub(crate) fn semaphore_properties(
+        &self,
+        info: &VkPhysicalDeviceExternalSemaphoreInfo,
+        result: &mut VkExternalSemaphoreProperties,
+    ) {
+        // SAFETY: as fence_properties; `info.pNext` is a live
+        // VkSemaphoreTypeCreateInfo or NULL.
+        unsafe {
+            vk_common_GetPhysicalDeviceExternalSemaphoreProperties(self.handle(), info, result);
+        }
+    }
+}
+
+impl Drop for PhysicalDevice {
+    fn drop(&mut self) {
+        let words = words::<vk_physical_device>();
+        let slice = std::ptr::slice_from_raw_parts_mut(self.0.as_ptr().cast::<u64>(), words);
+        // SAFETY: allocated as a boxed slice of `words` u64 in `new`; Mesa keeps
+        // no pointer to it after a query returns.
+        drop(unsafe { Box::from_raw(slice) });
+    }
+}
+
+/// Whether a C11 threads call returned `thrd_success`.
+fn succeeded(status: c_int) -> bool {
+    u32::try_from(status) == Ok(thrd_success)
+}
+
+/// A stand-in queue (`vk_queue`) of a stand-in logical device: zeroed, its
+/// object base naming the device, its submit mutex initialised. That is all
+/// `_vk_queue_set_lost` touches besides the device.
+pub(crate) struct Queue(NonNull<vk_queue>);
+
+/// The queue's submit mutex, held until dropped.
+pub(crate) struct SubmitLock<'a>(&'a Queue);
+
+impl Queue {
+    /// A queue of `device`, which outlives it (the suites drop queues first).
+    pub(crate) fn new(device: &VkDevice) -> Self {
+        let words: Box<[u64]> = vec![0; words::<vk_queue>()].into_boxed_slice();
+        let base = NonNull::from(Box::leak(words)).cast::<u8>();
+        // SAFETY: `vk_object_base.device` lies inside the stand-in, pointer
+        // aligned (the base is the first member of vk_queue).
+        unsafe {
+            write_member(
+                base,
+                offset(NVKMD_SYS_VK_OBJECT_BASE_DEVICE),
+                device.as_ptr(),
+            );
+        }
+        let queue = Self(base.cast());
+        let plain = c_int::try_from(mtx_plain).expect("mtx_plain is a small enum value");
+        // SAFETY: the mutex member lies inside the zeroed, unshared stand-in.
+        let status = unsafe { mtx_init(queue.mutex(), plain) };
+        assert!(succeeded(status), "mtx_init of the submit mutex");
+        queue
+    }
+
+    fn member(&self, at: usize) -> *mut u8 {
+        // SAFETY: the members the callers name lie inside the stand-in.
+        unsafe { self.0.cast::<u8>().byte_add(at) }.as_ptr()
+    }
+
+    fn mutex(&self) -> *mut mtx_t {
+        self.member(offset(NVKMD_SYS_VK_QUEUE_SUBMIT_MUTEX)).cast()
+    }
+
+    /// Locks the submit mutex, as Mesa's submit paths hold it around a submit.
+    pub(crate) fn lock_submit(&self) -> SubmitLock<'_> {
+        // SAFETY: an initialised mutex of the live queue, not held by this thread.
+        let status = unsafe { mtx_lock(self.mutex()) };
+        assert!(succeeded(status), "mtx_lock of the submit mutex");
+        SubmitLock(self)
+    }
+
+    /// Mesa's `vk_queue_set_lost`.
+    pub(crate) fn set_lost(&self, message: &CStr) -> VkResult {
+        // SAFETY: the queue and its device are live and hold what
+        // _vk_queue_set_lost reads (base.device, loss state, the device's
+        // loss count and hooks); "%s" consumes the one string argument.
+        unsafe {
+            _vk_queue_set_lost(
+                self.0.as_ptr(),
+                c"harness".as_ptr(),
+                0,
+                c"%s".as_ptr(),
+                message.as_ptr(),
+            )
+        }
+    }
+
+    /// Mesa's `vk_queue_is_lost` (`vk_queue.h`, inline): the queue's own flag.
+    pub(crate) fn is_lost(&self) -> bool {
+        // SAFETY: `_lost.lost` is a `bool` inside the live queue, written
+        // only by _vk_queue_set_lost on this thread.
+        unsafe {
+            self.member(offset(NVKMD_SYS_VK_QUEUE_LOST))
+                .cast::<bool>()
+                .read()
+        }
+    }
+}
+
+impl Drop for SubmitLock<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the mutex this lock holds.
+        let status = unsafe { mtx_unlock(self.0.mutex()) };
+        assert!(succeeded(status), "mtx_unlock of the submit mutex");
+    }
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        // SAFETY: the initialised mutex, not held (every SubmitLock borrowed
+        // the queue and has ended).
+        unsafe { mtx_destroy(self.mutex()) };
+        let slice =
+            std::ptr::slice_from_raw_parts_mut(self.0.as_ptr().cast::<u64>(), words::<vk_queue>());
+        // SAFETY: allocated as a boxed slice of that length in `new`; Mesa keeps
+        // no pointer to the queue.
+        drop(unsafe { Box::from_raw(slice) });
+    }
 }

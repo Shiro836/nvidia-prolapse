@@ -974,3 +974,39 @@ nv_rm_close(42)
 close(3) = 0
 close(3) = 0
 PASS submit-fusion
+== sync-properties
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+timeline sync types: 1
+fence opaque fd: features 0x3, compatible 0x1, export from import 0x1
+fence sync fd: features 0x3, compatible 0x8, export from import 0x8
+binary semaphore opaque fd: features 0x3, compatible 0x1, export from import 0x1
+binary semaphore sync fd: features 0x3, compatible 0x10, export from import 0x10
+timeline semaphore opaque fd: features 0x3, compatible 0x1, export from import 0x1
+timeline semaphore sync fd: features 0x0, compatible 0x0, export from import 0x0
+close(3) = 0
+PASS sync-properties
+== queue-loss
+open(/fake/render, 0o2000002) = 3
+drmGetVersion(3) = NvidiaDrm
+drmFreeVersion
+fstat(3) = 0
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_close(42)
+open(/fake/render, 0o2000002) = 3
+nv_rm_open(1, 2, 3, 4) = 0 (device)
+nv_rm_mark_lost(42)
+queue 0: vk_queue_set_lost = -4
+queue 0: vk_queue_set_lost again = -4
+nv_rm_mark_lost(42)
+queue 1: vk_queue_set_lost = -4
+queue 1: vk_queue_set_lost again = -4
+device loss count 2, RM loss publications 2
+nv_rm_close(42)
+close(3) = 0
+close(3) = 0
+PASS queue-loss

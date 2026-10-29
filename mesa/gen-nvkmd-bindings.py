@@ -49,6 +49,11 @@ ALLOWLIST_TYPES = [
     "nvkmd_.*", "vk_sync", "vk_sync_type", "vk_sync_wait", "vk_sync_signal", "vk_sync_features",
     "vk_sync_wait_flags", "vk_sync_flags", "nv_device_info", "nv_zcull_device_info", "util_vma_heap",
     "_drmDevice", "_drmVersion", "nvkmd_sys_.*",
+    # The harness's Mesa-runtime suites: external fence/semaphore property queries and their structs.
+    "VkPhysicalDeviceExternalFenceInfo", "VkExternalFenceProperties", "VkPhysicalDeviceExternalSemaphoreInfo",
+    "VkExternalSemaphoreProperties", "VkSemaphoreTypeCreateInfo", "VkObjectType", "mtx_t",
+    "VkExternalFenceFeatureFlagBits", "VkExternalSemaphoreFeatureFlagBits", "VkPhysicalDevice",
+    "vk_physical_device",
 ]
 ALLOWLIST_FUNCTIONS = [
     "nvkmd_mem_init", "nvkmd_dev_alloc_va", "nvkmd_va_bind_mem", "nvkmd_va_free", "nvkmd_va_unbind",
@@ -62,10 +67,11 @@ ALLOWLIST_FUNCTIONS = [
     "vk_sync_finish", "vk_sync_reset", "vk_sync_move", "vk_sync_get_value", "vk_sync_wait",
     "vk_sync_import_opaque_fd", "vk_sync_export_opaque_fd", "vk_sync_import_sync_file",
     "vk_sync_export_sync_file",
+    "_vk_queue_set_lost", "mtx_init", "mtx_lock", "mtx_unlock", "mtx_destroy",
 ]
 # libdrm's device-record constants (xf86drm.h) and the open flags of the render node (fcntl.h): macros.
-ALLOWLIST_VARS = ["DRM_NODE_RENDER", "DRM_NODE_MAX", "DRM_BUS_PCI", "O_RDWR", "O_CLOEXEC"]
-OPAQUE_TYPES = ["vk_device", "vk_object_base", "vk_physical_device", "vk_instance", "list_head"]
+ALLOWLIST_VARS = ["DRM_NODE_RENDER", "DRM_NODE_MAX", "DRM_BUS_PCI", "O_RDWR", "O_CLOEXEC", "mtx_plain", "thrd_success"]
+OPAQUE_TYPES = ["vk_device", "vk_object_base", "vk_physical_device", "vk_instance", "list_head", "vk_queue"]
 
 
 def nvkmd_flags(build):

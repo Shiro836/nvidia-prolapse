@@ -4,7 +4,9 @@
 //! flags of `nvkmd.c` in each target's NVK build: the nvkmd vtables and objects
 //! (`nvkmd/nvkmd.h`), `vk_sync` types (`vk_sync.h`), `nv_device_info`,
 //! `util_vma_heap`, libdrm's device and version records, and the functions the
-//! backend calls. `vk_device` and `vk_object_base` stay opaque; the members the
+//! backend calls; plus what the offline harness (`nvkmd-harness`) drives Mesa's
+//! runtime with: `_vk_queue_set_lost`, C11 mutexes and the external fence and
+//! semaphore property structs. `vk_device` and `vk_object_base` stay opaque; the members the
 //! backend reaches in them and in `nvk_device` are the `NVKMD_SYS_*` offsets.
 //!
 //! Layouts differ per target (pointer width, libc), so each target has its own
@@ -19,6 +21,7 @@
     missing_debug_implementations,
     non_camel_case_types,
     non_snake_case,
+    non_upper_case_globals,
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
     clippy::pub_underscore_fields,
@@ -33,6 +36,7 @@ mod bindings;
     missing_debug_implementations,
     non_camel_case_types,
     non_snake_case,
+    non_upper_case_globals,
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
     clippy::pub_underscore_fields,
@@ -47,6 +51,7 @@ mod bindings;
     missing_debug_implementations,
     non_camel_case_types,
     non_snake_case,
+    non_upper_case_globals,
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
     clippy::pub_underscore_fields,

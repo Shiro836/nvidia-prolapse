@@ -262,7 +262,9 @@ that ported their entries (`memory-api`, `memory-cleanup`: 6; `sync-api`, `wait-
 `submit-fusion`: 8). It was removed with the C backend it was built on, including its tests of
 Mesa's runtime and our patches to it over the C backend's sync types (`submit-on-demand`,
 `sync-properties`, the queue part of `loss-notification`, the `nvk_mem_stream` and
-sync-provider checks); those are to be re-expressed as harness suites over the Rust backend.
+sync-provider checks). The harness re-expresses the property queries and the timeline-mode
+inputs (`sync-properties`) and the queue loss (`queue-loss`) over the Rust backend;
+`submit-on-demand` and the `nvk_mem_stream`/sync-provider failure cases are not ported yet.
 
 Since the C backend is gone, the harness compares the Rust backend's call log with
 `mesa/tests/nvkmd-harness.calls`, the C backend's log on the same suites.
