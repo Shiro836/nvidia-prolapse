@@ -39,6 +39,7 @@ def main():
     for target, cc in COMPILERS.items():
         run(cc, *WARN, HERE / "native-vulkan-probe.c", "-ldl", "-o", core / f"probe-{target}")
         run(cc, *WARN, HERE / "native-vulkan-interop.c", "-ldl", "-o", core / f"interop-{target}")
+        run(cc, *WARN, HERE / "native-vulkan-submit-cost.c", "-ldl", "-o", core / f"submit-cost-{target}")
         if target == "host":  # the NDK r29 Vulkan headers predate VK_KHR_copy_memory_indirect
             run(cc, *WARN, HERE / "native-vulkan-copy-indirect.c", "-ldl", "-o", core / f"copy-indirect-{target}")
         run(cc, *WARN, HERE / "native-vulkan-offscreen.c", "-ldl", "-o", graphics / f"probe-{target}")

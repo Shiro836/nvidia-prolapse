@@ -8,6 +8,7 @@ Small public-API Vulkan programs that load the built driver directly and check r
 | `native-vulkan-offscreen.c` | a triangle rendered into a tiled image and read back, every pixel compared |
 | `native-vulkan-interop.c` | dma-buf memory and sync_fd export/import between two devices |
 | `native-vulkan-copy-indirect.c` | `vkCmdCopyMemoryIndirectKHR` on the compute-only queue, a barrier, then a dispatch that reads the copy (host only: the NDK r29 headers lack the extension; 1000 iterations, every word checked; exit 77 without a compute-only family) |
+| `native-vulkan-submit-cost.c` | CPU time per `vkQueueSubmit` (one small command buffer, one already-signalled timeline wait, one timeline signal), per `vkWaitSemaphores` on a reached value and per `vkMapMemory`/`vkUnmapMemory`: thread, process and wall time per operation. A benchmark, not part of `run.py`; compare builds only on an idle GPU |
 | `../../hal/test/*` | the HAL's ANB, AHB, ASTC and ETC2 paths over NVK |
 
     tests/vulkan/build.py                                  # host + x86_64 + i686 programs, SPIR-V
