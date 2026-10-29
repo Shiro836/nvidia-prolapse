@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn timeline_value_zero_is_skipped_before_the_type_check() {
-        // nvkmd_rm.c:1183-1184.
+        // nvkmd_rm.c rm_ctx_wait: the timeline-zero skip.
         let rm = WaitSync::Rm(NvRmSyncId::new(7));
         assert_eq!(acquire(wait(rm, true, 0)), Ok(None));
         assert_eq!(acquire(wait(WaitSync::Foreign, true, 0)), Ok(None));
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn rm_payloads_become_acquires_with_their_value() {
-        // nvkmd_rm.c:1187-1189: binary syncs keep the value NVK passed (0).
+        // nvkmd_rm.c rm_ctx_wait: binary syncs keep the value NVK passed (0).
         let id = NvRmSyncId::new(7);
         assert_eq!(
             acquire(wait(WaitSync::Rm(id), true, 5)),
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn foreign_payloads_are_refused() {
-        // nvkmd_rm.c:1185-1186.
+        // nvkmd_rm.c rm_ctx_wait: the type check.
         assert_eq!(
             acquire(wait(WaitSync::Foreign, false, 0)),
             Err(WaitError::Foreign)

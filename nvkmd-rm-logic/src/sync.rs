@@ -73,14 +73,14 @@ mod tests {
 
     #[test]
     fn infinite_deadlines_stay_infinite() {
-        // nvkmd_rm.c:247-248.
+        // nvkmd_rm.c rm_sync_wait_many: the timeout.
         assert_eq!(wait_timeout(FOREVER, 0), FOREVER);
         assert_eq!(wait_timeout(FOREVER, FOREVER - 1), FOREVER);
     }
 
     #[test]
     fn finite_deadlines_become_the_remaining_time() {
-        // nvkmd_rm.c:247-248: deadline > now ? deadline - now : 0.
+        // nvkmd_rm.c rm_sync_wait_many: deadline > now ? deadline - now : 0.
         assert_eq!(wait_timeout(1_002_000_000, 1_000_000_000), 2_000_000);
         assert_eq!(wait_timeout(1_000_000_001, 1_000_000_000), 1);
         assert_eq!(wait_timeout(1_000_000_000, 1_000_000_000), 0);
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn wait_statuses() {
-        // nvkmd_rm.c:257-258 and nv_rm.h nv_rm_sync_wait_many.
+        // nvkmd_rm.c rm_sync_wait_many and nv_rm.h nv_rm_sync_wait_many.
         assert_eq!(WaitStatus::from_rm(0), WaitStatus::Complete);
         assert_eq!(WaitStatus::from_rm(2), WaitStatus::Timeout);
         assert_eq!(WaitStatus::from_rm(-4), WaitStatus::Failed(-4));
@@ -108,14 +108,14 @@ mod tests {
 
     #[test]
     fn shared_sources() {
-        // nvkmd_rm.c:205: !!(src->flags & VK_SYNC_IS_SHARED).
+        // nvkmd_rm.c rm_sync_move: !!(src->flags & VK_SYNC_IS_SHARED).
         assert_eq!(shared_source(false), 0);
         assert_eq!(shared_source(true), 1);
     }
 
     #[test]
     fn reservations_need_success_and_the_rm_answer() {
-        // nvkmd_rm.c:216.
+        // nvkmd_rm.c rm_sync_reserve_signal.
         assert!(reserved(true, 1));
         assert!(reserved(true, 7));
         assert!(!reserved(true, 0));

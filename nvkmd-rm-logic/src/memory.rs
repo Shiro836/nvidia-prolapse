@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn device_memory_is_rounded_to_big_pages() {
-        // nvkmd_rm.c:807-810: VRAM size and alignment become 64 KiB multiples.
+        // nvkmd_rm.c rm_mem_alloc_kind: VRAM size and alignment become 64 KiB multiples.
         let mappable = MemFlags::VRAM.union(MemFlags::CAN_MAP);
         assert_eq!(
             place_turing(4 * KIB, 4 * KIB, mappable),
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn system_memory_keeps_the_request() {
-        // nvkmd_rm.c:781-782: GART is neither rounded nor compressible.
+        // nvkmd_rm.c rm_mem_alloc_kind: GART is neither rounded nor compressible.
         assert_eq!(
             place_turing(4 * KIB, 4 * KIB, MemFlags::GART),
             Ok(Placed {
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn private_device_memory_is_compressible_from_turing() {
-        // nvkmd_rm.c:816-820: kind 0, VRAM, neither mappable nor shared, generic kind 0x06.
+        // nvkmd_rm.c rm_mem_alloc_kind: kind 0, VRAM, neither mappable nor shared, generic kind 0x06.
         let placed = place_turing(100 * KIB, 4 * KIB, MemFlags::VRAM).map(|p| p.placement);
         assert_eq!(placed, Ok(Placement::VramCompressible));
         for flags in [MemFlags::CAN_MAP, MemFlags::SHARED] {
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn pool_blocks_are_exactly_two_mib_of_private_device_memory() {
-        // nvkmd_rm.c:786-798.
+        // nvkmd_rm.c rm_mem_alloc_kind, the pool-block request.
         assert_eq!(
             place_turing(2 * MIB, 4 * KIB, MemFlags::POOL_BLOCK),
             Ok(Placed {
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn tiled_requests_are_the_generic_uncompressed_2d_modifier() {
-        // nvkmd_rm.c:887-903.
+        // nvkmd_rm.c rm_mem_tiled.
         let turing = PteKind::GENERIC_TURING;
         assert_eq!(
             tiled(PteKind::PITCH, 0, MemFlags::VRAM, TURING),

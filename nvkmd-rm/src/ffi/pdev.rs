@@ -185,7 +185,7 @@ fn is_nvidia_drm(fd: &OwnedFd) -> bool {
 }
 
 /// The probe after the output was cleared. Failure values and the order of
-/// render node, libdrm and RM calls are those of `nvkmd_rm.c:416-560`.
+/// render node, libdrm and RM calls are those of `nvkmd_rm.c` `nvkmd_rm_try_create_pdev`.
 ///
 /// # Safety
 /// `drm` is a complete libdrm device record; `log` is NULL or a live Vulkan
