@@ -55,74 +55,47 @@ diff --git a/meson.options b/meson.options
 index 93a60e3047b91efb89394fddacacf927009f26d6..20d0dc122d7ec9b1dbe5a2152c30dca487e5ad18 100644
 --- a/meson.options
 +++ b/meson.options
-@@ -915,3 +915,18 @@ option(
+@@ -915,3 +915,10 @@ option(
    value : false,
    description : 'Build panfrost Rust components.'
  )
 +
 +option(
-+  'nvk-rm-backend',
-+  type : 'combo',
-+  value : 'c',
-+  choices : ['c', 'rust'],
-+  description : 'NVK kernel-driver backend over the Rust RM: nvkmd_rm.c, or the Rust static library named by nvk-rm-rust-lib.'
-+)
-+
-+option(
 +  'nvk-rm-rust-lib',
 +  type : 'string',
 +  value : '',
-+  description : 'Path of the Rust nvkmd backend (libnvkmd_rm.a) when nvk-rm-backend is rust.'
++  description : 'Path of the nvkmd backend over the Rust RM, the static library libnvkmd_rm.a.'
 +)
 diff --git a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
 index f0bb780fb1fc85a02f6abfb9af4cbc5d3b9556b6..a265af6d9a8a1df1fa47814527a3659cbe6cfe2e 100644
 --- a/src/nouveau/vulkan/meson.build
 +++ b/src/nouveau/vulkan/meson.build
-@@ -1,5 +1,11 @@
- # Copyright © 2022 Collabora Ltd. and Red Hat Inc.
- # SPDX-License-Identifier: MIT
-+# The nvkmd backend over the RM: nvkmd_rm.c, or the Rust static library at
-+# nvk-rm-rust-lib, linked into libvulkan_nouveau below.
-+nvk_rm_c_files = []
-+if get_option('nvk-rm-backend') == 'c'
-+  nvk_rm_c_files = files('nvkmd/rm/nvkmd_rm.c')
-+endif
- nvk_files = files(
-   'nvk_acceleration_structure.c',
-   'nvk_buffer.c',
-@@ -78,6 +84,9 @@ nvk_files = files(
+@@ -78,6 +78,7 @@ nvk_files = files(
    'nvkmd/nouveau/nvkmd_nouveau_mem.c',
    'nvkmd/nouveau/nvkmd_nouveau_pdev.c',
    'nvkmd/nouveau/nvkmd_nouveau_va.c',
-+) + nvk_rm_c_files + files(
-+  'nvkmd/rm/nvkmd_rm.h',
 +  'nvkmd/rm/nv_rm.h',
    'nvkmd/nvkmd.c',
    'nvkmd/nvkmd.h',
  )
-@@ -181,10 +190,24 @@ libnvk = static_library(
+@@ -181,10 +182,19 @@ libnvk = static_library(
    gnu_symbol_visibility : 'hidden',
  )
  
-+# The Rust backend's own symbols (Rust std included) stay out of the dynamic
-+# symbol table; both backends reach the RM in libnv_bionic_native.
-+nvk_rm_link_args = []
-+nvk_rm_link_depends = []
-+if get_option('nvk-rm-backend') == 'rust'
-+  nvk_rm_lib = get_option('nvk-rm-rust-lib')
-+  if nvk_rm_lib == ''
-+    error('nvk-rm-backend=rust needs nvk-rm-rust-lib, the path of libnvkmd_rm.a')
-+  endif
-+  nvk_rm_link_args = [nvk_rm_lib, '-Wl,--exclude-libs,libnvkmd_rm.a']
-+  nvk_rm_link_depends = [nvk_rm_lib]
++# The nvkmd backend over the RM, a Rust static library: its own symbols (Rust
++# std included) stay out of the dynamic symbol table, and it reaches the RM in
++# libnv_bionic_native.
++nvk_rm_lib = get_option('nvk-rm-rust-lib')
++if nvk_rm_lib == ''
++  error('nvk-rm-rust-lib must name libnvkmd_rm.a, the nvkmd backend over the RM')
 +endif
 +
  libvulkan_nouveau = shared_library(
    'vulkan_nouveau',
    link_whole : [libnvk],
 -  link_args: [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
-+  link_args: [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections] + nvk_rm_link_args + ['-lnv_bionic_native'],
-+  link_depends : nvk_rm_link_depends,
++  link_args: [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, nvk_rm_lib, '-Wl,--exclude-libs,libnvkmd_rm.a', '-lnv_bionic_native'],
++  link_depends : [nvk_rm_lib],
    gnu_symbol_visibility : 'hidden',
    install : true,
  )
@@ -396,15 +369,7 @@ diff --git a/src/nouveau/vulkan/nvkmd/nvkmd.c b/src/nouveau/vulkan/nvkmd/nvkmd.c
 index c6ffb9479fa64968710422f409f1d8e8735f24b1..eb4ba7d53690a4a742e855b391d30dbadcc348bb 100644
 --- a/src/nouveau/vulkan/nvkmd/nvkmd.c
 +++ b/src/nouveau/vulkan/nvkmd/nvkmd.c
-@@ -5,6 +5,7 @@
- 
- #include "nvkmd.h"
- #include "nouveau/nvkmd_nouveau.h"
-+#include "rm/nvkmd_rm.h"
- #include "nv_push.h"
- #include "util/cache_ops.h"
- #include "util/u_math.h"
-@@ -82,13 +83,41 @@ nvkmd_mem_init(struct nvkmd_dev *dev,
+@@ -82,13 +82,47 @@ nvkmd_mem_init(struct nvkmd_dev *dev,
     simple_mtx_init(&mem->map_mutex, mtx_plain);
  }
  
@@ -436,6 +401,12 @@ index c6ffb9479fa64968710422f409f1d8e8735f24b1..eb4ba7d53690a4a742e855b391d30dba
 +   nv_device_info_init_shared_mem_sizes(info);
 +}
 +
++/* The probe of NVK's kernel-driver backend over the RM, the nvkmd-rm Rust
++ * static library linked into libvulkan_nouveau (meson.build). */
++VkResult
++nvkmd_rm_try_create_pdev(struct _drmDevice *drm, struct vk_object_base *log_obj,
++                         enum nvk_debug debug, struct nvkmd_pdev **out);
++
  VkResult
  nvkmd_try_create_pdev_for_drm(struct _drmDevice *drm_device,
                                struct vk_object_base *log_obj,
@@ -447,7 +418,7 @@ index c6ffb9479fa64968710422f409f1d8e8735f24b1..eb4ba7d53690a4a742e855b391d30dba
                                          debug_flags, pdev_out);
  }
  
-@@ -416,6 +445,8 @@ nvkmd_mem_map(struct nvkmd_mem *mem, struct vk_object_base *log_obj,
+@@ -416,6 +450,8 @@ nvkmd_mem_map(struct nvkmd_mem *mem, struct vk_object_base *log_obj,
           result = mem->ops->map(mem, log_obj, NVKMD_MEM_MAP_RDWR, NULL, &map);
           if (result == VK_SUCCESS)
              mem->map = map;

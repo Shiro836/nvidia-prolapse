@@ -33,6 +33,18 @@ def ninja_load():
 def run(command, **kwargs):
     subprocess.run([str(x) for x in command], check=True, **kwargs)
 
+# Meson options our patches no longer define. A build dir configured with one fails `meson setup`
+# ("Unknown option"; meson replays meson-private/cmd_line.txt), so its stored configuration is dropped
+# and the dir set up afresh (objects stay).
+REMOVED_MESON_OPTIONS = ("nvk-rm-backend",)
+
+def drop_removed_options(build):
+    private = Path(build) / "meson-private"
+    stored = private / "cmd_line.txt"
+    if stored.exists() and any(f"{name} =" in stored.read_text() for name in REMOVED_MESON_OPTIONS):
+        for name in ("coredata.dat", "cmd_line.txt"):
+            (private / name).unlink(missing_ok=True)
+
 def setup_run(command, args, **kwargs):
     """meson setup; with --download-deps it may fetch wraps (crates for NAK), so retry like other downloads."""
     if getattr(args, "download_deps", False):
@@ -290,9 +302,8 @@ def mark_prepared(source, inputs):
     stamp, digest = prepared_stamp(source, inputs)
     stamp.write_text(digest + "\n")
 
-# Copied into src/nouveau/vulkan/nvkmd/rm: the RM C ABI and the declaration of the Rust nvkmd backend's
-# entry points (nvkmd.c calls nvkmd_rm_try_create_pdev).
-RM_HEADERS = ("nv_rm.h", "nvkmd_rm.h")
+# Copied into src/nouveau/vulkan/nvkmd/rm: the RM C ABI (gallium-nvrm includes it from there too).
+RM_HEADERS = ("nv_rm.h",)
 NVK_PREP_INPUTS = NVK_PATCH_LIST + [HERE / n for n in RM_HEADERS]
 
 # NVK's kernel-driver backend over the RM: the nvkmd-rm static library, linked into
@@ -312,7 +323,7 @@ def nvkmd_options(target, rust_profile):
     archive = nvkmd_archive(target, rust_profile)
     if not archive.is_file():
         raise SystemExit(f"Missing {archive}: build NVK first (build.py --target {target} --rust-profile {rust_profile})")
-    return ["-Dnvk-rm-backend=rust", "-Dnvk-rm-rust-lib=" + str(archive)]
+    return ["-Dnvk-rm-rust-lib=" + str(archive)]
 
 def write_ndk_zlib_pc(pkgconfig_dir):
     """zlib.pc for the NDK sysroot zlib (an NDK stable library, libz.so in
@@ -437,6 +448,7 @@ def build_gl_host(args, env):
                "-Dbuild-tests=false", "-Dvideo-codecs=", "-Dvalgrind=disabled",
                "-Dlibunwind=disabled", "-Dbuildtype=release",
                "-Dc_link_args=" + json.dumps(linker_args), "-Dcpp_link_args=" + json.dumps(linker_args)]
+    drop_removed_options(GL_BUILD)
     setup = cc_launcher.setup_command(GL_BUILD, GL_SOURCE)
     setup_run(setup + options + ["--wrap-mode=" + ("default" if args.download_deps else "nodownload")], args, env=env)
     cc_launcher.record(GL_BUILD)
@@ -495,6 +507,7 @@ def build_gl_android(args, env, target):
                "-Dcpp_link_args=" + json.dumps(linker_args + ["-static-libstdc++", f"-Wl,-rpath-link,{runtime}"])]
     target_env.pop("PKG_CONFIG_PATH", None)
     target_env["BINDGEN_EXTRA_CLANG_ARGS"] = f"--sysroot={NDK}/sysroot -isystem {NDK}/sysroot/usr/include/{triple} -D__ANDROID_API__=33"
+    drop_removed_options(build)
     setup = cc_launcher.setup_command(build, GL_SOURCE)
     setup_run(setup + options + ["--wrap-mode=" + ("default" if args.download_deps else "nodownload")], args, env=target_env)
     cc_launcher.record(build)
@@ -611,6 +624,7 @@ def main():
             options += ["-Dcpp_link_args=" + json.dumps(linker_args + ["-static-libstdc++", f"-Wl,-rpath-link,{runtime}"])]
             target_env.pop("PKG_CONFIG_PATH", None)
             target_env["BINDGEN_EXTRA_CLANG_ARGS"] = f"--sysroot={NDK}/sysroot -isystem {NDK}/sysroot/usr/include/{triple} -D__ANDROID_API__=33"
+        drop_removed_options(build)
         setup = cc_launcher.setup_command(build, SOURCE)
         setup += options + ["--wrap-mode=" + ("default" if args.download_deps else "nodownload")]
         setup_run(setup, args, env=target_env)

@@ -204,9 +204,9 @@ NIL and NAK show how Mesa links Rust into NVK: a Rust `static_library` with `rus
 targets). Our crate depends on Cargo packages (`nv-rm-abi`, `nv-ffi`), so Cargo builds it (as
 it builds `rm` today in `mesa/build.py:344-357`); meson only links the archive:
 
-- `rm-integration.patch` adds a meson option `nvk-rm-backend` (`c` | `rust`) and
-  `nvk-rm-rust-lib` (path). `mesa/build.py` always passes `rust` (the `c` source is gone);
-  `libvulkan_nouveau` gets `link_args: [<path>/libnvkmd_rm.a, '-Wl,--exclude-libs,libnvkmd_rm.a']`
+- `rm-integration.patch` adds a meson option `nvk-rm-rust-lib` (the archive's path; until the
+  switch gate a second option `nvk-rm-backend` chose between it and `nvkmd_rm.c`), declares
+  `nvkmd_rm_try_create_pdev` in `nvkmd.c`, and `libvulkan_nouveau` gets `link_args: [<path>/libnvkmd_rm.a, '-Wl,--exclude-libs,libnvkmd_rm.a']`
   so nothing from our archive (Rust std, `nv-ffi`) enters the dynamic symbol table.
 - Both backends keep `-lnv_bionic_native` on `libvulkan_nouveau`: the archive holds the
   backend and `nv-rm-abi`'s declarations only, never the `rm` crate, so a process has one RM
@@ -331,7 +331,7 @@ suites on the C backend, and the checks named. Estimates are focused working hou
 | 7 | sync types | sync-api, wait-loss scenarios ported; call logs | 5 h |
 | 8 | ctx entries (hot path) | submit-fusion scenarios ported; call logs | 5 h |
 | 9 | switch gate: both backends on 3 targets | capture 0/42, run.py all, `nm -D`, submit-cost bench (idle GPU), Miri, then dEQP sample + live | 4 h + regression run |
-| 10 | after the gate: delete `nvkmd_rm.c` and the `c` option (`nvkmd_rm.h` stays: it declares the Rust entry `nvkmd.c` calls); every `nv_rm_*` entry stays (gallium-nvrm, Codec2's library); the harness compares with the C backend's recorded call log (done) | gate, capture 0/42 | 2 h |
+| 10 | after the gate: delete `nvkmd_rm.c`, `nvkmd_rm.h` (its prototype moved into the patch) and the `c` option; every `nv_rm_*` entry stays (gallium-nvrm, Codec2's library); the harness compares with the C backend's recorded call log (done) | gate, capture 0/42 | 2 h |
 | 11 | separate later commits, each with its own test: Rust VA heap (differential vs `util_vma_heap` on recorded alloc/free sequences), DRM version query by ioctl in Rust, bugs found during 1–8 | own tests | — |
 
 About 48 h before the regression run. Steps 1b-4 are independent of each other after step 1.

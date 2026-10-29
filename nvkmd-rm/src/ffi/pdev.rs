@@ -95,7 +95,7 @@ fn narrow<T: TryFrom<u64>>(value: u64) -> Result<T, T::Error> {
     T::try_from(value)
 }
 
-/// NVK's probe of one DRM device (`nvkmd_rm.h`): `VK_SUCCESS` and the physical
+/// NVK's probe of one DRM device (prototype in the patched `nvkmd.c`): `VK_SUCCESS` and the physical
 /// device in `*out`, or `VK_ERROR_INCOMPATIBLE_DRIVER` for a device this
 /// backend does not drive (Mesa's enumeration skips those, `vk_instance.c`
 /// `enumerate_drm_physical_devices_locked`), or the error that stopped an

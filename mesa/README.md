@@ -38,8 +38,7 @@ NVK's kernel-driver backend over the RM is the `nvkmd-rm` crate: a static librar
 dynamic table; it reaches the RM through the `nv_rm.h` C ABI of `libnv_bionic_native`.
 
 The script verifies the Mesa revision, applies `build-compat.patch` and
-`rm-integration.patch` idempotently, copies `nv_rm.h` and `nvkmd_rm.h` (the backend's
-entry points) from this directory, builds the Rust RM and the nvkmd backend, regenerates Android dependency
+`rm-integration.patch` idempotently, copies `nv_rm.h` (the RM C ABI) from this directory, builds the Rust RM and the nvkmd backend, regenerates Android dependency
 metadata, and configures/builds Mesa and the independent artifact inspector.
 It does not install, deploy, mount files, or start Waydroid.
 

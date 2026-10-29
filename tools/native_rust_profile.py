@@ -48,7 +48,7 @@ def source_snapshot(root):
     paths = sorted(path for member in crates for path in (member / 'src').rglob('*.rs'))
     paths += [member / 'Cargo.toml' for member in crates]
     paths += [root / 'Cargo.toml', root / 'Cargo.lock', mesa / 'nv_rm.h',
-              mesa / 'nvkmd_rm.h', mesa / 'build.py',
+              mesa / 'build.py',
               mesa / 'build-compat.patch', mesa / 'rm-integration.patch',
               root / 'tools/native_rust_profile.py']
     if not any(path.suffix == '.rs' for path in paths):
