@@ -493,8 +493,10 @@ unsafe extern "C" fn ctx_wait(
     })
 }
 
-/// The context's `exec`: appends pushes to the pending list. Each is checked
-/// as it is appended (`nvkmd_rm.c` `rm_ctx_exec`).
+/// The context's `exec`: appends pushes to the pending list, all or none: a
+/// refused push leaves the list as it was, so a valid prefix ending on an
+/// incomplete push cannot leave a chain no flush can cut (`nvkmd_rm.c`
+/// `rm_ctx_exec`).
 ///
 /// # Safety
 /// Mesa's `nvkmd_ctx_ops.exec` contract: `execs` readable for `count`
@@ -518,6 +520,7 @@ unsafe extern "C" fn ctx_exec(
         if ctx.pending.try_reserve(execs.len()).is_err() {
             return vk_error(log, VK_ERROR_OUT_OF_HOST_MEMORY);
         }
+        let before = ctx.pending.len();
         for item in execs {
             let exec = push::exec(Exec {
                 addr: item.addr,
@@ -528,6 +531,7 @@ unsafe extern "C" fn ctx_exec(
             match exec {
                 Ok(push) => ctx.pending.push(push),
                 Err(ExecError::InvalidRange { .. }) => {
+                    ctx.pending.truncate(before);
                     return unsupported(log, "invalid push range");
                 }
             }

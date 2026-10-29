@@ -525,16 +525,33 @@ fn refusals(world: &World, ctx: &Ctx, payloads: &Payloads) {
         outcome(&format!("push {addr:#x}+{size:#x}"), result);
         assert_eq!(result, VK_ERROR_FEATURE_NOT_PRESENT);
     }
-    let mut list = pushes(2);
-    list[1].size_B = 2;
+    world.case("exec refused after an incomplete push");
+    // The call is all or nothing: had its valid prefix been appended, that
+    // prefix's trailing incomplete push could never end a batch, and every
+    // later flush would be refused.
+    let mut list = pushes(3);
     list[0].no_prefetch = true;
-    assert_eq!(ctx.exec(&world.vk, &list), VK_ERROR_FEATURE_NOT_PRESENT);
-    // Pushes before the refused one were appended.
+    list[1].incomplete = true;
+    list[2].size_B = 2;
+    let result = ctx.exec(&world.vk, &list);
+    outcome("exec", result);
+    assert_eq!(result, VK_ERROR_FEATURE_NOT_PRESENT);
+    let result = ctx.flush(&world.vk);
+    outcome("flush", result);
+    assert_eq!(result, VK_SUCCESS);
+    assert_eq!(batches(), vec![], "nothing of the refused call is pending");
+    list[2].size_B = 4;
+    assert_eq!(ctx.exec(&world.vk, &list), VK_SUCCESS);
     assert_eq!(ctx.flush(&world.vk), VK_SUCCESS);
-    assert_eq!(batches(), vec![(1, PUSH_BASE, 0, 0, VK_SUCCESS)]);
+    assert_eq!(batches(), vec![(3, PUSH_BASE, 0, 0, VK_SUCCESS)]);
+    let flags: Vec<u32> = state().ctx.batches[0]
+        .pushes
+        .iter()
+        .map(|push| push.flags)
+        .collect();
     assert_eq!(
-        state().ctx.batches[0].pushes[0].flags,
-        nv_rm_abi::NV_RM_EXEC_NO_PREFETCH
+        flags,
+        [nv_rm_abi::NV_RM_EXEC_NO_PREFETCH, NV_RM_EXEC_INCOMPLETE, 0]
     );
 }
 

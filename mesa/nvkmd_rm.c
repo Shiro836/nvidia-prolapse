@@ -1249,10 +1249,14 @@ rm_ctx_exec(struct nvkmd_ctx* base,
             const struct nvkmd_ctx_exec* execs)
 {
    struct nvkmd_rm_ctx* ctx = nvkmd_rm_ctx(base);
+   /* All or nothing: a valid prefix ending on an incomplete push would leave
+    * a chain no flush can cut. */
    for (uint32_t i = 0; i < count; i++) {
       if ((execs[i].addr & 3) || (execs[i].size_B & 3) || !execs[i].size_B ||
           execs[i].size_B >= (1u << 23))
          return unsupported(log, "invalid push range");
+   }
+   for (uint32_t i = 0; i < count; i++) {
       struct NvRmExec p = { .address = execs[i].addr,
                             .size_B = execs[i].size_B,
                             .flags = (execs[i].no_prefetch ? NV_RM_EXEC_NO_PREFETCH : 0) |
