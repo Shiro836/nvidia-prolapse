@@ -863,7 +863,38 @@ const _: () = {
         [::core::mem::offset_of!(vk_sync_signal, signal_value) - 16usize];
 };
 unsafe extern "C" {
+    pub fn vk_sync_init(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        type_: *const vk_sync_type,
+        flags: vk_sync_flags,
+        initial_value: u64,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_finish(device: *mut vk_device, sync: *mut vk_sync);
+}
+unsafe extern "C" {
     pub fn vk_sync_signal(device: *mut vk_device, sync: *mut vk_sync, value: u64) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_get_value(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        value: *mut u64,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_reset(device: *mut vk_device, sync: *mut vk_sync) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_wait(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        wait_value: u64,
+        wait_flags: vk_sync_wait_flags,
+        abs_timeout_ns: u64,
+    ) -> VkResult;
 }
 unsafe extern "C" {
     pub fn vk_sync_wait_many(
@@ -873,6 +904,37 @@ unsafe extern "C" {
         wait_flags: vk_sync_wait_flags,
         abs_timeout_ns: u64,
     ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_import_opaque_fd(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        fd: ::core::ffi::c_int,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_export_opaque_fd(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        fd: *mut ::core::ffi::c_int,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_import_sync_file(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        sync_file: ::core::ffi::c_int,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_export_sync_file(
+        device: *mut vk_device,
+        sync: *mut vk_sync,
+        sync_file: *mut ::core::ffi::c_int,
+    ) -> VkResult;
+}
+unsafe extern "C" {
+    pub fn vk_sync_move(device: *mut vk_device, dst: *mut vk_sync, src: *mut vk_sync) -> VkResult;
 }
 pub const NVKMD_MEM_LOCAL: nvkmd_mem_flags = 1;
 pub const NVKMD_MEM_GART: nvkmd_mem_flags = 2;
@@ -1549,6 +1611,9 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn util_vma_heap_free(heap: *mut util_vma_heap, offset: u64, size: u64);
+}
+unsafe extern "C" {
+    pub fn os_time_get_nano() -> i64;
 }
 #[repr(C)]
 #[repr(align(8))]
