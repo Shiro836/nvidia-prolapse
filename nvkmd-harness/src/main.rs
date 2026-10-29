@@ -12,9 +12,11 @@ use std::io::Write as _;
 use std::process::ExitCode;
 
 mod fake;
+mod fake_sync;
 mod memory;
 mod mesa;
 mod suites;
+mod sync;
 
 fn main() -> ExitCode {
     let wanted: Vec<String> = std::env::args().skip(1).collect();

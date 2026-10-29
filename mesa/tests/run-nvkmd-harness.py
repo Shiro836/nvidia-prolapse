@@ -9,7 +9,8 @@
 The harness binary links the objects of the host NVK build of each backend (build/nvk-host for the C
 backend, build/nvk-host-rust for the Rust one: `mesa/build.py --target host [--nvkmd rust]`), exactly as
 libvulkan_nouveau.so links them, with libc's open/fstat/close/calloc/free, libdrm's version and syncobj
-calls and Mesa's diagnostic sinks replaced by the harness (--wrap) and the RM entries defined by it.
+calls, Mesa's diagnostic sinks and Mesa's clock replaced by the harness (--wrap) and the RM entries
+defined by it.
 Each suite checks its outcomes on every backend; with both backends the call logs (every RM, render
 node and libdrm call, with arguments and results) must be byte-identical, suite by suite.
 No device file is opened and no GPU is touched.
@@ -25,10 +26,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "build/nvkmd-harness"
 BUILDS = {"c": ROOT / "build/nvk-host", "rust": ROOT / "build/nvk-host-rust"}
-# What the harness answers in place of libc, libdrm and Mesa's diagnostics.
+# What the harness answers in place of libc, libdrm, Mesa's diagnostics and Mesa's clock.
 WRAPS = ["open64", "close", "fstat64", "calloc", "free", "drmGetVersion", "drmFreeVersion", "drmGetCap",
          "drmSyncobjCreate", "drmSyncobjWait", "drmSyncobjDestroy", "drmSyncobjTimelineWait",
-         "__vk_errorf", "__vk_errorv", "__vk_log_impl"]
+         "__vk_errorf", "__vk_errorv", "__vk_log_impl", "os_time_get_nano"]
 # Link arguments of libvulkan_nouveau.so that make a shared library or bring in the real RM.
 DROPPED = {"-shared", "-Wl,--whole-archive", "-Wl,--no-whole-archive", "-lnv_bionic_native", "-Wl,-Bsymbolic"}
 

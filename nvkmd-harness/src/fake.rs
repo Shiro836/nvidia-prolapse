@@ -52,7 +52,7 @@ pub(crate) fn init() {
     );
 }
 
-fn render_fd() -> c_int {
+pub(crate) fn render_fd() -> c_int {
     *RENDER.get().expect("fake::init ran before the suites")
 }
 /// The path the suites put in `drmDevice.nodes[DRM_NODE_RENDER]`.
@@ -98,6 +98,8 @@ pub(crate) struct State {
     pub(crate) rm_closes: u32,
     pub(crate) loss_calls: u32,
     pub(crate) rm_lost: bool,
+    /// `nv_rm_is_lost` calls since the scenario or case started.
+    pub(crate) is_lost_calls: u32,
     /// The messages passed to Mesa's `vk_errorf`/`vk_errorv` since the
     /// scenario or case started, one per line.
     pub(crate) diagnostic: String,
@@ -109,6 +111,8 @@ pub(crate) struct State {
     pub(crate) allow_no_vk_loss: bool,
     /// The fake RM's memory and VA entries.
     pub(crate) mem: Memory,
+    /// The fake RM's sync payload entries and Mesa's clock.
+    pub(crate) sync: crate::fake_sync::Syncs,
     sysfs: Vec<c_int>,
 }
 
@@ -218,15 +222,17 @@ impl State {
             rm_closes: 0,
             loss_calls: 0,
             rm_lost: false,
+            is_lost_calls: 0,
             diagnostic: String::new(),
             loss_device: 0,
             allow_no_vk_loss: false,
             mem: Memory::new(),
+            sync: crate::fake_sync::Syncs::new(),
             sysfs: Vec::new(),
         }
     }
 
-    fn record(&mut self, line: String) {
+    pub(crate) fn record(&mut self, line: String) {
         self.log.push(line);
     }
 
@@ -269,10 +275,12 @@ pub(crate) fn reset_case() {
     let mut state = state();
     let (memory, mapping) = (state.mem.next_allocation, state.mem.next_mapping);
     state.mem = Memory::new();
+    state.sync = state.sync.next_case();
     state.mem.next_allocation = memory;
     state.mem.next_mapping = mapping;
     state.loss_calls = 0;
     state.rm_lost = false;
+    state.is_lost_calls = 0;
     state.allow_no_vk_loss = false;
     state.diagnostic.clear();
 }
@@ -699,7 +707,7 @@ fn rm_device() -> *mut NvRmDevice {
     core::ptr::without_provenance_mut(RM_DEVICE)
 }
 
-fn check_device(device: *const NvRmDevice) {
+pub(crate) fn check_device(device: *const NvRmDevice) {
     assert_eq!(
         device.addr(),
         RM_DEVICE,
@@ -804,6 +812,7 @@ pub(crate) extern "C" fn nv_rm_mark_lost(device: *const NvRmDevice) {
 pub(crate) extern "C" fn nv_rm_is_lost(device: *const NvRmDevice) -> i32 {
     check_device(device);
     let mut state = state();
+    state.is_lost_calls += 1;
     let lost = i32::from(state.rm_lost);
     state.record(format!("nv_rm_is_lost({}) = {lost}", device.addr()));
     lost
@@ -1154,18 +1163,8 @@ rm_tripwires!(
     nv_rm_submit_batch,
     nv_rm_submit_sync,
     nv_rm_submit_waits,
-    nv_rm_sync_create,
     nv_rm_sync_destroy,
-    nv_rm_sync_destroy_deferred,
-    nv_rm_sync_export_fd,
-    nv_rm_sync_get_value,
-    nv_rm_sync_import_fd,
-    nv_rm_sync_move,
-    nv_rm_sync_reserve,
-    nv_rm_sync_reset,
-    nv_rm_sync_signal,
     nv_rm_sync_status_many,
-    nv_rm_sync_wait_many,
     nv_rm_timestamp,
     nv_rm_wait
 );

@@ -143,3 +143,23 @@ fn try_alloc_zeroed<T>() -> Option<Box<MaybeUninit<T>>> {
     // initialisation.
     Some(unsafe { Box::from_raw(storage.as_ptr()) })
 }
+
+/// Zeroed heap storage for `count` values of `T`, or `None` when the
+/// allocator is out of memory or the size overflows. Served by `calloc`, as
+/// [`try_alloc_zeroed`], for the arrays the C backend `calloc`s (app-sized
+/// wait lists).
+fn try_alloc_zeroed_slice<T>(count: usize) -> Option<Box<[MaybeUninit<T>]>> {
+    const { assert!(size_of::<T>() != 0, "backend arrays are not zero-sized") };
+    if count == 0 {
+        return Some(Box::new([]));
+    }
+    let layout = Layout::array::<T>(count).ok()?;
+    // SAFETY: `layout` has a non-zero size (non-zero `T`, `count` > 0).
+    let storage = unsafe { std::alloc::alloc_zeroed(layout) };
+    let storage = NonNull::new(storage.cast::<MaybeUninit<T>>())?;
+    let slice = core::ptr::slice_from_raw_parts_mut(storage.as_ptr(), count);
+    // SAFETY: allocated by the global allocator with the layout of
+    // `[T; count]`, so the box owns it and frees it with the same layout;
+    // `MaybeUninit` needs no initialisation.
+    Some(unsafe { Box::from_raw(slice) })
+}

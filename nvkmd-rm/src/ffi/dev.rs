@@ -16,6 +16,7 @@
 use std::ffi::c_int;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use nv_rm_abi::{
@@ -24,11 +25,12 @@ use nv_rm_abi::{
 };
 use nvkmd_sys::{
     NVKMD_SYS_NVK_DEVICE_NVKMD, NVKMD_SYS_NVK_DEVICE_VK, NVKMD_SYS_VK_DEVICE_CHECK_STATUS,
-    NVKMD_SYS_VK_DEVICE_NOTIFY_LOST, NVKMD_SYS_VK_DEVICE_NOTIFY_LOST_DATA,
-    NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_ERROR_DEVICE_LOST, VK_ERROR_INITIALIZATION_FAILED,
-    VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS, VkResult, nvkmd_ctx, nvkmd_dev, nvkmd_dev_finish,
-    nvkmd_dev_init, nvkmd_dev_ops, nvkmd_engines, nvkmd_pdev, nvkmd_sys_layout,
-    nvkmd_sys_vk_device_check_status, nvkmd_sys_vk_device_notify_lost, vk_device, vk_object_base,
+    NVKMD_SYS_VK_DEVICE_LOST, NVKMD_SYS_VK_DEVICE_NOTIFY_LOST,
+    NVKMD_SYS_VK_DEVICE_NOTIFY_LOST_DATA, NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_ERROR_DEVICE_LOST,
+    VK_ERROR_INITIALIZATION_FAILED, VK_ERROR_OUT_OF_HOST_MEMORY, VK_SUCCESS, VkResult, nvkmd_ctx,
+    nvkmd_dev, nvkmd_dev_finish, nvkmd_dev_init, nvkmd_dev_ops, nvkmd_engines, nvkmd_pdev,
+    nvkmd_sys_layout, nvkmd_sys_vk_device_check_status, nvkmd_sys_vk_device_notify_lost, vk_device,
+    vk_object_base,
 };
 
 use super::memory::{dev_alloc_mem, dev_alloc_tiled_mem, dev_import_dma_buf};
@@ -78,6 +80,26 @@ impl RmDev {
         }
         // SAFETY: a dev with our ops is the first field of a live `RmDev`.
         Some(unsafe { &*base.cast::<Self>() })
+    }
+
+    /// The KMD device of a logical device NVK made (`nvk_device.nvkmd`,
+    /// `nvkmd_rm.c` `rm_sync_device`), or `None` when it is another
+    /// backend's.
+    ///
+    /// # Safety
+    /// `vk` is the live `vk` member of a live `nvk_device` whose `nvkmd` is
+    /// NULL or a live KMD device.
+    pub(super) unsafe fn from_vk<'a>(vk: NonNull<vk_device>) -> Option<&'a Self> {
+        // SAFETY: `vk` is a member of a live nvk_device (caller), at the
+        // offset Mesa's header gives (nvkmd-sys).
+        let nvk = unsafe { vk.byte_sub(offset(NVKMD_SYS_NVK_DEVICE_VK)) };
+        // SAFETY: the `nvkmd` member lies inside that live nvk_device.
+        let slot =
+            unsafe { nvk.byte_add(offset(NVKMD_SYS_NVK_DEVICE_NVKMD)) }.cast::<*mut nvkmd_dev>();
+        // SAFETY: an aligned pointer member NVK set at device creation.
+        let kmd = unsafe { slot.read() };
+        // SAFETY: NULL or a live KMD device (caller).
+        unsafe { Self::from_base(kmd) }
     }
 
     /// The device as Mesa sees it.
@@ -147,6 +169,24 @@ impl RmDev {
 
 fn offset(member: nvkmd_sys_layout) -> usize {
     nv_rm_core::conv::usize_from_u32(member)
+}
+
+/// Mesa's `vk_device_is_lost_no_report` (`vk_device.h`, inline: the loss
+/// count `_lost.lost` is positive). One atomic load; `Acquire` as Mesa's
+/// `p_atomic_read` (`util/u_atomic.h`), pairing with the increment in
+/// `_vk_device_set_lost` that precedes its loss report.
+///
+/// # Safety
+/// `vk` is a live logical device.
+pub(super) unsafe fn mesa_is_lost(vk: NonNull<vk_device>) -> bool {
+    // SAFETY: `_lost.lost` lies inside the live device (Mesa's layout,
+    // nvkmd-sys).
+    let counter = unsafe { vk.byte_add(offset(NVKMD_SYS_VK_DEVICE_LOST)) }.cast::<i32>();
+    // SAFETY: an aligned `int` of the live device that Mesa only accesses
+    // atomically (p_atomic_inc/p_atomic_read); the reference ends with this
+    // load.
+    let counter = unsafe { AtomicI32::from_ptr(counter.as_ptr()) };
+    counter.load(Ordering::Acquire) > 0
 }
 
 /// Writes the member at `member` of the live `device`.
@@ -361,15 +401,8 @@ unsafe extern "C" fn check_status(vk: *mut vk_device) -> VkResult {
                 return VK_ERROR_DEVICE_LOST;
             };
             // SAFETY: Mesa calls the hook on the live logical device of an
-            // `nvk_device` (`vk` is its first member, offset checked by nvkmd-sys).
-            let nvk = unsafe { vk.byte_sub(offset(NVKMD_SYS_NVK_DEVICE_VK)) };
-            // SAFETY: the `nvkmd` member lies inside that live nvk_device.
-            let slot = unsafe { nvk.byte_add(offset(NVKMD_SYS_NVK_DEVICE_NVKMD)) }
-                .cast::<*mut nvkmd_dev>();
-            // SAFETY: an aligned pointer member NVK set at device creation.
-            let kmd = unsafe { slot.read() };
-            // SAFETY: NULL or the device's live KMD device.
-            let Some(dev) = (unsafe { RmDev::from_base(kmd) }) else {
+            // `nvk_device`, whose `nvkmd` is its live KMD device.
+            let Some(dev) = (unsafe { RmDev::from_vk(vk) }) else {
                 return VK_ERROR_DEVICE_LOST;
             };
             // SAFETY: the device's live RM device.

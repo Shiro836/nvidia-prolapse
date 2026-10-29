@@ -72,6 +72,14 @@ impl RmPdev {
     pub(super) fn base_ptr(&self) -> *mut nvkmd_pdev {
         (&raw const self.base).cast_mut()
     }
+
+    /// Whether `sync_type` is one of the two types this device lists (Mesa
+    /// hands the listed pointers to `vk_sync_init` unchanged).
+    pub(super) fn lists_sync_type(&self, sync_type: *const vk_sync_type) -> bool {
+        self.sync_types
+            .iter()
+            .any(|listed| core::ptr::eq(listed, sync_type))
+    }
 }
 
 /// A value narrowed to the width of the Mesa field it is reported in.

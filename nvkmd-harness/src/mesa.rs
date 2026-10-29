@@ -2,8 +2,9 @@
 //! Handles over Mesa's public nvkmd interface: the DRM device NVK probes, the
 //! physical and KMD devices made through `nvkmd_try_create_pdev_for_drm` and
 //! the ops tables, the memory and VA reservations made through Mesa's
-//! `nvkmd_dev_*` wrappers, and a stand-in logical `vk_device` that holds the
-//! loss state and hooks the backend installs. The suites reach the backend
+//! `nvkmd_dev_*` wrappers, sync objects made through Mesa's `vk_sync_*`
+//! wrappers, and a stand-in NVK device that holds the loss state and hooks the
+//! backend installs. The suites reach the backend
 //! only through these, never through its own symbols or structures.
 //!
 //! Requests Mesa's wrappers would reject with an assertion (a bind outside
@@ -17,12 +18,15 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use nvkmd_sys::{
     _drmDevice, _drmPciBusInfo, _drmPciDeviceInfo, _vk_device_set_lost, DRM_BUS_PCI, DRM_NODE_MAX,
-    DRM_NODE_RENDER, NVKMD_SYS_VK_DEVICE_LOST, NVKMD_SYS_VK_DEVICE_QUEUES,
-    NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_SUCCESS, VkResult, nvkmd_dev, nvkmd_dev_alloc_mem,
-    nvkmd_dev_alloc_tiled_mem, nvkmd_dev_alloc_va, nvkmd_dev_import_dma_buf, nvkmd_mem,
-    nvkmd_mem_map, nvkmd_mem_ops, nvkmd_mem_unmap, nvkmd_mem_unref, nvkmd_pdev, nvkmd_sys_layout,
-    nvkmd_try_create_pdev_for_drm, nvkmd_va, nvkmd_va_free, nvkmd_va_ops, vk_device,
-    vk_object_base, vk_sync_type,
+    DRM_NODE_RENDER, NVKMD_SYS_NVK_DEVICE_NVKMD, NVKMD_SYS_NVK_DEVICE_VK, NVKMD_SYS_VK_DEVICE_LOST,
+    NVKMD_SYS_VK_DEVICE_QUEUES, NVKMD_SYS_VK_OBJECT_BASE_DEVICE, VK_SUCCESS, VkResult, nvkmd_dev,
+    nvkmd_dev_alloc_mem, nvkmd_dev_alloc_tiled_mem, nvkmd_dev_alloc_va, nvkmd_dev_import_dma_buf,
+    nvkmd_mem, nvkmd_mem_map, nvkmd_mem_ops, nvkmd_mem_unmap, nvkmd_mem_unref, nvkmd_pdev,
+    nvkmd_sys_layout, nvkmd_try_create_pdev_for_drm, nvkmd_va, nvkmd_va_free, nvkmd_va_ops,
+    vk_device, vk_object_base, vk_sync, vk_sync_export_opaque_fd, vk_sync_export_sync_file,
+    vk_sync_finish, vk_sync_flags, vk_sync_get_value, vk_sync_import_opaque_fd,
+    vk_sync_import_sync_file, vk_sync_init, vk_sync_move, vk_sync_reset, vk_sync_signal,
+    vk_sync_type, vk_sync_wait, vk_sync_wait_flags,
 };
 
 use crate::fake;
@@ -31,7 +35,7 @@ use nv_rm_core::conv::usize_from_u32;
 /// PCI vendor id of NVIDIA (`nvkmd_rm.c` `NVIDIA_VENDOR_ID`).
 const NVIDIA_VENDOR_ID: u16 = 0x10de;
 
-fn offset(member: nvkmd_sys_layout) -> usize {
+const fn offset(member: nvkmd_sys_layout) -> usize {
     usize_from_u32(member)
 }
 
@@ -82,17 +86,33 @@ impl DrmFixture {
     }
 }
 
-/// A stand-in logical device: zeroed, with an empty queue list and its object
-/// base naming itself, which is all `vk_device_set_lost` and the backend's
-/// loss hooks touch. Heap-allocated so the address the backend keeps stays
-/// valid; accessed only through raw pointers because the backend writes it.
+/// A stand-in NVK device (`nvk_device`, whose `vk` member is the logical
+/// device): zeroed, with an empty queue list, its object base naming itself
+/// and, once [`VkDevice::attach`] ran, its `nvkmd` member pointing at the KMD
+/// device. That is all `vk_device_set_lost`, Mesa's sync wrappers and the
+/// backend's loss hooks and sync callbacks touch. Heap-allocated so the
+/// address the backend keeps stays valid; accessed only through raw pointers
+/// because the backend writes it.
 pub(crate) struct VkDevice(NonNull<vk_device>);
+
+/// Words of the stand-in NVK device: the logical device and NVK's `nvkmd`
+/// member, whichever ends later.
+const NVK_DEVICE_WORDS: usize = {
+    let nvkmd_end = offset(NVKMD_SYS_NVK_DEVICE_NVKMD) / 8 + 1;
+    let vk_end = offset(NVKMD_SYS_NVK_DEVICE_VK) / 8 + size_of::<vk_device>() / 8;
+    if nvkmd_end > vk_end {
+        nvkmd_end
+    } else {
+        vk_end
+    }
+};
 
 impl VkDevice {
     pub(crate) fn new() -> Self {
-        let device = NonNull::from(Box::leak(Box::new(vk_device {
-            _bindgen_opaque_blob: [0; size_of::<vk_device>() / 8],
-        })));
+        let words: Box<[u64; NVK_DEVICE_WORDS]> = Box::new([0; NVK_DEVICE_WORDS]);
+        let nvk = NonNull::from(Box::leak(words)).cast::<u8>();
+        // SAFETY: the `vk` member lies inside the stand-in (NVK_DEVICE_WORDS).
+        let device = unsafe { nvk.byte_add(offset(NVKMD_SYS_NVK_DEVICE_VK)) }.cast::<vk_device>();
         // SAFETY: the queue list head lies inside the allocation (offset from
         // Mesa's header, nvkmd-sys).
         let queues = unsafe { device.as_ptr().byte_add(offset(NVKMD_SYS_VK_DEVICE_QUEUES)) }
@@ -115,6 +135,27 @@ impl VkDevice {
 
     pub(crate) fn as_ptr(&self) -> *mut vk_device {
         self.0.as_ptr()
+    }
+
+    /// The stand-in NVK device.
+    fn nvk(&self) -> NonNull<u8> {
+        // SAFETY: `vk` is the member at that offset of the stand-in.
+        unsafe {
+            self.0
+                .cast::<u8>()
+                .byte_sub(offset(NVKMD_SYS_NVK_DEVICE_VK))
+        }
+    }
+
+    /// Makes `dev` this NVK device's KMD device (`nvk_device.nvkmd`), as NVK
+    /// does right after `create_dev`.
+    pub(crate) fn attach(&self, dev: &Dev) {
+        // SAFETY: the `nvkmd` member lies inside the stand-in.
+        let slot = unsafe { self.nvk().byte_add(offset(NVKMD_SYS_NVK_DEVICE_NVKMD)) }
+            .cast::<*mut nvkmd_dev>();
+        // SAFETY: in bounds and pointer-aligned (Mesa's layout; the stand-in is
+        // u64-aligned).
+        unsafe { slot.write(dev.0.as_ptr()) };
     }
 
     /// The device as the log object of a backend call.
@@ -148,6 +189,12 @@ impl VkDevice {
         lost_counter(self.as_ptr()).store(0, Ordering::Release);
     }
 
+    /// Counts a loss in Mesa without its report or `notify_lost` (a loss
+    /// Mesa counted while the RM has not heard of it yet).
+    pub(crate) fn count_loss(&self) {
+        lost_counter(self.as_ptr()).fetch_add(1, Ordering::AcqRel);
+    }
+
     /// Whether the pointer member at `member` (one of the loss hooks) is set.
     pub(crate) fn has(&self, member: nvkmd_sys_layout) -> bool {
         !pointer_member_is_null(self.as_ptr(), member)
@@ -156,9 +203,10 @@ impl VkDevice {
 
 impl Drop for VkDevice {
     fn drop(&mut self) {
-        // SAFETY: allocated by Box in `new`; the backend dropped every pointer
-        // to it when its KMD device was destroyed (the suites destroy that first).
-        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+        // SAFETY: allocated by Box in `new` (the stand-in starts at `nvk`);
+        // the backend dropped every pointer to it when its KMD device was
+        // destroyed (the suites destroy that first).
+        drop(unsafe { Box::from_raw(self.nvk().cast::<[u64; NVK_DEVICE_WORDS]>().as_ptr()) });
     }
 }
 
@@ -552,4 +600,204 @@ impl Va {
         // SAFETY: Mesa's wrapper; the reservation is not used afterwards.
         unsafe { nvkmd_va_free(self.0.as_ptr()) };
     }
+}
+
+/// A sync object made through Mesa's `vk_sync_init` with one of the backend's
+/// types, in storage of the type's `size` (Mesa's own sync objects embed it
+/// the same way). Mesa's wrappers drive it; the waits over several syncs and
+/// `reserve_signal` go to the type's callbacks, whose Mesa dispatch needs a
+/// physical device the stand-in does not have.
+pub(crate) struct Sync {
+    storage: Box<[u64]>,
+    sync_type: *const vk_sync_type,
+}
+
+impl Sync {
+    /// Mesa's `vk_sync_init`.
+    pub(crate) fn init(
+        vk: &VkDevice,
+        sync_type: &vk_sync_type,
+        flags: vk_sync_flags,
+        initial: u64,
+    ) -> Result<Self, VkResult> {
+        assert!(
+            sync_type.size >= size_of::<vk_sync>(),
+            "a sync type holds a vk_sync"
+        );
+        let words = sync_type.size.div_ceil(8);
+        let mut storage = vec![0_u64; words].into_boxed_slice();
+        // SAFETY: Mesa's wrapper on the live stand-in device; the storage is
+        // the type's size, 8-byte aligned, and outlives the sync.
+        let result = unsafe {
+            vk_sync_init(
+                vk.as_ptr(),
+                storage.as_mut_ptr().cast(),
+                sync_type,
+                flags,
+                initial,
+            )
+        };
+        if result != VK_SUCCESS {
+            return Err(result);
+        }
+        Ok(Self { storage, sync_type })
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut vk_sync {
+        self.storage.as_ptr().cast_mut().cast()
+    }
+
+    fn sync_type(&self) -> &vk_sync_type {
+        // SAFETY: a type the physical device lists, live while it is.
+        unsafe { &*self.sync_type }
+    }
+
+    /// The sync's Mesa flags.
+    pub(crate) fn flags(&self) -> vk_sync_flags {
+        // SAFETY: the live sync; nothing writes it during the read.
+        unsafe { (*self.as_ptr()).flags }
+    }
+
+    /// Sets the sync's Mesa flags, as Mesa's semaphore code does on import.
+    pub(crate) fn set_flags(&self, flags: vk_sync_flags) {
+        // SAFETY: the live sync; the suites are single-threaded.
+        unsafe { (*self.as_ptr()).flags = flags };
+    }
+
+    /// Mesa's `vk_sync_finish`.
+    pub(crate) fn finish(self, vk: &VkDevice) {
+        // SAFETY: Mesa's wrapper on a sync `init` made; consumed here.
+        unsafe { vk_sync_finish(vk.as_ptr(), self.as_ptr()) };
+    }
+
+    /// The type's `finish` on a sync that stays usable for the next call:
+    /// the RM side of the payload is the fake's, so a repeated finish is
+    /// only a repeated call.
+    pub(crate) fn finish_again(&self, vk: &VkDevice) {
+        // SAFETY: Mesa's wrapper on a live sync.
+        unsafe { vk_sync_finish(vk.as_ptr(), self.as_ptr()) };
+    }
+
+    /// Mesa's `vk_sync_signal`.
+    pub(crate) fn signal(&self, vk: &VkDevice, value: u64) -> VkResult {
+        // SAFETY: Mesa's wrapper on a live sync.
+        unsafe { vk_sync_signal(vk.as_ptr(), self.as_ptr(), value) }
+    }
+
+    /// Mesa's `vk_sync_get_value`.
+    pub(crate) fn get_value(&self, vk: &VkDevice) -> Result<u64, VkResult> {
+        let mut value = 0;
+        // SAFETY: Mesa's wrapper on a live sync; `value` is writable.
+        let result = unsafe { vk_sync_get_value(vk.as_ptr(), self.as_ptr(), &raw mut value) };
+        if result != VK_SUCCESS {
+            return Err(result);
+        }
+        Ok(value)
+    }
+
+    /// Mesa's `vk_sync_reset`.
+    pub(crate) fn reset(&self, vk: &VkDevice) -> VkResult {
+        // SAFETY: Mesa's wrapper on a live sync.
+        unsafe { vk_sync_reset(vk.as_ptr(), self.as_ptr()) }
+    }
+
+    /// Mesa's `vk_sync_move` of `src` into this sync.
+    pub(crate) fn move_from(&self, vk: &VkDevice, src: &Self) -> VkResult {
+        // SAFETY: Mesa's wrapper on two live syncs of the device.
+        unsafe { vk_sync_move(vk.as_ptr(), self.as_ptr(), src.as_ptr()) }
+    }
+
+    /// The type's `reserve_signal` of `src` into this sync.
+    pub(crate) fn reserve_from(&self, vk: &VkDevice, src: &Self) -> (VkResult, bool) {
+        let reserve = self
+            .sync_type()
+            .reserve_signal
+            .expect("the backend's types reserve signals");
+        let mut reserved = false;
+        // SAFETY: the backend's callback on two live syncs; `reserved` is
+        // writable.
+        let result =
+            unsafe { reserve(vk.as_ptr(), self.as_ptr(), src.as_ptr(), &raw mut reserved) };
+        (result, reserved)
+    }
+
+    /// Mesa's `vk_sync_import_sync_file`.
+    pub(crate) fn import_sync_file(&self, vk: &VkDevice, fd: c_int) -> VkResult {
+        // SAFETY: Mesa's wrapper on a live sync; the fd only reaches the fake.
+        unsafe { vk_sync_import_sync_file(vk.as_ptr(), self.as_ptr(), fd) }
+    }
+
+    /// Mesa's `vk_sync_export_sync_file`.
+    pub(crate) fn export_sync_file(&self, vk: &VkDevice) -> Result<c_int, VkResult> {
+        let mut fd = -1;
+        // SAFETY: Mesa's wrapper on a live sync; `fd` is writable.
+        let result = unsafe { vk_sync_export_sync_file(vk.as_ptr(), self.as_ptr(), &raw mut fd) };
+        if result != VK_SUCCESS {
+            assert_eq!(fd, -1, "a failed export leaves the descriptor alone");
+            return Err(result);
+        }
+        Ok(fd)
+    }
+
+    /// Mesa's `vk_sync_import_opaque_fd`.
+    pub(crate) fn import_opaque_fd(&self, vk: &VkDevice, fd: c_int) -> VkResult {
+        // SAFETY: Mesa's wrapper on a live sync; the fd only reaches the fake.
+        unsafe { vk_sync_import_opaque_fd(vk.as_ptr(), self.as_ptr(), fd) }
+    }
+
+    /// Mesa's `vk_sync_export_opaque_fd`.
+    pub(crate) fn export_opaque_fd(&self, vk: &VkDevice) -> Result<c_int, VkResult> {
+        let mut fd = -1;
+        // SAFETY: Mesa's wrapper on a live sync; `fd` is writable.
+        let result = unsafe { vk_sync_export_opaque_fd(vk.as_ptr(), self.as_ptr(), &raw mut fd) };
+        if result != VK_SUCCESS {
+            assert_eq!(fd, -1, "a failed export leaves the descriptor alone");
+            return Err(result);
+        }
+        Ok(fd)
+    }
+
+    /// Mesa's `vk_sync_wait` on this sync.
+    pub(crate) fn wait(
+        &self,
+        vk: &VkDevice,
+        value: u64,
+        flags: vk_sync_wait_flags,
+        deadline: u64,
+    ) -> VkResult {
+        // SAFETY: Mesa's wrapper on a live sync.
+        unsafe { vk_sync_wait(vk.as_ptr(), self.as_ptr(), value, flags, deadline) }
+    }
+}
+
+/// The backend's `wait_many` on `(sync, value)` pairs of one type.
+pub(crate) fn wait_many(
+    vk: &VkDevice,
+    waits: &[(&Sync, u64)],
+    flags: vk_sync_wait_flags,
+    deadline: u64,
+) -> VkResult {
+    let list: Vec<vk_sync_wait> = waits
+        .iter()
+        .map(|(sync, value)| vk_sync_wait {
+            sync: sync.as_ptr(),
+            stage_mask: !0,
+            wait_value: *value,
+        })
+        .collect();
+    let first = waits.first().expect("a wait names at least one sync").0;
+    let wait = first
+        .sync_type()
+        .wait_many
+        .expect("the backend's types wait");
+    let count = u32::try_from(list.len()).expect("the suites wait on few syncs");
+    // SAFETY: the backend's callback; `list` holds `count` waits on live syncs.
+    unsafe { wait(vk.as_ptr(), count, list.as_ptr(), flags, deadline) }
+}
+
+/// The backend's `wait_many` with no waits.
+pub(crate) fn wait_none(vk: &VkDevice, sync_type: &vk_sync_type) -> VkResult {
+    let wait = sync_type.wait_many.expect("the backend's types wait");
+    // SAFETY: the backend's callback with an empty list (never read).
+    unsafe { wait(vk.as_ptr(), 0, core::ptr::null(), 0, u64::MAX) }
 }
