@@ -129,7 +129,8 @@ test_memory_cleanup(void)
       memory_api.va_free_status = failed ? VK_ERROR_INITIALIZATION_FAILED : VK_SUCCESS;
       struct nvkmd_va *va = NULL;
       mem.base.size_B = 4096;
-      assert(rm_va_alloc(base, &vk.base, 0, 0, 4096, 4096, 0, &va) == VK_SUCCESS);
+      /* A capture/replay VA, so the fixed re-allocation below probes it. */
+      assert(rm_va_alloc(base, &vk.base, NVKMD_VA_REPLAY, 0, 4096, 4096, 0, &va) == VK_SUCCESS);
       uint64_t reserved = va->addr;
       assert(rm_va_bind(va, &vk.base, 0, &mem.base, 0, 4096) == VK_SUCCESS);
       rm_va_free(va);
@@ -141,9 +142,9 @@ test_memory_cleanup(void)
       else
          assert(!fake.loss_calls && !vk_device_is_lost_no_report(&vk));
       va = NULL;
-      VkResult result = rm_va_alloc(base, &vk.base, NVKMD_VA_ALLOC_FIXED, 0,
+      VkResult result = rm_va_alloc(base, &vk.base, NVKMD_VA_REPLAY | NVKMD_VA_ALLOC_FIXED, 0,
                                     4096, 4096, reserved, &va);
-      assert(result == (failed ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_SUCCESS));
+      assert(result == (failed ? VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS : VK_SUCCESS));
       if (va) {
          memory_api.va_free_status = VK_SUCCESS;
          rm_va_free(va);
@@ -155,20 +156,39 @@ test_memory_cleanup(void)
       memory_reset_case(&vk);
       memory_api.defer_release = true;
       struct nvkmd_va *va = NULL;
-      assert(rm_va_alloc(base, &vk.base, 0, 0, 4096, 4096, 0, &va) == VK_SUCCESS);
+      assert(rm_va_alloc(base, &vk.base, NVKMD_VA_REPLAY, 0, 4096, 4096, 0, &va) == VK_SUCCESS);
       uint64_t reserved = va->addr;
       assert(rm_va_bind(va, &vk.base, 0, &mem.base, 0, 4096) == VK_SUCCESS);
       rm_va_free(va);
       assert(memory_api.va_frees == 1 && memory_api.release);
       struct nvkmd_va *again = NULL;
-      assert(rm_va_alloc(base, &vk.base, NVKMD_VA_ALLOC_FIXED, 0, 4096, 4096,
-                         reserved, &again) == VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      assert(rm_va_alloc(base, &vk.base, NVKMD_VA_REPLAY | NVKMD_VA_ALLOC_FIXED, 0, 4096, 4096,
+                         reserved, &again) == VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS);
       memory_run_deferred_release();
-      assert(rm_va_alloc(base, &vk.base, NVKMD_VA_ALLOC_FIXED, 0, 4096, 4096,
+      assert(rm_va_alloc(base, &vk.base, NVKMD_VA_REPLAY | NVKMD_VA_ALLOC_FIXED, 0, 4096, 4096,
                          reserved, &again) == VK_SUCCESS);
       memory_api.defer_release = false;
       rm_va_free(again); /* no bindings: immediate release */
       assert(memory_api.va_frees == 2 && memory_api.va_count == 0 && !memory_api.release);
+      assert(!fake.loss_calls && !vk_device_is_lost_no_report(&vk));
+   }
+   /* Capture/replay VAs come from their own range: an ordinary VA never takes
+    * a replayable address, a replayed address must lie in that range, and a
+    * fixed VA is only a replayed capture address. */
+   {
+      memory_reset_case(&vk);
+      struct nvkmd_va *plain = NULL, *capture = NULL, *fixed = NULL;
+      assert(rm_va_alloc(base, &vk.base, 0, 0, 4096, 4096, 0, &plain) == VK_SUCCESS);
+      assert(rm_va_alloc(base, &vk.base, NVKMD_VA_REPLAY, 0, 4096, 4096, 0, &capture) == VK_SUCCESS);
+      assert(plain->addr >= NV_RM_VA_START && plain->addr < NVKMD_RM_REPLAY_HEAP_START);
+      assert(capture->addr >= NVKMD_RM_REPLAY_HEAP_START && capture->addr < NV_RM_VA_END);
+      assert(rm_va_alloc(base, &vk.base, NVKMD_VA_REPLAY | NVKMD_VA_ALLOC_FIXED, 0, 4096, 4096,
+                         plain->addr, &fixed) == VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS);
+      assert(rm_va_alloc(base, &vk.base, NVKMD_VA_ALLOC_FIXED, 0, 4096, 4096,
+                         capture->addr + 4096, &fixed) == VK_ERROR_FEATURE_NOT_PRESENT);
+      assert(fixed == NULL);
+      rm_va_free(plain);
+      rm_va_free(capture);
       assert(!fake.loss_calls && !vk_device_is_lost_no_report(&vk));
    }
    /* Application-ordered rebind over an existing binding unbinds immediately

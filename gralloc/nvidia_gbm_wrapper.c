@@ -647,6 +647,7 @@ struct nvg_bo {
 	VkDeviceSize stg_size;
 	bool stg_coherent;
 	bool locked;          /* between map and unmap */
+	unsigned linear_maps; /* live mmap()s of a LINEAR dma-buf (atomic) */
 };
 
 struct nvg_map {
@@ -1179,6 +1180,11 @@ static void nvg_free(struct gbm_bo *gbm_bo)
 	if (!bo)
 		return;
 	LOGT("free bo %p (fd %d)", (void *)bo, bo->fd);
+	const unsigned live = __atomic_load_n(&bo->linear_maps, __ATOMIC_RELAXED);
+	if (live)
+		LOGE("free bo %p: %u CPU mapping(s) still live (unmap never called); the dma-buf "
+		     "stays allocated until they are unmapped",
+		     (void *)bo, live);
 	if (bo->img != VK_NULL_HANDLE || bo->stg != VK_NULL_HANDLE) {
 		pthread_mutex_lock(&g_xfer_lock);
 		if (bo->locked)
@@ -1307,15 +1313,20 @@ static void tiled_release_locked(struct nvg_bo *bo)
 	struct nvg_vk *vk = &g_vk; /* only set up buffers have handles, so the device exists */
 	if (bo->stg != VK_NULL_HANDLE)
 		vk->DestroyBuffer(vk->device, bo->stg, NULL);
+	/* Unmap before the free: a CPU mapping is never live while its memory
+	 * is freed (the NVIDIA driver itself orders free as RM unmap, munmap,
+	 * RM free). */
+	if (bo->stg_ptr != NULL)
+		vk->UnmapMemory(vk->device, bo->stg_mem);
+	bo->stg_ptr = NULL;
 	if (bo->stg_mem != VK_NULL_HANDLE)
-		vk->FreeMemory(vk->device, bo->stg_mem, NULL); /* also unmaps it */
+		vk->FreeMemory(vk->device, bo->stg_mem, NULL);
 	if (bo->img != VK_NULL_HANDLE)
 		vk->DestroyImage(vk->device, bo->img, NULL);
 	if (bo->img_mem != VK_NULL_HANDLE)
 		vk->FreeMemory(vk->device, bo->img_mem, NULL); /* drops the import's dma-buf ref */
 	bo->stg = VK_NULL_HANDLE;
 	bo->stg_mem = VK_NULL_HANDLE;
-	bo->stg_ptr = NULL;
 	bo->img = VK_NULL_HANDLE;
 	bo->img_mem = VK_NULL_HANDLE;
 	bo->locked = false;
@@ -1477,6 +1488,7 @@ static bool tiled_setup_locked(struct nvg_vk *vk, struct nvg_bo *bo, const struc
 	if (r == VK_SUCCESS)
 		r = vk->MapMemory(vk->device, bo->stg_mem, 0, VK_WHOLE_SIZE, 0, &bo->stg_ptr);
 	if (r != VK_SUCCESS) {
+		bo->stg_ptr = NULL; /* nothing to unmap */
 		LOGE("lock bo %p: staging bind/map: %s (%d)", (void *)bo, vk_result_str(r), r);
 		goto fail;
 	}
@@ -1764,6 +1776,7 @@ static void nvg_map_impl(struct gbm_bo *gbm_bo, int w, int h, uint32_t flags, vo
 	m->size = (size_t)bo->size;
 	m->tiled = false;
 	m->flags = flags;
+	__atomic_add_fetch(&bo->linear_maps, 1, __ATOMIC_RELAXED);
 	*addr = p;
 	*map_data = m;
 	LOGT("map bo %p -> %p (%zu bytes)", (void *)bo, p, m->size);
@@ -1787,6 +1800,8 @@ static void nvg_unmap_impl(struct gbm_bo *gbm_bo, void *map_data, uint32_t flags
 		     strerror(-sr));
 	if (munmap(m->addr, m->size))
 		LOGE("unmap bo %p: munmap(%p): %s", (void *)bo, m->addr, strerror(errno));
+	else
+		__atomic_sub_fetch(&bo->linear_maps, 1, __ATOMIC_RELAXED);
 	LOGT("unmap bo %p (%p)", (void *)bo, m->addr);
 	free(m);
 }

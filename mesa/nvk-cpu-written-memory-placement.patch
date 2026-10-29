@@ -1,0 +1,243 @@
+nvk: no CPU writes into driver-owned video memory through BAR1 (tables, pools); system-memory host-visible type first.
+
+RM's BAR1 mapping-reuse cache (open-gpu-kernel-modules src/nvidia/src/kernel/gpu/mem_mgr/mapping_reuse.c)
+keys mappings by memory-descriptor pointer, and _kbusDestroyMemdescBar1Cb leaves the reuse entry, its
+BAR1 VA and PTEs behind when a memory descriptor is destroyed while BAR1-mapped. A later BAR1 mapping
+of another allocation that reuses that descriptor address hits the stale entry and the CPU reads and
+writes somebody else's pages: copies and clears come back as zeros or stale values, texture fetches
+through zero headers fault. Any process on the GPU can leave such entries, the stock desktop clients
+included. The stock driver is not exposed: it never writes driver-owned video memory with the CPU.
+
+Follow the stock driver's layout (libnvidia-eglcore 615.71.09):
+* the system-memory HOST_VISIBLE|HOST_COHERENT|HOST_CACHED type precedes the BAR type, as stock
+  lists its system-memory host-visible types before BAR VRAM;
+* texture/sampler header tables stay in video memory without a CPU mapping and are written through
+  the upload queue, whose copies every later queue submission waits for (nvk_queue.c); stock fills
+  its header pools with copy-engine copies from a system-memory staging ring at the next submission
+  (staged upload at ELF 0xa83c90) and its 3D/compute channels acquire them before the command buffer
+  (shader code already goes this way, nvk-shader-upload-publish.patch);
+* freed header slots are not cleared (stock writes nothing on vkDestroyImageView);
+* descriptor pools, events and indirect execution sets are system memory.
+
+Command/upload memory is handled by nvk-gpu-written-command-memory.patch (GPU-written with
+inline-to-memory from the pushbuffer, as the stock driver writes its per-dispatch data).
+
+diff --git a/src/nouveau/vulkan/nvk_descriptor_set.c b/src/nouveau/vulkan/nvk_descriptor_set.c
+index e9d95d72204..9ae2d851a2a 100644
+--- a/src/nouveau/vulkan/nvk_descriptor_set.c
++++ b/src/nouveau/vulkan/nvk_descriptor_set.c
+@@ -736,8 +736,10 @@ nvk_CreateDescriptorPool(VkDevice _device,
+             return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+          }
+       } else {
++         /* Descriptor sets are written by the CPU: system memory, never
++          * video memory through BAR1. */
+          result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base,
+-                                             mem_size, 0, NVKMD_MEM_LOCAL,
++                                             mem_size, 0, NVKMD_MEM_GART,
+                                              NVKMD_MEM_MAP_WR, &pool->mem);
+          if (result != VK_SUCCESS) {
+             nvk_destroy_descriptor_pool(dev, pAllocator, pool);
+diff --git a/src/nouveau/vulkan/nvk_descriptor_table.c b/src/nouveau/vulkan/nvk_descriptor_table.c
+index 4bb5e1d8942..d3b775a16f4 100644
+--- a/src/nouveau/vulkan/nvk_descriptor_table.c
++++ b/src/nouveau/vulkan/nvk_descriptor_table.c
+@@ -6,6 +6,7 @@
+ 
+ #include "nvk_device.h"
+ #include "nvk_physical_device.h"
++#include "nvk_upload_queue.h"
+ 
+ #include <sys/mman.h>
+ 
+@@ -68,8 +69,17 @@ nvk_descriptor_table_init(struct nvk_device *dev,
+    assert(util_is_power_of_two_nonzero(min_descriptor_count));
+    assert(util_is_power_of_two_nonzero(max_descriptor_count));
+ 
++   /* Texture and sampler headers live in video memory the CPU never maps;
++    * their bytes reach it through the upload queue (a GPU copy that every
++    * later queue submission waits for, nvk_queue.c), like shader code
++    * without a full BAR. The stock driver keeps its header pools the same
++    * way: VIDMEM without a CPU mapping, filled by copy-engine copies from a
++    * system-memory staging ring at the next submission, which the 3D and
++    * compute channels acquire before the command buffer
++    * (libnvidia-eglcore 615.71.09, staged upload at ELF 0xa83c90). CPU
++    * writes to video memory through BAR1 are avoided entirely. */
+    result = nvk_mem_arena_init(dev, &table->arena, NVKMD_MEM_LOCAL,
+-                               NVKMD_MEM_MAP_WR, true /* contiguous */,
++                               0 /* map_flags */, true /* contiguous */,
+                                max_descriptor_count * descriptor_size);
+    if (result != VK_SUCCESS)
+       return result;
+@@ -98,38 +108,25 @@ nvk_descriptor_table_finish(struct nvk_device *dev,
+    vk_free(&dev->vk.alloc, table->free_table);
+ }
+ 
+-static void *
+-nvk_descriptor_table_map_locked(struct nvk_descriptor_table *table,
+-                                uint32_t index)
+-{
+-   assert(index < table->alloc);
+-   assert(BITSET_TEST(table->in_use, index));
+-
+-   uint32_t offset_B = index * table->desc_size;
+-   return nvk_contiguous_mem_arena_map_offset(&table->arena, offset_B,
+-                                              table->desc_size);
+-}
+-
+ static void
+-nvk_descriptor_table_write_locked(struct nvk_descriptor_table *table,
++nvk_descriptor_table_remove_locked(struct nvk_device *dev,
++                                   struct nvk_descriptor_table *table,
++                                   uint32_t index);
++
++static VkResult
++nvk_descriptor_table_write_locked(struct nvk_device *dev,
++                                  struct nvk_descriptor_table *table,
+                                   uint32_t index,
+                                   const void *desc_data, size_t desc_size)
+ {
+-   void *map = nvk_descriptor_table_map_locked(table, index);
+-
++   assert(index < table->alloc);
++   assert(BITSET_TEST(table->in_use, index));
+    assert(desc_size == table->desc_size);
+-   memcpy(map, desc_data, table->desc_size);
+-   nvk_mem_arena_set_map_dirty(&table->arena);
+-}
+ 
+-static void
+-nvk_descriptor_table_clear_locked(struct nvk_descriptor_table *table,
+-                                  uint32_t index)
+-{
+-   void *map = nvk_descriptor_table_map_locked(table, index);
+-
+-   memset(map, 0, table->desc_size);
+-   nvk_mem_arena_set_map_dirty(&table->arena);
++   const uint64_t addr = nvk_contiguous_mem_arena_base_address(&table->arena) +
++                         (uint64_t)index * table->desc_size;
++   return nvk_upload_queue_upload(dev, &dev->upload, addr,
++                                  desc_data, table->desc_size);
+ }
+ 
+ static VkResult
+@@ -200,9 +197,12 @@ nvk_descriptor_table_add_locked(struct nvk_device *dev,
+    if (result != VK_SUCCESS)
+       return result;
+ 
+-   nvk_descriptor_table_write_locked(table, *index_out, desc_data, desc_size);
++   result = nvk_descriptor_table_write_locked(dev, table, *index_out,
++                                              desc_data, desc_size);
++   if (result != VK_SUCCESS)
++      nvk_descriptor_table_remove_locked(dev, table, *index_out);
+ 
+-   return VK_SUCCESS;
++   return result;
+ }
+ 
+ 
+@@ -230,7 +230,10 @@ nvk_descriptor_table_insert_locked(struct nvk_device *dev,
+    if (result != VK_SUCCESS)
+       return result;
+ 
+-   nvk_descriptor_table_write_locked(table, index, desc_data, desc_size);
++   result = nvk_descriptor_table_write_locked(dev, table, index,
++                                              desc_data, desc_size);
++   if (result != VK_SUCCESS)
++      nvk_descriptor_table_remove_locked(dev, table, index);
+ 
+    return result;
+ }
+@@ -284,7 +287,10 @@ nvk_descriptor_table_remove_locked(struct nvk_device *dev,
+ {
+    assert(BITSET_TEST(table->in_use, index));
+ 
+-   nvk_descriptor_table_clear_locked(table, index);
++   /* The freed slot keeps its old header bytes until the next writer of the
++    * slot replaces them through the upload queue; nothing may reference a
++    * freed descriptor. The stock driver does not clear freed header slots
++    * either (vkDestroyImageView writes nothing). */
+ 
+    /* There may be duplicate entries in the free table.  For most operations,
+     * this is fine as we always consult nvk_descriptor_table::in_use when
+diff --git a/src/nouveau/vulkan/nvk_device.c b/src/nouveau/vulkan/nvk_device.c
+index dd54d53f5a9..55c3279ef4d 100644
+--- a/src/nouveau/vulkan/nvk_device.c
++++ b/src/nouveau/vulkan/nvk_device.c
+@@ -447,8 +447,10 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
+       if (result != VK_SUCCESS)
+          goto fail_edb_bview_cache;
+ 
++      /* Events are written and read by the CPU: system memory, as every
++       * other CPU-written allocation of the driver. */
+       result = nvk_heap_init(dev, &dev->event_heap,
+-                             NVKMD_MEM_LOCAL | NVKMD_MEM_COHERENT,
++                             NVKMD_MEM_GART | NVKMD_MEM_COHERENT,
+                              NVKMD_MEM_MAP_WR,
+                              0 /* overalloc */, false /* contiguous */);
+       if (result != VK_SUCCESS)
+diff --git a/src/nouveau/vulkan/nvk_indirect_execution_set.c b/src/nouveau/vulkan/nvk_indirect_execution_set.c
+index 155ed8a98f7..0360ffe26a6 100644
+--- a/src/nouveau/vulkan/nvk_indirect_execution_set.c
++++ b/src/nouveau/vulkan/nvk_indirect_execution_set.c
+@@ -309,8 +309,9 @@ nvk_CreateIndirectExecutionSetEXT(VkDevice _device,
+    ies->stride_B = align(ies->stride_B, pdev->info.nc_atom_size_B);
+ 
+    size_t size = ies->count * (size_t)ies->stride_B;
++   /* Written by the CPU: system memory, never video memory through BAR1. */
+    result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base,
+-                                       size, 0, NVKMD_MEM_LOCAL,
++                                       size, 0, NVKMD_MEM_GART,
+                                        NVKMD_MEM_MAP_WR, &ies->mem);
+    if (result != VK_SUCCESS) {
+       vk_object_free(&dev->vk, pAllocator, ies);
+diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_physical_device.c
+index 68da70ccddf..3f7b1987b2d 100644
+--- a/src/nouveau/vulkan/nvk_physical_device.c
++++ b/src/nouveau/vulkan/nvk_physical_device.c
+@@ -1673,6 +1673,7 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
+       goto fail_disk_cache;
+    }
+ 
++   int32_t bar_type_heap_idx = -1;
+    if (pdev->info.vram_size_B > 0) {
+       uint32_t vram_heap_idx = pdev->mem_heap_count++;
+       uint32_t bar_heap_idx = vram_heap_idx;
+@@ -1700,14 +1701,8 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
+          .heapIndex = vram_heap_idx,
+       };
+ 
+-      if (pdev->info.cls_eng3d >= MAXWELL_A) {
+-         pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType) {
+-            .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+-                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+-                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+-            .heapIndex = bar_heap_idx,
+-         };
+-      }
++      if (pdev->info.cls_eng3d >= MAXWELL_A)
++         bar_type_heap_idx = bar_heap_idx;
+    }
+ 
+    uint32_t sysmem_heap_idx = pdev->mem_heap_count++;
+@@ -1750,6 +1745,20 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
+       };
+    }
+ 
++   /* The BAR type comes after the system-memory host-visible type, so an
++    * application that takes the first HOST_VISIBLE | HOST_COHERENT type gets
++    * system memory, as with the stock driver (its system-memory host-visible
++    * types precede the BAR VRAM type). Neither type's flags are a subset of
++    * the other's, so the Vulkan ordering rules allow both orders. */
++   if (bar_type_heap_idx >= 0) {
++      pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType) {
++         .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
++                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
++         .heapIndex = bar_type_heap_idx,
++      };
++   }
++
+    assert(pdev->mem_heap_count <= ARRAY_SIZE(pdev->mem_heaps));
+    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));
+ 

@@ -502,7 +502,8 @@ nvrm_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
    nvrm_slm_ensure(ctx, si->slm_size, si->crs_size);
    /* The handle table below writes this batch slot's texture pool: the
     * launch push must not flush (rotate the slot) after it. */
-   nvrm_push_reserve(ctx, 96);
+   const uint32_t tex_write_dw = nvrm_tex_pool_write_dw(cs->tex_units + cs->image_units);
+   nvrm_push_reserve(ctx, 96 + tex_write_dw);
    nvrm_texture_reserve(ctx, cs->tex_units + cs->image_units);
 
    /* Descriptor table (SSBOs, UBOs past block 0, gl_NumWorkGroups) and the
@@ -568,7 +569,7 @@ nvrm_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
    const uint64_t qmd_addr = nvrm_resource(qbuf)->bo.va + qoff;
    pipe_resource_reference(&qbuf, NULL);
 
-   struct nv_push push = nvrm_push_begin(ctx, 96);
+   struct nv_push push = nvrm_push_begin(ctx, 96 + tex_write_dw);
    struct nv_push *p = &push;
 
    /* GL orders a dispatch after earlier rendering (render to texture,
@@ -578,6 +579,9 @@ nvrm_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
     * descriptor table were written by the CPU. */
    P_IMMD(p, NV9097, WAIT_FOR_IDLE, 0);
    nvrm_emit_invalidate_shader_data(screen, p);
+   /* Pool entries the handle table added, before the header/sampler cache
+    * invalidates below. */
+   nvrm_tex_pool_write(ctx, p, true);
 
    /* Compute texture header/sampler pools: the context's pools, as
     * nvk_queue_state_update binds the same pools on both classes

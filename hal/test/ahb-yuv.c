@@ -549,7 +549,10 @@ static void run_case(const struct ycase *c) {
 /* layouts the HAL must refuse loudly, not mis-sample */
 static void negative(void) {
     printf("negative cases\n");
-    struct fake_ahb *f = fake_yuv(DRM_FORMAT_NV12, 256, 128, 128, 0, -1);
+    /* 120 rows: the planes end 3072 B before the carrier's last 4 KiB row, so the CbCr plane moved by
+     * 16 B below still lies inside the dma-buf and only its alignment is wrong (with 128 rows the carrier
+     * ends exactly at the CbCr plane and the moved plane is refused as out of range instead). */
+    struct fake_ahb *f = fake_yuv(DRM_FORMAT_NV12, 256, 120, 120, 0, -1);
     AHardwareBuffer *ahb = (AHardwareBuffer *)f;
     VkAndroidHardwareBufferFormatPropertiesANDROID fp = {.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID};
     VkAndroidHardwareBufferPropertiesANDROID pp = {.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID, .pNext = &fp};
@@ -571,7 +574,7 @@ static void negative(void) {
     VkExternalMemoryImageCreateInfo emi = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, .pNext = &xf,
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID};
     VkImageCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = &emi, .imageType = VK_IMAGE_TYPE_2D,
-                             .format = VK_FORMAT_UNDEFINED, .extent = {256, 128, 1}, .mipLevels = 1, .arrayLayers = 1,
+                             .format = VK_FORMAT_UNDEFINED, .extent = {256, 120, 1}, .mipLevels = 1, .arrayLayers = 1,
                              .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                              .usage = VK_IMAGE_USAGE_SAMPLED_BIT};
     VkImage img;

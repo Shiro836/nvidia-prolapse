@@ -127,6 +127,18 @@ SET_PIPELINE_PROGRAM_PREFETCH never covers the neighbouring program. Tests:
 `tests/vk-shader-reuse.c` (recycled ranges, every pixel checked) and `rm/tools/nvcap_publish.py`
 on a push capture (every program address used only after its copy, the acquire and the
 invalidate; prefetch inside the copied range).
+`nvk-cpu-written-memory-placement.patch` + `nvk-gpu-written-command-memory.patch`: the driver never
+writes its own video memory with the CPU, as the proprietary driver (libnvidia-eglcore 615.71.09).
+RM's BAR1 mapping-reuse cache keys mappings by memory-descriptor pointer and keeps a reuse entry
+whose descriptor was destroyed while BAR1-mapped (`mapping_reuse.c`, `_kbusDestroyMemdescBar1Cb` in
+open-gpu-kernel-modules); a later BAR1 mapping can hit it and the CPU then reads and writes another
+allocation's pages, whichever process left the entry. The system-memory host-visible type precedes
+the BAR type; texture/sampler headers are written through the upload queue into unmapped video
+memory; descriptor pools, events, indirect execution sets, CPU uploads and conditional-rendering
+scratch are system memory; root descriptor tables, QMDs and push descriptor sets are written by the
+GPU with inline-to-memory from the pushbuffer into video memory the CPU never maps (system memory
+there costs 3.4x GPU time on a dispatch-heavy command buffer); the zero page is zeroed through the
+upload queue.
 `nvk-prevolta-modifier-memory-types.patch` (with the RM backend's `allocate_block_linear`):
 memory for a block-linear DRM-modifier image carries the image's kind on the physical allocation
 (NVOS32 FORMAT BLOCK_LINEAR, generic kind, no compression), as NVK does on nouveau
