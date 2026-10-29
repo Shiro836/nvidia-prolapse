@@ -70,6 +70,24 @@ impl PteKind {
     }
 }
 
+/// The device's uncompressed generic block-linear kind as the RM reports it
+/// (`NvRmInfo::generic_kind`, a `u32`): [`PteKind::GENERIC_TURING`] from
+/// Turing on, [`PteKind::GENERIC_FERMI`] before. Kept at the RM's width so
+/// that a value no PTE kind has matches no kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GenericKind(u32);
+
+impl GenericKind {
+    /// The kind the RM reported.
+    pub const fn new(reported: u32) -> Self {
+        Self(reported)
+    }
+    /// Whether `kind` is the generic kind.
+    pub fn is(self, kind: PteKind) -> bool {
+        self.0 == u32::from(kind.get())
+    }
+}
+
 /// Where the RM places an allocation (`NV_RM_PLACEMENT_*`, `mesa/nv_rm.h`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
@@ -129,8 +147,7 @@ pub enum MemError {
 }
 
 /// The placement, size and alignment the RM is asked for (`nvkmd_rm.c`
-/// `rm_mem_alloc_kind`). `generic_kind` is the device's uncompressed generic
-/// kind (`NvRmInfo::generic_kind`).
+/// `rm_mem_alloc_kind`).
 ///
 /// # Errors
 /// [`MemError::PoolBlock`] for a pool block request outside its contract,
@@ -140,7 +157,7 @@ pub fn place(
     alignment: ByteSize,
     flags: MemFlags,
     kind: PteKind,
-    generic_kind: PteKind,
+    generic_kind: GenericKind,
 ) -> Result<Placed, MemError> {
     let mut placed = Placed {
         placement: if flags.intersects(MemFlags::GART) {
@@ -172,7 +189,7 @@ pub fn place(
     if kind == PteKind::PITCH
         && placed.placement == Placement::Vram
         && !flags.intersects(MemFlags::CAN_MAP.union(MemFlags::SHARED))
-        && generic_kind == PteKind::GENERIC_TURING
+        && generic_kind.is(PteKind::GENERIC_TURING)
         && placed.size.get().is_multiple_of(BIG_PAGE.get())
     {
         placed.placement = Placement::VramCompressible;
@@ -222,15 +239,15 @@ pub fn tiled(
     kind: PteKind,
     tile: u16,
     flags: MemFlags,
-    generic_kind: PteKind,
+    generic_kind: GenericKind,
 ) -> Result<Tiled, TiledError> {
     if kind == PteKind::PITCH && tile == 0 {
         return Ok(Tiled::Plain);
     }
-    if kind != generic_kind || tile & !0x70 != 0 || tile >> 4 > 5 {
+    if !generic_kind.is(kind) || tile & !0x70 != 0 || tile >> 4 > 5 {
         return Err(TiledError::Unsupported);
     }
-    if generic_kind == PteKind::GENERIC_FERMI
+    if generic_kind.is(PteKind::GENERIC_FERMI)
         && flags.intersects(MemFlags::CAN_MAP)
         && !flags.intersects(MemFlags::GART)
     {
@@ -245,18 +262,14 @@ mod tests {
 
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
+    const TURING: GenericKind = GenericKind::new(0x06);
+    const FERMI: GenericKind = GenericKind::new(0xfe);
 
     fn bytes(value: u64) -> ByteSize {
         ByteSize::new(value)
     }
     fn place_turing(size: u64, alignment: u64, flags: MemFlags) -> Result<Placed, MemError> {
-        place(
-            bytes(size),
-            bytes(alignment),
-            flags,
-            PteKind::PITCH,
-            PteKind::GENERIC_TURING,
-        )
+        place(bytes(size), bytes(alignment), flags, PteKind::PITCH, TURING)
     }
 
     #[test]
@@ -314,7 +327,7 @@ mod tests {
             bytes(4 * KIB),
             MemFlags::VRAM,
             PteKind::GENERIC_TURING,
-            PteKind::GENERIC_TURING,
+            TURING,
         );
         assert_eq!(block_linear.map(|p| p.placement), Ok(Placement::Vram));
         let fermi = place(
@@ -322,7 +335,7 @@ mod tests {
             bytes(4 * KIB),
             MemFlags::VRAM,
             PteKind::PITCH,
-            PteKind::GENERIC_FERMI,
+            FERMI,
         );
         assert_eq!(fermi.map(|p| p.placement), Ok(Placement::Vram));
     }
@@ -354,7 +367,7 @@ mod tests {
             bytes(4 * KIB),
             MemFlags::POOL_BLOCK,
             PteKind::GENERIC_TURING,
-            PteKind::GENERIC_TURING,
+            TURING,
         );
         assert!(kinded.is_err());
     }
@@ -364,12 +377,12 @@ mod tests {
         // nvkmd_rm.c:887-903.
         let turing = PteKind::GENERIC_TURING;
         assert_eq!(
-            tiled(PteKind::PITCH, 0, MemFlags::VRAM, turing),
+            tiled(PteKind::PITCH, 0, MemFlags::VRAM, TURING),
             Ok(Tiled::Plain)
         );
         for tile in [0x00, 0x10, 0x50] {
             assert_eq!(
-                tiled(turing, tile, MemFlags::VRAM, turing),
+                tiled(turing, tile, MemFlags::VRAM, TURING),
                 Ok(Tiled::Kind(turing))
             );
         }
@@ -380,29 +393,39 @@ mod tests {
             (PteKind::new(0xdb), 0x10),
         ] {
             assert_eq!(
-                tiled(kind, tile, MemFlags::VRAM, turing),
+                tiled(kind, tile, MemFlags::VRAM, TURING),
                 Err(TiledError::Unsupported),
                 "kind {kind:?} tile {tile:#x}"
             );
         }
         // The kind must be the device's generic kind even with tile mode 0.
         assert_eq!(
-            tiled(PteKind::PITCH, 0x10, MemFlags::VRAM, turing),
+            tiled(PteKind::PITCH, 0x10, MemFlags::VRAM, TURING),
             Err(TiledError::Unsupported)
         );
         let fermi = PteKind::GENERIC_FERMI;
         let mappable = MemFlags::VRAM.union(MemFlags::CAN_MAP);
         assert_eq!(
-            tiled(fermi, 0x10, mappable, fermi),
+            tiled(fermi, 0x10, mappable, FERMI),
             Err(TiledError::MappableBlockLinearBeforeTuring)
         );
         assert_eq!(
-            tiled(fermi, 0x10, MemFlags::GART.union(MemFlags::CAN_MAP), fermi),
+            tiled(fermi, 0x10, MemFlags::GART.union(MemFlags::CAN_MAP), FERMI),
             Ok(Tiled::Kind(fermi))
         );
         assert_eq!(
-            tiled(turing, 0x10, mappable, turing),
+            tiled(turing, 0x10, mappable, TURING),
             Ok(Tiled::Kind(turing))
+        );
+        // A reported generic kind no PTE kind has matches none.
+        let wide = GenericKind::new(0x106);
+        assert_eq!(
+            tiled(turing, 0x10, MemFlags::VRAM, wide),
+            Err(TiledError::Unsupported)
+        );
+        assert_eq!(
+            tiled(PteKind::PITCH, 0, MemFlags::VRAM, wide),
+            Ok(Tiled::Plain)
         );
     }
 }
