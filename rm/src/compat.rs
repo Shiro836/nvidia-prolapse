@@ -574,7 +574,7 @@ mod tests {
         }
         assert_eq!(
             (present, size_only, with_range, with_wc),
-            (90, 2, 88, 57),
+            (91, 2, 89, 58),
             "update only after rerunning the exact-tag static BAR1 C oracle"
         );
     }
@@ -923,7 +923,7 @@ mod tests {
             assert_eq!(wire.bytes, [0x22, 0, 0, 0, 10, 0, 0, 0], "{version}");
             checked += 1;
         }
-        assert_eq!(checked, 225);
+        assert_eq!(checked, 226);
     }
     #[test]
     fn cpu_unmap_cookie_preserves_full_width_and_public_status_offset() {
@@ -962,7 +962,7 @@ mod tests {
             checked += 1;
         }
         assert_eq!(
-            checked, 225,
+            checked, 226,
             "update only after running the exact-tag C oracle"
         );
     }
@@ -1106,21 +1106,21 @@ mod tests {
             fences += usize::from(crate::fences::validate_compat(c).is_ok());
         }
         if !cfg!(miri) {
-            assert_eq!(clients, 225);
-            assert_eq!(external, 225);
-            assert_eq!(fences, 137);
+            assert_eq!(clients, 226);
+            assert_eq!(external, 226);
+            assert_eq!(fences, 138);
         }
     }
     #[test]
     fn exact_membership_and_unknown_version_are_distinct() {
-        assert_eq!(data::VERSIONS.len(), 335);
+        assert_eq!(data::VERSIONS.len(), 336);
         let client_abi = releases()
             .filter(|v| Compat::for_version(v).unwrap().require_client_abi().is_ok())
             .count();
         if cfg!(miri) {
             assert!(client_abi > 0);
         } else {
-            assert_eq!(client_abi, 225);
+            assert_eq!(client_abi, 226);
         }
         assert!(Compat::for_version("580.94.13").is_ok());
         assert!(Compat::for_version("580.94.14").is_err());
@@ -1139,7 +1139,7 @@ mod tests {
         );
         // Published OGKM releases probed like every other tag; each must
         // resolve to its measured profile, not to a neighbour's.
-        for version in ["580.196.07", "595.44.16", "595.112.07", "615.71.10"] {
+        for version in ["580.196.07", "595.44.16", "595.112.07", "615.71.10", "620.70.06"] {
             assert!(
                 Compat::for_version(version)
                     .unwrap()
